@@ -4138,6 +4138,10 @@ Demuxer
     opens the URL of the next playlist entry as soon the current URL is fully
     read.
 
+    This is most useful when reading small files where a significant portion of
+    the load time is spent creating a new demuxer thread, such as images, which
+    get fully prefetched.
+
     This does **not** work with URLs resolved by the ``youtube-dl`` wrapper,
     and it won't.
 

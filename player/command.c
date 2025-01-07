@@ -577,27 +577,6 @@ static int mp_property_file_size(void *ctx, struct m_property *prop,
     return m_property_int64_ro(action, arg, size);
 }
 
-static const char *find_non_filename_media_title(MPContext *mpctx)
-{
-    const char *name = mpctx->opts->media_title;
-    if (name && name[0])
-        return name;
-    if (mpctx->demuxer) {
-        name = mp_tags_get_str(mpctx->demuxer->metadata, "service_name");
-        if (name && name[0])
-            return name;
-        name = mp_tags_get_str(mpctx->demuxer->metadata, "title");
-        if (name && name[0])
-            return name;
-        name = mp_tags_get_str(mpctx->demuxer->metadata, "icy-title");
-        if (name && name[0])
-            return name;
-    }
-    if (mpctx->playing && mpctx->playing->title)
-        return mpctx->playing->title;
-    return NULL;
-}
-
 static int mp_property_media_title(void *ctx, struct m_property *prop,
                                    int action, void *arg)
 {

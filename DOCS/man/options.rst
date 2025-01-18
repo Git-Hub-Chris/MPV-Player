@@ -6116,6 +6116,11 @@ them.
     Defines the size of an edge border (default: 32) to initiate client side
     resizes events in the wayland contexts with touch events.
 
+``--wayland-ime=<yes|no>``
+    Enable keyboard input via an active input method (IME) (default: yes). The
+    input popup window, if there is any, is always positioned at the top left of the
+    window.
+
 ``--wayland-present=<yes|no>``
     Enable the use of wayland's presentation time protocol for more accurate
     frame presentation if it is supported by the compositor (default: ``yes``).

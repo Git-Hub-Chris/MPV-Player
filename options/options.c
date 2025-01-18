@@ -209,6 +209,7 @@ static const m_option_t mp_vo_opt_list[] = {
         M_RANGE(0, INT_MAX)},
     {"wayland-edge-pixels-touch", OPT_INT(wl_edge_pixels_touch),
         M_RANGE(0, INT_MAX)},
+    {"wayland-ime", OPT_BOOL(wl_ime)},
     {"wayland-present", OPT_BOOL(wl_present)},
 #endif
 #if HAVE_WIN32_DESKTOP
@@ -272,6 +273,7 @@ const struct m_sub_options vo_sub_opts = {
         .wl_content_type = -1,
         .wl_edge_pixels_pointer = 16,
         .wl_edge_pixels_touch = 32,
+        .wl_ime = true,
         .wl_present = true,
         .mmcss_profile = "Playback",
         .ontop_level = -1,

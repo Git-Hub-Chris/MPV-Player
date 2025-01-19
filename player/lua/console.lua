@@ -106,6 +106,7 @@ local matches = {}
 local selected_match = 1
 local first_match_to_print = 1
 local default_item
+local item_positions = {}
 
 local complete
 local cycle_through_suggestions
@@ -279,6 +280,24 @@ local function get_scaled_osd_dimensions()
     return dims.w / scale, dims.h /scale
 end
 
+local function get_line_height()
+    if not selectable_items then
+        return opts.font_size
+    end
+
+    local height = opts.font_size * 1.1
+
+    local style = mp.get_property('osd-border-style')
+
+    if style == 'background-box' then
+        height = height + mp.get_property_native('osd-shadow-offset') * 2
+    elseif style == 'opaque-box' then
+        height = height + mp.get_property_native('osd-outline-size') * 2
+    end
+
+    return height
+end
+
 local function calculate_max_log_lines()
     if not mp.get_property_native('vo-configured')
        or not mp.get_property_native('video-osd') then
@@ -291,7 +310,7 @@ local function calculate_max_log_lines()
     return math.floor((select(2, get_scaled_osd_dimensions())
                        * (1 - global_margins.t - global_margins.b)
                        - get_margin_y())
-                      / opts.font_size
+                      / get_line_height()
                       -- Subtract 1 for the input line and 0.5 for the empty
                       -- line between the log and the input line.
                       - 1.5)
@@ -588,8 +607,10 @@ local function update()
         -- Even with bottom-left anchoring,
         -- libass/ass_render.c:ass_render_event() subtracts --osd-margin-x from
         -- the maximum text width twice.
+        -- TODO: --osd-margin-x should scale with osd-width and PlayResX to make
+        -- the calculation accurate.
         local width_max = math.floor(
-            (osd_w - x - mp.get_property_native('osd-margin-x') * 2 / scale_factor())
+            (osd_w - x - mp.get_property_native('osd-margin-x') * 2)
             / opts.font_size * get_font_hw_ratio())
 
         local suggestions, rows = format_table(suggestion_buffer, width_max, max_lines)
@@ -601,31 +622,35 @@ local function update()
 
     local log_ass = ''
     local log_buffer = log_buffers[id]
-    local box = mp.get_property('osd-border-style') == 'background-box'
+    local line_height = get_line_height()
+    item_positions = {}
 
     for i = #log_buffer - math.min(max_lines, #log_buffer) + 1, #log_buffer do
         local log_item = style .. log_buffer[i].style .. ass_escape(log_buffer[i].text)
 
-        -- Put every selectable item in its own event to prevent libass from
-        -- drawing them taller than opts.font_size with taller fonts, which
-        -- makes the hovered item calculation inaccurate and clips the counter.
-        -- But not with background-box, because it makes it look bad by
-        -- overlapping the semitransparent backgrounds of every line.
-        if selectable_items and not box then
+        if selectable_items then
+            local item_y = y - (1.5 + #log_buffer - i) * line_height
             ass:new_event()
             ass:an(1)
-            ass:pos(x, y - (1.5 + #log_buffer - i) * opts.font_size)
+            ass:pos(x, item_y)
             ass:append(log_item)
+
+            if #matches <= max_lines or i > 1 then -- skip the counter
+                item_positions[#item_positions + 1] = { item_y - line_height, item_y }
+            end
         else
             log_ass = log_ass .. log_item .. '\\N'
         end
     end
 
+    if log_ass ~= '' then
+        log_ass = log_ass .. '\\N'
+    end
+
     ass:new_event()
     ass:an(1)
     ass:pos(x, y)
-    ass:append(log_ass .. '\\N')
-    ass:append(suggestion_ass)
+    ass:append(log_ass .. suggestion_ass)
     ass:append(style .. ass_escape(prompt) .. ' ' .. before_cur)
     ass:append(cglyph)
     ass:append(style .. after_cur)
@@ -893,27 +918,12 @@ local function handle_enter()
 end
 
 local function determine_hovered_item()
-    local height = select(2, get_scaled_osd_dimensions())
     local y = mp.get_property_native('mouse-pos').y / scale_factor()
-    local log_bottom_pos = height * (1 - global_margins.b)
-                           - get_margin_y()
-                           - 1.5 * opts.font_size
 
-    if y > log_bottom_pos then
-        return
-    end
-
-    local max_lines = calculate_max_log_lines()
-    -- Subtract 1 line for the position counter.
-    if #matches > max_lines then
-        max_lines = max_lines - 1
-    end
-    local last = math.min(first_match_to_print - 1 + max_lines, #matches)
-
-    local hovered_item = last - math.floor((log_bottom_pos - y) / opts.font_size)
-
-    if hovered_item >= first_match_to_print then
-        return hovered_item
+    for i, positions in ipairs(item_positions) do
+        if y >= positions[1] and y <= positions[2] then
+            return first_match_to_print - 1 + i
+        end
     end
 end
 

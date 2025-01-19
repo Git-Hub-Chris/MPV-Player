@@ -409,11 +409,13 @@ end
 
 local function fuzzy_find(needle, haystacks, case_sensitive)
     local result = require 'mp.fzy'.filter(needle, haystacks, case_sensitive)
-    if line ~= '' then -- Prevent table.sort() from reordering the items.
-        table.sort(result, function (i, j)
+    table.sort(result, function (i, j)
+        if i[3] ~= j[3] then
             return i[3] > j[3]
-        end)
-    end
+        end
+
+        return i[1] < j[1]
+    end)
     for i, value in ipairs(result) do
         result[i] = value[1]
     end
@@ -1626,6 +1628,7 @@ complete = function ()
     suggestion_buffer = {}
     selected_suggestion_index = 0
     completions = completions or {}
+    table.sort(completions)
     completion_pos = completion_pos or 1
     for i, match in ipairs(fuzzy_find(before_cur:sub(completion_pos),
                                       completions, opts.case_sensitive)) do
@@ -1914,6 +1917,7 @@ mp.register_script_message('complete', function(list, start_pos)
     suggestion_buffer = {}
     selected_suggestion_index = 0
     local completions = utils.parse_json(list)
+    table.sort(completions)
     completion_pos = start_pos
     completion_append = ''
     for i, match in ipairs(fuzzy_find(line:sub(completion_pos, cursor),

@@ -588,8 +588,10 @@ local function update()
         -- Even with bottom-left anchoring,
         -- libass/ass_render.c:ass_render_event() subtracts --osd-margin-x from
         -- the maximum text width twice.
+        -- TODO: --osd-margin-x should scale with osd-width and PlayResX to make
+        -- the calculation accurate.
         local width_max = math.floor(
-            (osd_w - x - mp.get_property_native('osd-margin-x') * 2 / scale_factor())
+            (osd_w - x - mp.get_property_native('osd-margin-x') * 2)
             / opts.font_size * get_font_hw_ratio())
 
         local suggestions, rows = format_table(suggestion_buffer, width_max, max_lines)

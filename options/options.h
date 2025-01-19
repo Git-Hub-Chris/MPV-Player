@@ -40,6 +40,7 @@ typedef struct mp_vo_opts {
     bool wl_disable_vsync;
     int wl_edge_pixels_pointer;
     int wl_edge_pixels_touch;
+    bool wl_ime;
     bool wl_present;
 
     float panscan;

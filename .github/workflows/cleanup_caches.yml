@@ -1,4 +1,7 @@
 name: Cleanup caches
+permissions:
+  contents: write
+  pull-requests: read
 
 on:
   workflow_run:

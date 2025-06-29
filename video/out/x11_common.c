@@ -1923,14 +1923,32 @@ static void vo_x11_update_geometry(struct vo *vo)
     Window dummy_win;
     Window win = x11->parent ? x11->parent : x11->window;
     x11->winrc = (struct mp_rect){0, 0, 0, 0};
+    x11->last_geometry = (struct m_geometry){0};
     if (win) {
-        XGetGeometry(x11->display, win, &dummy_win, &dummy_int, &dummy_int,
+        int r_x = 0, r_y = 0;
+        XGetGeometry(x11->display, win, &dummy_win, &r_x, &r_y,
                      &w, &h, &dummy_int, &dummy_uint);
         if (w > INT_MAX || h > INT_MAX)
             w = h = 0;
         XTranslateCoordinates(x11->display, win, x11->rootwin, 0, 0,
                               &x, &y, &dummy_win);
         x11->winrc = (struct mp_rect){x, y, x + w, y + h};
+        if (!x11->window_hidden) {
+            // Ah, the pain of X11.
+            long params[4] = {0};
+            x11_get_property_copy(x11, win, XA(x11, _NET_FRAME_EXTENTS),
+                                  XA_CARDINAL, 32, params, sizeof(params));
+            x11->last_geometry = (struct m_geometry){
+                .x = x - params[0],
+                .y = y - params[2],
+                .w = w,
+                .h = h,
+                .xy_valid = 1,
+                .wh_valid = w > 0 && h > 0,
+            };
+            x11->opts->geometry = x11->last_geometry;
+            m_config_cache_write_opt(x11->opts_cache, &x11->opts->geometry);
+        }
     }
     struct xrandr_display *disp = get_xrandr_display(vo, x11->winrc);
     // Try to fallback to something reasonable if we have no disp yet
@@ -2061,34 +2079,6 @@ static void vo_x11_set_geometry(struct vo *vo)
 {
     struct vo_x11_state *x11 = vo->x11;
 
-    if (!x11->window)
-        return;
-
-    vo_x11_config_vo_window(vo);
-}
-
-bool vo_x11_check_visible(struct vo *vo)
-{
-    struct vo_x11_state *x11 = vo->x11;
-    struct mp_vo_opts *opts = x11->opts;
-    return !x11->hidden || opts->force_render;
-}
-
-static void vo_x11_set_input_region(struct vo *vo, bool passthrough)
-{
-    struct vo_x11_state *x11 = vo->x11;
-
-    if (passthrough) {
-        XRectangle rect = {0, 0, 0, 0};
-        Region region = XCreateRegion();
-        XUnionRectWithRegion(&rect, region, region);
-        XShapeCombineRegion(x11->display, x11->window, ShapeInput, 0, 0,
-                            region, ShapeSet);
-        XDestroyRegion(region);
-    } else {
-        XShapeCombineMask(x11->display, x11->window, ShapeInput, 0, 0,
-                          0, ShapeSet);
-    }
 }
 
 int vo_x11_control(struct vo *vo, int *events, int request, void *arg)
@@ -2118,23 +2108,7 @@ int vo_x11_control(struct vo *vo, int *events, int request, void *arg)
                 vo_x11_minimize(vo);
             if (opt == &opts->window_maximized)
                 vo_x11_maximize(vo);
-            if (opt == &opts->cursor_passthrough)
-                vo_x11_set_input_region(vo, opts->cursor_passthrough);
-            if (opt == &opts->x11_present)
-                xpresent_set(x11);
-            if (opt == &opts->keepaspect || opt == &opts->keepaspect_window)
-                vo_x11_sizehint(vo, x11->fs ? x11->nofsrc : x11->winrc, false);
-            if (opt == &opts->geometry || opt == &opts->autofit ||
-                opt == &opts->autofit_smaller || opt == &opts->autofit_larger)
-            {
-                if (opts->window_maximized && !opts->fullscreen) {
-                    x11->opts->window_maximized = false;
-                    m_config_cache_write_opt(x11->opts_cache,
-                            &x11->opts->window_maximized);
-                    vo_x11_maximize(vo);
-                }
-                vo_x11_set_geometry(vo);
-            }
+
         }
         return VO_TRUE;
     }

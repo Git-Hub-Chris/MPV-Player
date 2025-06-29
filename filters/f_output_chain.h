@@ -77,7 +77,7 @@ bool mp_output_chain_update_filters(struct mp_output_chain *p,
 
 // Desired audio speed, with resample being strict resampling.
 void mp_output_chain_set_audio_speed(struct mp_output_chain *p,
-                                     double speed, double resample);
+                                     double speed, double resample, double drop);
 
 // Total delay incurred by the filter chain, as measured by the recent filtered
 // frames. The intention is that this sums the measured delays for each filter,
@@ -85,3 +85,6 @@ void mp_output_chain_set_audio_speed(struct mp_output_chain *p,
 // due to the change.
 // Makes sense for audio only.
 double mp_output_get_measured_total_delay(struct mp_output_chain *p);
+
+// Check if deinterlace user filter is inserted
+bool mp_output_chain_deinterlace_active(struct mp_output_chain *p);

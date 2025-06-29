@@ -16,6 +16,7 @@ static const struct spirv_compiler_fns *compilers[] = {
 #if HAVE_SHADERC
     [SPIRV_SHADERC] = &spirv_shaderc,
 #endif
+    NULL
 };
 
 static const struct m_opt_choice_alternatives compiler_choices[] = {
@@ -33,7 +34,7 @@ struct spirv_opts {
 #define OPT_BASE_STRUCT struct spirv_opts
 const struct m_sub_options spirv_conf = {
     .opts = (const struct m_option[]) {
-        OPT_CHOICE_C("spirv-compiler", compiler, 0, compiler_choices),
+        {"spirv-compiler", OPT_CHOICE_C(compiler, compiler_choices)},
         {0}
     },
     .size = sizeof(struct spirv_opts),

@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <EGL/eglext_angle.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dwmapi.h>
@@ -53,32 +54,30 @@ struct angle_opts {
     int d3d11_warp;
     int d3d11_feature_level;
     int egl_windowing;
-    int flip;
+    bool flip;
 };
 
 #define OPT_BASE_STRUCT struct angle_opts
 const struct m_sub_options angle_conf = {
     .opts = (const struct m_option[]) {
-        OPT_CHOICE("angle-renderer", renderer, 0,
-                   ({"auto", RENDERER_AUTO},
-                    {"d3d9", RENDERER_D3D9},
-                    {"d3d11", RENDERER_D3D11})),
-        OPT_CHOICE("angle-d3d11-warp", d3d11_warp, 0,
-                   ({"auto", -1},
-                    {"no", 0},
-                    {"yes", 1})),
-        OPT_CHOICE("angle-d3d11-feature-level", d3d11_feature_level, 0,
-                   ({"11_0", D3D_FEATURE_LEVEL_11_0},
-                    {"10_1", D3D_FEATURE_LEVEL_10_1},
-                    {"10_0", D3D_FEATURE_LEVEL_10_0},
-                    {"9_3", D3D_FEATURE_LEVEL_9_3})),
-        OPT_CHOICE("angle-egl-windowing", egl_windowing, 0,
-                   ({"auto", -1},
-                    {"no", 0},
-                    {"yes", 1})),
-        OPT_FLAG("angle-flip", flip, 0),
-        OPT_REPLACED("angle-max-frame-latency", "swapchain-depth"),
-        OPT_REMOVED("angle-swapchain-length", "controlled by --swapchain-depth"),
+        {"angle-renderer", OPT_CHOICE(renderer,
+            {"auto", RENDERER_AUTO},
+            {"d3d9", RENDERER_D3D9},
+            {"d3d11", RENDERER_D3D11})},
+        {"angle-d3d11-warp", OPT_CHOICE(d3d11_warp,
+            {"auto", -1},
+            {"no", 0},
+            {"yes", 1})},
+        {"angle-d3d11-feature-level", OPT_CHOICE(d3d11_feature_level,
+            {"11_0", D3D_FEATURE_LEVEL_11_0},
+            {"10_1", D3D_FEATURE_LEVEL_10_1},
+            {"10_0", D3D_FEATURE_LEVEL_10_0},
+            {"9_3", D3D_FEATURE_LEVEL_9_3})},
+        {"angle-egl-windowing", OPT_CHOICE(egl_windowing,
+            {"auto", -1},
+            {"no", 0},
+            {"yes", 1})},
+        {"angle-flip", OPT_BOOL(flip)},
         {0}
     },
     .defaults = &(const struct angle_opts) {
@@ -86,7 +85,7 @@ const struct m_sub_options angle_conf = {
         .d3d11_warp = -1,
         .d3d11_feature_level = D3D_FEATURE_LEVEL_11_0,
         .egl_windowing = -1,
-        .flip = 1,
+        .flip = true,
     },
     .size = sizeof(struct angle_opts),
 };
@@ -604,10 +603,10 @@ static bool angle_init(struct ra_ctx *ctx)
     };
     struct ra_gl_ctx_params params = {
         .swap_buffers = angle_swap_buffers,
-        .flipped = p->flipped,
         .external_swapchain = p->dxgi_swapchain ? &dxgi_swapchain_fns : NULL,
     };
 
+    gl->flipped = p->flipped;
     if (!ra_gl_ctx_init(ctx, gl, params))
         goto fail;
 
@@ -647,6 +646,7 @@ static int angle_control(struct ra_ctx *ctx, int *events, int request, void *arg
 const struct ra_ctx_fns ra_ctx_angle = {
     .type           = "opengl",
     .name           = "angle",
+    .description    = "Win32/ANGLE (via Direct3D)",
     .init           = angle_init,
     .reconfig       = angle_reconfig,
     .control        = angle_control,

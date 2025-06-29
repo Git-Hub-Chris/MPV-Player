@@ -484,9 +484,7 @@ class Common: NSObject {
     func windowDidChangeOcclusionState() {}
 
     @objc func control(_ vo: UnsafeMutablePointer<vo>,
-                       events: UnsafeMutablePointer<Int32>,
-                       request: UInt32,
-                       data: UnsafeMutableRawPointer?) -> Int32 {
+
         switch mp_voctrl(request) {
         case VOCTRL_CHECK_EVENTS:
             events.pointee |= Int32(checkEvents())
@@ -588,9 +586,7 @@ class Common: NSObject {
             return VO_TRUE
         case VOCTRL_GET_AMBIENT_LUX:
             if lightSensor != 0 {
-                let lux = data!.assumingMemoryBound(to: CDouble.self)
-                lux.pointee = lmuToLux(lastLmu)
-                return VO_TRUE
+
             }
             return VO_NOTIMPL
         case VOCTRL_GET_UNFS_WINDOW_SIZE:
@@ -615,7 +611,7 @@ class Common: NSObject {
             return VO_TRUE
         case VOCTRL_GET_DISPLAY_NAMES:
             let dnames = data!.assumingMemoryBound(to: UnsafeMutablePointer<UnsafeMutablePointer<Int8>?>?.self)
-            var array: UnsafeMutablePointer<UnsafeMutablePointer<Int8>?>?
+
             var count: Int32 = 0
             let displayName = getCurrentScreen()?.uniqueName ?? "Unknown"
 
@@ -639,7 +635,7 @@ class Common: NSObject {
             focus.pointee = NSApp.isActive
             return VO_TRUE
         case VOCTRL_UPDATE_WINDOW_TITLE:
-            let title = String(cString: data!.assumingMemoryBound(to: CChar.self))
+
             DispatchQueue.main.async {
                 self.title = title
             }

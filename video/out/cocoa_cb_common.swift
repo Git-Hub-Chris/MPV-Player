@@ -222,6 +222,7 @@ class CocoaCB: Common, EventSubscriber {
     var controlCallback: mp_render_cb_control_fn = { ( v, ctx, e, request, data ) -> Int32 in
         let ccb = unsafeBitCast(ctx, to: CocoaCB.self)
 
+
         guard let vo = v, let events = e else {
             ccb.log.warning("Unexpected nil value in Control Callback")
             return VO_FALSE
@@ -231,9 +232,7 @@ class CocoaCB: Common, EventSubscriber {
     }
 
     override func control(_ vo: UnsafeMutablePointer<vo>,
-                          events: UnsafeMutablePointer<Int32>,
-                          request: UInt32,
-                          data: UnsafeMutableRawPointer?) -> Int32 {
+
         switch mp_voctrl(request) {
         case VOCTRL_PREINIT:
             DispatchQueue.main.sync { self.preinit(vo) }

@@ -20,7 +20,6 @@
 
 #include "video/img_format.h"
 #include "fmt-conversion.h"
-#include "config.h"
 
 static const struct {
     int fmt;
@@ -36,7 +35,6 @@ static const struct {
     {IMGFMT_PAL8,  AV_PIX_FMT_PAL8},
     {IMGFMT_UYVY,  AV_PIX_FMT_UYVY422},
     {IMGFMT_NV12,  AV_PIX_FMT_NV12},
-    {IMGFMT_NV24,  AV_PIX_FMT_NV24},
     {IMGFMT_Y8,    AV_PIX_FMT_GRAY8},
     {IMGFMT_Y16, AV_PIX_FMT_GRAY16},
     {IMGFMT_420P,  AV_PIX_FMT_YUV420P},
@@ -54,6 +52,10 @@ static const struct {
 
     {IMGFMT_RGBA64, AV_PIX_FMT_RGBA64},
 
+#ifdef AV_PIX_FMT_X2RGB10
+    {IMGFMT_RGB30,  AV_PIX_FMT_X2RGB10},
+#endif
+
     {IMGFMT_VDPAU, AV_PIX_FMT_VDPAU},
     {IMGFMT_VIDEOTOOLBOX,   AV_PIX_FMT_VIDEOTOOLBOX},
     {IMGFMT_MEDIACODEC, AV_PIX_FMT_MEDIACODEC},
@@ -64,6 +66,7 @@ static const struct {
     {IMGFMT_CUDA, AV_PIX_FMT_CUDA},
     {IMGFMT_P010, AV_PIX_FMT_P010},
     {IMGFMT_DRMPRIME, AV_PIX_FMT_DRM_PRIME},
+    {IMGFMT_VULKAN, AV_PIX_FMT_VULKAN},
 
     {0, AV_PIX_FMT_NONE}
 };

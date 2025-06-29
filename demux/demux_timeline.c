@@ -116,6 +116,7 @@ static void associate_streams(struct demuxer *demuxer,
     for (int n = 0; n < num_streams; n++) {
         struct sh_stream *sh = demux_get_stream(seg->d, n);
         struct virtual_stream *other = NULL;
+
         for (int i = 0; i < src->num_streams; i++) {
             struct virtual_stream *vs = src->streams[i];
 
@@ -132,6 +133,11 @@ static void associate_streams(struct demuxer *demuxer,
             // ordered chapters.
             if (sh->demuxer_id >= 0 && sh->demuxer_id == vs->sh->demuxer_id)
                 other = vs;
+        }
+
+        if (!other) {
+            MP_WARN(demuxer, "Source stream %d (%s) unused and hidden.\n",
+                    n, stream_type_name(sh->type));
         }
 
         MP_TARRAY_APPEND(seg, seg->stream_map, seg->num_stream_map, other);
@@ -255,15 +261,17 @@ static void switch_segment(struct demuxer *demuxer, struct virtual_source *src,
     src->eos_packets = 0;
 }
 
-static bool do_read_next_packet(struct demuxer *demuxer,
+static void do_read_next_packet(struct demuxer *demuxer,
                                 struct virtual_source *src)
 {
     if (src->next)
-        return 1;
+        return;
 
     struct segment *seg = src->current;
-    if (!seg || !seg->d)
-        return 0;
+    if (!seg || !seg->d) {
+        src->eof_reached = true;
+        return;
+    }
 
     struct demux_packet *pkt = demux_read_any_packet(seg->d);
     if (!pkt || (!src->no_clip && pkt->pts >= seg->end))
@@ -304,10 +312,10 @@ static bool do_read_next_packet(struct demuxer *demuxer,
         }
         if (!next) {
             src->eof_reached = true;
-            return false;
+            return;
         }
         switch_segment(demuxer, src, next, next->start, 0, true);
-        return true; // reader will retry
+        return; // reader will retry
     }
 
     if (pkt->stream < 0 || pkt->stream >= seg->num_stream_map)
@@ -352,17 +360,15 @@ static bool do_read_next_packet(struct demuxer *demuxer,
 
     pkt->stream = vs->sh->index;
     src->next = pkt;
-    return true;
+    return;
 
 drop:
     talloc_free(pkt);
-    return true;
 }
 
 static bool d_read_packet(struct demuxer *demuxer, struct demux_packet **out_pkt)
 {
     struct priv *p = demuxer->priv;
-
     struct virtual_source *src = NULL;
 
     for (int x = 0; x < p->num_sources; x++) {
@@ -385,8 +391,7 @@ static bool d_read_packet(struct demuxer *demuxer, struct demux_packet **out_pkt
     if (!src)
         return false;
 
-    if (!do_read_next_packet(demuxer, src))
-        return false;
+    do_read_next_packet(demuxer, src);
     *out_pkt = src->next;
     src->next = NULL;
     return true;
@@ -460,7 +465,7 @@ static void d_seek(struct demuxer *demuxer, double seek_pts, int flags)
 
     for (int x = 0; x < p->num_sources; x++) {
         struct virtual_source *src = p->sources[x];
-        if (src != master)
+        if (src != master && src->any_selected)
             seek_source(demuxer, src, seek_pts, flags);
     }
 }
@@ -507,19 +512,17 @@ static void print_timeline(struct demuxer *demuxer)
 // Imperfect and arbitrary, only suited for EDL stuff.
 static void apply_meta(struct sh_stream *dst, struct sh_stream *src)
 {
-    if (src->demuxer_id >= 0)
-        dst->demuxer_id = src->demuxer_id;
-    if (src->title)
-        dst->title = src->title;
-    if (src->lang)
-        dst->lang = src->lang;
-    dst->default_track = src->default_track;
-    dst->forced_track = src->forced_track;
-    if (src->hls_bitrate)
-        dst->hls_bitrate = src->hls_bitrate;
-    dst->missing_timestamps = src->missing_timestamps;
-    if (src->attached_picture)
-        dst->attached_picture = src->attached_picture;
+
+
+// This is mostly for EDL user-defined metadata.
+static struct sh_stream *find_matching_meta(struct timeline_par *tl, int index)
+{
+    for (int n = 0; n < tl->num_sh_meta; n++) {
+        struct sh_stream *sh = tl->sh_meta[n];
+        if (sh->index == index || sh->index < 0)
+            return sh;
+    }
+
 }
 
 static bool add_tl(struct demuxer *demuxer, struct timeline_par *tl)
@@ -544,31 +547,8 @@ static bool add_tl(struct demuxer *demuxer, struct timeline_par *tl)
 
     struct demuxer *meta = tl->track_layout;
 
-    // delay_open streams normally have meta==NULL, and 1 virtual stream
-    int num_streams = 0;
-    if (tl->delay_open) {
-        num_streams = 1;
-    } else if (meta) {
-        num_streams = demux_get_num_stream(meta);
-    }
-    for (int n = 0; n < num_streams; n++) {
-        struct sh_stream *new = NULL;
 
-        if (tl->delay_open) {
-            assert(tl->sh_meta);
-            new = demux_alloc_sh_stream(tl->sh_meta->type);
-            new->codec = tl->sh_meta->codec;
-            demuxer->is_network = true;
-            demuxer->is_streaming = true;
-        } else {
-            struct sh_stream *sh = demux_get_stream(meta, n);
-            new = demux_alloc_sh_stream(sh->type);
-            apply_meta(new, sh);
-            new->codec = sh->codec;
         }
-
-        if (tl->sh_meta)
-            apply_meta(new, tl->sh_meta);
 
         demux_add_sh_stream(demuxer, new);
         struct virtual_stream *vs = talloc_ptrtype(p, vs);

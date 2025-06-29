@@ -32,6 +32,7 @@
 #include "options/path.h"
 #include "misc/bstr.h"
 #include "common/common.h"
+#include "common/tags.h"
 #include "stream/stream.h"
 
 #define HEADER "# mpv EDL v0\n"
@@ -50,7 +51,7 @@ struct tl_parts {
     bool disable_chapters;
     bool dash, no_clip, delay_open;
     char *init_fragment_url;
-    struct sh_stream *sh_meta;
+
     struct tl_part *parts;
     int num_parts;
     struct tl_parts *next;
@@ -59,6 +60,7 @@ struct tl_parts {
 struct tl_root {
     struct tl_parts **pars;
     int num_pars;
+    struct mp_tags *tags;
 };
 
 struct priv {
@@ -145,10 +147,20 @@ static bool get_param_time(struct parse_ctx *ctx, const char *name, double *t)
 static struct tl_parts *add_part(struct tl_root *root)
 {
     struct tl_parts *tl = talloc_zero(root, struct tl_parts);
-    tl->sh_meta = demux_alloc_sh_stream(STREAM_TYPE_COUNT);
-    talloc_steal(tl, tl->sh_meta);
     MP_TARRAY_APPEND(root, root->pars, root->num_pars, tl);
     return tl;
+}
+
+static struct sh_stream *get_meta(struct tl_parts *tl, int index)
+{
+    for (int n = 0; n < tl->num_sh_meta; n++) {
+        if (tl->sh_meta[n]->index == index)
+            return tl->sh_meta[n];
+    }
+    struct sh_stream *sh = demux_alloc_sh_stream(STREAM_TYPE_COUNT);
+    talloc_steal(tl, sh);
+    MP_TARRAY_APPEND(tl, tl->sh_meta, tl->num_sh_meta, sh);
+    return sh;
 }
 
 /* Returns a list of parts, or NULL on parse error.
@@ -160,6 +172,7 @@ static struct tl_parts *add_part(struct tl_root *root)
 static struct tl_root *parse_edl(bstr str, struct mp_log *log)
 {
     struct tl_root *root = talloc_zero(NULL, struct tl_root);
+    root->tags = talloc_zero(root, struct mp_tags);
     struct tl_parts *tl = add_part(root);
     while (str.len) {
         if (bstr_eatstart0(&str, "#")) {
@@ -169,7 +182,7 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
         if (bstr_eatstart0(&str, "\n") || bstr_eatstart0(&str, ";"))
             continue;
         bool is_header = bstr_eatstart0(&str, "!");
-        struct parse_ctx ctx = { .log = log };
+
         int nparam = 0;
         while (1) {
             bstr name, val;
@@ -196,9 +209,7 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
                 val = bstr_splice(str, 0, next);
                 str = bstr_cut(str, next);
             }
-            if (ctx.num_params >= NUM_MAX_PARAMS) {
-                mp_err(log, "Too many parameters, ignoring '%.*s'.\n",
-                       BSTR_P(name));
+
             } else {
                 ctx.param_names[ctx.num_params] = name;
                 ctx.param_vals[ctx.num_params] = val;
@@ -223,29 +234,7 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
             } else if (bstr_equals0(f_type, "no_chapters")) {
                 tl->disable_chapters = true;
             } else if (bstr_equals0(f_type, "track_meta")) {
-                struct sh_stream *sh = tl->sh_meta;
-                sh->lang = get_param0(&ctx, sh, "lang");
-                sh->title = get_param0(&ctx, sh, "title");
-                sh->hls_bitrate = get_param_int(&ctx, "byterate", 0) * 8;
-            } else if (bstr_equals0(f_type, "delay_open")) {
-                struct sh_stream *sh = tl->sh_meta;
-                bstr mt = get_param(&ctx, "media_type");
-                if (bstr_equals0(mt, "video")) {
-                    sh->type = sh->codec->type = STREAM_VIDEO;
-                } else if (bstr_equals0(mt, "audio")) {
-                    sh->type = sh->codec->type = STREAM_AUDIO;
-                } else if (bstr_equals0(mt, "sub")) {
-                    sh->type = sh->codec->type = STREAM_SUB;
-                } else {
-                    mp_err(log, "Invalid or missing !delay_open media type.\n");
-                    goto error;
-                }
-                sh->codec->codec = get_param0(&ctx, sh, "codec");
-                if (!sh->codec->codec)
-                    sh->codec->codec = "null";
-                sh->codec->disp_w = get_param_int(&ctx, "w", 0);
-                sh->codec->disp_h = get_param_int(&ctx, "h", 0);
-                tl->delay_open = true;
+
             } else {
                 mp_err(log, "Unknown header: '%.*s'\n", BSTR_P(f_type));
                 goto error;
@@ -253,6 +242,10 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
         } else {
             struct tl_part p = { .length = -1 };
             p.filename = get_param0(&ctx, tl, "file");
+            if (!p.filename || !p.filename[0]) {
+                mp_err(log, "Missing filename in segment.'\n");
+                goto error;
+            }
             p.offset_set = get_param_time(&ctx, "start", &p.offset);
             get_param_time(&ctx, "length", &p.length);
             bstr ts = get_param(&ctx, "timestamps");
@@ -270,16 +263,14 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
                     mp_warn(log, "Unknown layout param: '%.*s'\n", BSTR_P(layout));
                 }
             }
-            if (!p.filename) {
-                mp_err(log, "Missing filename in segment.'\n");
-                goto error;
-            }
             MP_TARRAY_APPEND(tl, tl->parts, tl->num_parts, p);
         }
         if (ctx.error)
             goto error;
-        for (int n = 0; n < ctx.num_params; n++)
-            mp_warn(log, "Unknown parameter: '%.*s'\n", BSTR_P(ctx.param_names[n]));
+        for (int n = 0; n < ctx.num_params; n++) {
+            mp_warn(log, "Unknown or duplicate parameter: '%.*s'\n",
+                    BSTR_P(ctx.param_names[n]));
+        }
     }
     assert(root->num_pars);
     for (int n = 0; n < root->num_pars; n++) {
@@ -360,6 +351,7 @@ static void resolve_timestamps(struct tl_part *part, struct demuxer *demuxer)
 }
 
 static struct timeline_par *build_timeline(struct timeline *root,
+                                           struct tl_root *edl_root,
                                            struct tl_parts *parts)
 {
     struct timeline_par *tl = talloc_zero(root, struct timeline_par);
@@ -368,11 +360,7 @@ static struct timeline_par *build_timeline(struct timeline *root,
     tl->track_layout = NULL;
     tl->dash = parts->dash;
     tl->no_clip = parts->no_clip;
-    tl->delay_open = parts->delay_open;
 
-    // There is no copy function for sh_stream, so just steal it.
-    tl->sh_meta = talloc_steal(tl, parts->sh_meta);
-    parts->sh_meta = NULL;
 
     if (parts->init_fragment_url && parts->init_fragment_url[0]) {
         MP_VERBOSE(root, "Opening init fragment...\n");
@@ -423,7 +411,7 @@ static struct timeline_par *build_timeline(struct timeline *root,
                 part->offset_set = true;
             }
             if (part->chapter_ts || (part->length < 0 && !tl->no_clip)) {
-                MP_ERR(root, "Invalid specification for delay_open stream.\n");
+
                 goto error;
             }
         } else {
@@ -509,6 +497,11 @@ static struct timeline_par *build_timeline(struct timeline *root,
     if (!root->meta)
         root->meta = tl->track_layout;
 
+    // Not very sane, since demuxer fields are supposed to be treated read-only
+    // from outside, but happens to work in this case, so who cares.
+    if (root->meta)
+        mp_tags_merge(root->meta->metadata, edl_root->tags);
+
     assert(tl->num_parts == parts->num_parts);
     return tl;
 
@@ -519,8 +512,13 @@ error:
 
 static void fix_filenames(struct tl_parts *parts, char *source_path)
 {
-    if (bstr_equals0(mp_split_proto(bstr0(source_path), NULL), "edl"))
+    bstr proto = mp_split_proto(bstr0(source_path), NULL);
+    // Don't adjust self-expanding protocols
+    if (!bstrcasecmp0(proto, "memory") || !bstrcasecmp0(proto, "lavf") ||
+        !bstrcasecmp0(proto, "hex") || !bstrcasecmp0(proto, "edl"))
+    {
         return;
+    }
     struct bstr dirname = mp_dirname(source_path);
     for (int n = 0; n < parts->num_parts; n++) {
         struct tl_part *part = &parts->parts[n];
@@ -548,7 +546,7 @@ static void build_mpv_edl_timeline(struct timeline *tl)
     for (int n = 0; n < root->num_pars; n++) {
         struct tl_parts *parts = root->pars[n];
         fix_filenames(parts, tl->demuxer->filename);
-        struct timeline_par *par = build_timeline(tl, parts);
+        struct timeline_par *par = build_timeline(tl, root, parts);
         if (!par)
             break;
         all_dash &= par->dash;

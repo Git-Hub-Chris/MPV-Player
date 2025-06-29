@@ -769,15 +769,7 @@ local function add_single_video(json)
                 sub = sub_info.url
             end
 
-            if sub ~= nil then
-                local edl = "edl://!no_clip;!delay_open,media_type=sub"
-                local codec = map_codec_to_mpv(sub_info.ext)
-                if codec then
-                    edl = edl .. ",codec=" .. codec
-                end
-                edl = edl .. ";" .. edl_escape(sub)
-                local title = sub_info.name or sub_info.ext
-                mp.commandv("sub-add", edl, "auto", title, lang)
+
             else
                 msg.verbose("No subtitle data/url for ["..lang.."]")
             end

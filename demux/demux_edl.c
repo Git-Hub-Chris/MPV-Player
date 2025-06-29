@@ -51,8 +51,7 @@ struct tl_parts {
     bool disable_chapters;
     bool dash, no_clip, delay_open;
     char *init_fragment_url;
-    struct sh_stream **sh_meta;
-    int num_sh_meta;
+
     struct tl_part *parts;
     int num_parts;
     struct tl_parts *next;
@@ -183,7 +182,7 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
         if (bstr_eatstart0(&str, "\n") || bstr_eatstart0(&str, ";"))
             continue;
         bool is_header = bstr_eatstart0(&str, "!");
-        struct parse_ctx ctx = { .log = log };
+
         int nparam = 0;
         while (1) {
             bstr name, val;
@@ -210,9 +209,7 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
                 val = bstr_splice(str, 0, next);
                 str = bstr_cut(str, next);
             }
-            if (ctx.num_params >= NUM_MAX_PARAMS) {
-                mp_err(log, "Too many parameters, ignoring '%.*s'.\n",
-                       BSTR_P(name));
+
             } else {
                 ctx.param_names[ctx.num_params] = name;
                 ctx.param_vals[ctx.num_params] = val;
@@ -237,51 +234,7 @@ static struct tl_root *parse_edl(bstr str, struct mp_log *log)
             } else if (bstr_equals0(f_type, "no_chapters")) {
                 tl->disable_chapters = true;
             } else if (bstr_equals0(f_type, "track_meta")) {
-                int index = get_param_int(&ctx, "index", -1);
-                struct sh_stream *sh = index < 0 && tl->num_sh_meta
-                    ? tl->sh_meta[tl->num_sh_meta - 1]
-                    : get_meta(tl, index);
-                sh->lang = get_param0(&ctx, sh, "lang");
-                sh->title = get_param0(&ctx, sh, "title");
-                sh->hls_bitrate = get_param_int(&ctx, "byterate", 0) * 8;
-                bstr flags = get_param(&ctx, "flags");
-                bstr flag;
-                while (bstr_split_tok(flags, "+", &flag, &flags) || flag.len) {
-                    if (bstr_equals0(flag, "default")) {
-                        sh->default_track = true;
-                    } else if (bstr_equals0(flag, "forced")) {
-                        sh->forced_track = true;
-                    } else {
-                        mp_warn(log, "Unknown flag: '%.*s'\n", BSTR_P(flag));
-                    }
-                }
-            } else if (bstr_equals0(f_type, "delay_open")) {
-                struct sh_stream *sh = get_meta(tl, tl->num_sh_meta);
-                bstr mt = get_param(&ctx, "media_type");
-                if (bstr_equals0(mt, "video")) {
-                    sh->type = sh->codec->type = STREAM_VIDEO;
-                } else if (bstr_equals0(mt, "audio")) {
-                    sh->type = sh->codec->type = STREAM_AUDIO;
-                } else if (bstr_equals0(mt, "sub")) {
-                    sh->type = sh->codec->type = STREAM_SUB;
-                } else {
-                    mp_err(log, "Invalid or missing !delay_open media type.\n");
-                    goto error;
-                }
-                sh->codec->codec = get_param0(&ctx, sh, "codec");
-                if (!sh->codec->codec)
-                    sh->codec->codec = "null";
-                sh->codec->disp_w = get_param_int(&ctx, "w", 0);
-                sh->codec->disp_h = get_param_int(&ctx, "h", 0);
-                sh->codec->fps = get_param_int(&ctx, "fps", 0);
-                sh->codec->samplerate = get_param_int(&ctx, "samplerate", 0);
-                tl->delay_open = true;
-            } else if (bstr_equals0(f_type, "global_tags")) {
-                for (int n = 0; n < ctx.num_params; n++) {
-                    mp_tags_set_bstr(root->tags, ctx.param_names[n],
-                                     ctx.param_vals[n]);
-                }
-                ctx.num_params = 0;
+
             } else {
                 mp_err(log, "Unknown header: '%.*s'\n", BSTR_P(f_type));
                 goto error;
@@ -407,15 +360,7 @@ static struct timeline_par *build_timeline(struct timeline *root,
     tl->track_layout = NULL;
     tl->dash = parts->dash;
     tl->no_clip = parts->no_clip;
-    tl->delay_open = parts->delay_open;
 
-    // There is no copy function for sh_stream, so just steal it.
-    for (int n = 0; n < parts->num_sh_meta; n++) {
-        MP_TARRAY_APPEND(tl, tl->sh_meta, tl->num_sh_meta,
-                         talloc_steal(tl, parts->sh_meta[n]));
-        parts->sh_meta[n] = NULL;
-    }
-    parts->num_sh_meta = 0;
 
     if (parts->init_fragment_url && parts->init_fragment_url[0]) {
         MP_VERBOSE(root, "Opening init fragment...\n");
@@ -466,7 +411,7 @@ static struct timeline_par *build_timeline(struct timeline *root,
                 part->offset_set = true;
             }
             if (part->chapter_ts || (part->length < 0 && !tl->no_clip)) {
-                MP_ERR(root, "Invalid specification for delay_open stream.\n");
+
                 goto error;
             }
         } else {

@@ -404,11 +404,7 @@ static bool reinit_decoder(struct priv *p)
 
     if (p->codec->type == STREAM_VIDEO) {
         driver = &vd_lavc;
-        user_list = p->opts->video_decoders;
-        fallback = "h264";
-    } else if (p->codec->type == STREAM_AUDIO) {
-        driver = &ad_lavc;
-        user_list = p->opts->audio_decoders;
+
         fallback = "aac";
 
         mp_mutex_lock(&p->cache_lock);
@@ -432,7 +428,7 @@ static bool reinit_decoder(struct priv *p)
 
     if (!list) {
         struct mp_decoder_list *full = talloc_zero(NULL, struct mp_decoder_list);
-        driver->add_decoders(full);
+
         const char *codec = p->codec->codec;
         if (codec && strcmp(codec, "null") == 0)
             codec = fallback;

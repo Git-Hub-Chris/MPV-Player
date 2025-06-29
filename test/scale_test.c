@@ -10,7 +10,7 @@ static struct mp_image *gen_repack_test_img(int w, int h, int bytes, bool rgb,
     struct mp_regular_imgfmt planar_desc = {
         .component_type = MP_COMPONENT_TYPE_UINT,
         .component_size = bytes,
-        .forced_csp = rgb ? MP_CSP_RGB : 0,
+        .forced_csp = rgb ? PL_COLOR_SYSTEM_RGB : 0,
         .num_planes = alpha ? 4 : 3,
         .planes = {
             {1, {rgb ? 2 : 1}},
@@ -18,8 +18,6 @@ static struct mp_image *gen_repack_test_img(int w, int h, int bytes, bool rgb,
             {1, {rgb ? 1 : 3}},
             {1, {4}},
         },
-        .chroma_w = 1,
-        .chroma_h = 1,
     };
     int mpfmt = mp_find_regular_imgfmt(&planar_desc);
     assert(mpfmt);
@@ -57,13 +55,14 @@ static struct mp_image *gen_repack_test_img(int w, int h, int bytes, bool rgb,
 static void dump_image(struct scale_test *stest, const char *name,
                        struct mp_image *img)
 {
-    char *path = mp_tprintf(4096, "%s/%s.png", stest->ctx->out_path, name);
+    char *path = mp_tprintf(4096, "%s/%s.png", stest->outdir, name);
 
     struct image_writer_opts opts = image_writer_opts_defaults;
     opts.format = AV_CODEC_ID_PNG;
 
-    if (!write_image(img, &opts, path, stest->ctx->global, stest->ctx->log)) {
-        MP_FATAL(stest->ctx, "Failed to write '%s'.\n", path);
+    if (!write_image(img, &opts, path, NULL, NULL, true)) {
+        printf("Failed to write '%s'.\n", path);
+        fflush(stdout);
         abort();
     }
 }
@@ -79,13 +78,13 @@ static void assert_imgs_equal(struct scale_test *stest, FILE *f,
     assert(ref->h == new->h);
 
     assert(ref->fmt.flags & MP_IMGFLAG_BYTE_ALIGNED);
-    assert(ref->fmt.bytes[0]);
+    assert(ref->fmt.bpp[0]);
 
     for (int p = 0; p < ref->num_planes; p++) {
         for (int y = 0; y < ref->h; y++) {
             void *line_r = ref->planes[p] + ref->stride[p] * (ptrdiff_t)y;
             void *line_o = new->planes[p] + new->stride[p] * (ptrdiff_t)y;
-            size_t size = ref->fmt.bytes[p] * (size_t)new->w;
+            size_t size = mp_image_plane_bytes(ref, p, 0, new->w);
 
             bool ok = memcmp(line_r, line_o, size) == 0;
             if (!ok) {
@@ -103,8 +102,8 @@ static void assert_imgs_equal(struct scale_test *stest, FILE *f,
 
 void repack_test_run(struct scale_test *stest)
 {
-    char *logname = mp_tprintf(80, "%s.log", stest->test_name);
-    FILE *f = test_open_out(stest->ctx, logname);
+    char *logname = mp_tprintf(80, "../%s.log", stest->test_name);
+    FILE *f = test_open_out(stest->outdir, logname);
 
     if (!stest->sws) {
         init_imgfmts_list();
@@ -125,14 +124,18 @@ void repack_test_run(struct scale_test *stest)
     for (int a = 0; a < num_imgfmts; a++) {
         int mpfmt = imgfmts[a];
         struct mp_imgfmt_desc fmtdesc = mp_imgfmt_get_desc(mpfmt);
-        if (!fmtdesc.id || !(fmtdesc.flags & MP_IMGFLAG_RGB) ||
-            !fmtdesc.component_bits || (fmtdesc.component_bits % 8) ||
-            fmtdesc.num_planes > 1)
+        struct mp_regular_imgfmt rdesc;
+        if (!mp_get_regular_imgfmt(&rdesc, mpfmt)) {
+            int ofmt = mp_find_other_endian(mpfmt);
+            if (!mp_get_regular_imgfmt(&rdesc, ofmt))
+                continue;
+        }
+        if (rdesc.num_planes > 1 || rdesc.forced_csp != PL_COLOR_SYSTEM_RGB)
             continue;
 
         struct mp_image *test_img = NULL;
         bool alpha = fmtdesc.flags & MP_IMGFLAG_ALPHA;
-        bool hidepth = fmtdesc.component_bits > 8;
+        bool hidepth = rdesc.component_size > 1;
         if (alpha) {
             test_img = hidepth ? stest->img_repack_rgba16 : stest->img_repack_rgba8;
         } else {
@@ -185,6 +188,6 @@ void repack_test_run(struct scale_test *stest)
 
     fclose(f);
 
-    assert_text_files_equal(stest->ctx, logname, logname,
+    assert_text_files_equal(stest->refdir, stest->outdir, logname,
                             "This can fail if FFmpeg adds or removes pixfmts.");
 }

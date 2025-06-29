@@ -21,6 +21,8 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/bswap.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
+#include <libplacebo/utils/libav.h>
 
 #include "config.h"
 
@@ -49,9 +51,9 @@ struct sws_opts {
     int chr_hshift;
     float chr_sharpen;
     float lum_sharpen;
-    int fast;
-    int bitexact;
-    int zimg;
+    bool fast;
+    bool bitexact;
+    bool zimg;
 };
 
 #define OPT_BASE_STRUCT struct sws_opts
@@ -75,15 +77,15 @@ const struct m_sub_options sws_conf = {
         {"chs", OPT_INT(chr_hshift)},
         {"ls", OPT_FLOAT(lum_sharpen), M_RANGE(-100.0, 100.0)},
         {"cs", OPT_FLOAT(chr_sharpen), M_RANGE(-100.0, 100.0)},
-        {"fast", OPT_FLAG(fast)},
-        {"bitexact", OPT_FLAG(bitexact)},
-        {"allow-zimg", OPT_FLAG(zimg)},
+        {"fast", OPT_BOOL(fast)},
+        {"bitexact", OPT_BOOL(bitexact)},
+        {"allow-zimg", OPT_BOOL(zimg)},
         {0}
     },
     .size = sizeof(struct sws_opts),
     .defaults = &(const struct sws_opts){
         .scaler = SWS_LANCZOS,
-        .zimg = 1,
+        .zimg = true,
     },
 };
 
@@ -124,11 +126,13 @@ bool mp_sws_supported_format(int imgfmt)
         && sws_isSupportedOutput(av_format);
 }
 
+#if HAVE_ZIMG
 static bool allow_zimg(struct mp_sws_context *ctx)
 {
     return ctx->force_scaler == MP_SWS_ZIMG ||
            (ctx->force_scaler == MP_SWS_AUTO && ctx->allow_zimg);
 }
+#endif
 
 static bool allow_sws(struct mp_sws_context *ctx)
 {
@@ -151,11 +155,11 @@ bool mp_sws_supports_formats(struct mp_sws_context *ctx,
            sws_isSupportedOutput(imgfmt2pixfmt(imgfmt_out));
 }
 
-static int mp_csp_to_sws_colorspace(enum mp_csp csp)
+static int pl_csp_to_sws_colorspace(enum pl_color_system csp)
 {
     // The SWS_CS_* macros are just convenience redefinitions of the
     // AVCOL_SPC_* macros, inside swscale.h.
-    return mp_csp_to_avcol_spc(csp);
+    return pl_system_to_av(csp);
 }
 
 static bool cache_valid(struct mp_sws_context *ctx)
@@ -177,6 +181,8 @@ static void free_mp_sws(void *p)
     sws_freeContext(ctx->sws);
     sws_freeFilter(ctx->src_filter);
     sws_freeFilter(ctx->dst_filter);
+    TA_FREEP(&ctx->aligned_src);
+    TA_FREEP(&ctx->aligned_dst);
 }
 
 // You're supposed to set your scaling parameters on the returned context.
@@ -206,6 +212,9 @@ struct mp_sws_context *mp_sws_alloc(void *talloc_ctx)
 // if the user changes any options.
 void mp_sws_enable_cmdline_opts(struct mp_sws_context *ctx, struct mpv_global *g)
 {
+    // Should only ever be NULL for tests.
+    if (!g)
+        return;
     if (ctx->opts_cache)
         return;
 
@@ -222,12 +231,8 @@ void mp_sws_enable_cmdline_opts(struct mp_sws_context *ctx, struct mpv_global *g
 // Optional, but possibly useful to avoid having to handle mp_sws_scale errors.
 int mp_sws_reinit(struct mp_sws_context *ctx)
 {
-    struct mp_image_params *src = &ctx->src;
-    struct mp_image_params *dst = &ctx->dst;
-
-    // Neutralize unsupported or ignored parameters.
-    src->p_w = dst->p_w = 0;
-    src->p_h = dst->p_h = 0;
+    struct mp_image_params src = ctx->src;
+    struct mp_image_params dst = ctx->dst;
 
     if (cache_valid(ctx))
         return 0;
@@ -238,12 +243,14 @@ int mp_sws_reinit(struct mp_sws_context *ctx)
     sws_freeContext(ctx->sws);
     ctx->sws = NULL;
     ctx->zimg_ok = false;
+    TA_FREEP(&ctx->aligned_src);
+    TA_FREEP(&ctx->aligned_dst);
 
 #if HAVE_ZIMG
     if (allow_zimg(ctx)) {
         ctx->zimg->log = ctx->log;
-        ctx->zimg->src = *src;
-        ctx->zimg->dst = *dst;
+        ctx->zimg->src = src;
+        ctx->zimg->dst = dst;
         if (ctx->zimg_opts)
             ctx->zimg->opts = *ctx->zimg_opts;
         if (mp_zimg_config(ctx->zimg)) {
@@ -264,50 +271,50 @@ int mp_sws_reinit(struct mp_sws_context *ctx)
     if (!ctx->sws)
         return -1;
 
-    mp_image_params_guess_csp(src); // sanitize colorspace/colorlevels
-    mp_image_params_guess_csp(dst);
+    mp_image_params_guess_csp(&src); // sanitize colorspace/colorlevels
+    mp_image_params_guess_csp(&dst);
 
-    enum AVPixelFormat s_fmt = imgfmt2pixfmt(src->imgfmt);
+    enum AVPixelFormat s_fmt = imgfmt2pixfmt(src.imgfmt);
     if (s_fmt == AV_PIX_FMT_NONE || sws_isSupportedInput(s_fmt) < 1) {
         MP_ERR(ctx, "Input image format %s not supported by libswscale.\n",
-               mp_imgfmt_to_name(src->imgfmt));
+               mp_imgfmt_to_name(src.imgfmt));
         return -1;
     }
 
-    enum AVPixelFormat d_fmt = imgfmt2pixfmt(dst->imgfmt);
+    enum AVPixelFormat d_fmt = imgfmt2pixfmt(dst.imgfmt);
     if (d_fmt == AV_PIX_FMT_NONE || sws_isSupportedOutput(d_fmt) < 1) {
         MP_ERR(ctx, "Output image format %s not supported by libswscale.\n",
-               mp_imgfmt_to_name(dst->imgfmt));
+               mp_imgfmt_to_name(dst.imgfmt));
         return -1;
     }
 
-    int s_csp = mp_csp_to_sws_colorspace(src->color.space);
-    int s_range = src->color.levels == MP_CSP_LEVELS_PC;
+    int s_csp = pl_csp_to_sws_colorspace(src.repr.sys);
+    int s_range = src.repr.levels == PL_COLOR_LEVELS_FULL;
 
-    int d_csp = mp_csp_to_sws_colorspace(dst->color.space);
-    int d_range = dst->color.levels == MP_CSP_LEVELS_PC;
+    int d_csp = pl_csp_to_sws_colorspace(src.repr.sys);
+    int d_range = dst.repr.levels == PL_COLOR_LEVELS_FULL;
 
     av_opt_set_int(ctx->sws, "sws_flags", ctx->flags, 0);
 
-    av_opt_set_int(ctx->sws, "srcw", src->w, 0);
-    av_opt_set_int(ctx->sws, "srch", src->h, 0);
+    av_opt_set_int(ctx->sws, "srcw", src.w, 0);
+    av_opt_set_int(ctx->sws, "srch", src.h, 0);
     av_opt_set_int(ctx->sws, "src_format", s_fmt, 0);
 
-    av_opt_set_int(ctx->sws, "dstw", dst->w, 0);
-    av_opt_set_int(ctx->sws, "dsth", dst->h, 0);
+    av_opt_set_int(ctx->sws, "dstw", dst.w, 0);
+    av_opt_set_int(ctx->sws, "dsth", dst.h, 0);
     av_opt_set_int(ctx->sws, "dst_format", d_fmt, 0);
 
     av_opt_set_double(ctx->sws, "param0", ctx->params[0], 0);
     av_opt_set_double(ctx->sws, "param1", ctx->params[1], 0);
 
-    int cr_src = mp_chroma_location_to_av(src->chroma_location);
-    int cr_dst = mp_chroma_location_to_av(dst->chroma_location);
+    int cr_src = pl_chroma_to_av(src.chroma_location);
+    int cr_dst = pl_chroma_to_av(dst.chroma_location);
     int cr_xpos, cr_ypos;
-    if (avcodec_enum_to_chroma_pos(&cr_xpos, &cr_ypos, cr_src) >= 0) {
+    if (av_chroma_location_enum_to_pos(&cr_xpos, &cr_ypos, cr_src) >= 0) {
         av_opt_set_int(ctx->sws, "src_h_chr_pos", cr_xpos, 0);
         av_opt_set_int(ctx->sws, "src_v_chr_pos", cr_ypos, 0);
     }
-    if (avcodec_enum_to_chroma_pos(&cr_xpos, &cr_ypos, cr_dst) >= 0) {
+    if (av_chroma_location_enum_to_pos(&cr_xpos, &cr_ypos, cr_dst) >= 0) {
         av_opt_set_int(ctx->sws, "dst_h_chr_pos", cr_xpos, 0);
         av_opt_set_int(ctx->sws, "dst_v_chr_pos", cr_ypos, 0);
     }
@@ -323,10 +330,49 @@ int mp_sws_reinit(struct mp_sws_context *ctx)
     if (sws_init_context(ctx->sws, ctx->src_filter, ctx->dst_filter) < 0)
         return -1;
 
+#if HAVE_ZIMG
 success:
+#endif
+
     ctx->force_reload = false;
     *ctx->cached = *ctx;
     return 1;
+}
+
+static struct mp_image *check_alignment(struct mp_log *log,
+                                        struct mp_image **alloc,
+                                        struct mp_image *img)
+{
+    // It's completely unclear which alignment libswscale wants (for performance)
+    // or requires (for avoiding crashes and memory corruption).
+    // Is it av_cpu_max_align()? Is it the hardcoded AVFrame "default" of 32
+    // in get_video_buffer()? Is it whatever avcodec_align_dimensions2()
+    // determines? It's like you can't win if you try to prevent libswscale from
+    // corrupting memory...
+    // So use 32, a value that has been experimentally determined to be safe,
+    // and which in most cases is not larger than decoder output. It is smaller
+    // or equal to what most image allocators in mpv/ffmpeg use.
+    size_t align = 32;
+    assert(align <= MP_IMAGE_BYTE_ALIGN); // or mp_image_alloc will not cut it
+
+    bool is_aligned = true;
+    for (int p = 0; p < img->num_planes; p++) {
+        is_aligned &= MP_IS_ALIGNED((uintptr_t)img->planes[p], align);
+        is_aligned &= MP_IS_ALIGNED(labs(img->stride[p]), align);
+    }
+
+    if (is_aligned)
+        return img;
+
+    if (!*alloc) {
+        mp_verbose(log, "unaligned libswscale parameter; using slow copy.\n");
+        *alloc = mp_image_alloc(img->imgfmt, img->w, img->h);
+        if (!*alloc)
+            return NULL;
+    }
+
+    mp_image_copy_attributes(*alloc, img);
+    return *alloc;
 }
 
 // Scale from src to dst - if src/dst have different parameters from previous
@@ -349,19 +395,33 @@ int mp_sws_scale(struct mp_sws_context *ctx, struct mp_image *dst,
         return mp_zimg_convert(ctx->zimg, dst, src) ? 0 : -1;
 #endif
 
-    sws_scale(ctx->sws, (const uint8_t *const *) src->planes, src->stride,
-              0, src->h, dst->planes, dst->stride);
-    return 0;
-}
+    if (src->params.repr.sys == PL_COLOR_SYSTEM_XYZ && dst->params.repr.sys != PL_COLOR_SYSTEM_XYZ) {
+        // swsscale has hardcoded gamma 2.2 internally and 2.6 for XYZ
+        dst->params.color.transfer = PL_COLOR_TRC_GAMMA22;
+        // and sRGB primaries...
+        dst->params.color.primaries = PL_COLOR_PRIM_BT_709;
+        // it doesn't adjust white point though, but it is not worth to support
+        // this case. It would require custom prim with equal energy white point
+        // and sRGB primaries.
+    }
 
-int mp_image_swscale(struct mp_image *dst, struct mp_image *src,
-                     int my_sws_flags)
-{
-    struct mp_sws_context *ctx = mp_sws_alloc(NULL);
-    ctx->flags = my_sws_flags;
-    int res = mp_sws_scale(ctx, dst, src);
-    talloc_free(ctx);
-    return res;
+    struct mp_image *a_src = check_alignment(ctx->log, &ctx->aligned_src, src);
+    struct mp_image *a_dst = check_alignment(ctx->log, &ctx->aligned_dst, dst);
+    if (!a_src || !a_dst) {
+        MP_ERR(ctx, "image allocation failed.\n");
+        return -1;
+    }
+
+    if (a_src != src)
+        mp_image_copy(a_src, src);
+
+    sws_scale(ctx->sws, (const uint8_t *const *) a_src->planes, a_src->stride,
+              0, a_src->h, a_dst->planes, a_dst->stride);
+
+    if (a_dst != dst)
+        mp_image_copy(dst, a_dst);
+
+    return 0;
 }
 
 int mp_image_sw_blur_scale(struct mp_image *dst, struct mp_image *src,

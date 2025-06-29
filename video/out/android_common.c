@@ -24,27 +24,12 @@
 #include "options/m_config.h"
 #include "vo.h"
 
-struct android_opts {
-    struct m_geometry surface_size;
-};
-
-#define OPT_BASE_STRUCT struct android_opts
-const struct m_sub_options android_conf = {
-    .opts = (const struct m_option[]) {
-        {"android-surface-size", OPT_SIZE_BOX(surface_size),
-            .flags = UPDATE_VO_RESIZE},
-        {0}
-    },
-    .size = sizeof(struct android_opts),
-};
-
-
 struct vo_android_state {
     struct mp_log *log;
     ANativeWindow *native_window;
 };
 
-int vo_android_init(struct vo *vo)
+bool vo_android_init(struct vo *vo)
 {
     vo->android = talloc_zero(vo, struct vo_android_state);
     struct vo_android_state *ctx = vo->android;
@@ -59,6 +44,7 @@ int vo_android_init(struct vo *vo)
         goto fail;
     }
 
+    assert(vo->opts->WinID != 0 && vo->opts->WinID != -1);
     jobject surface = (jobject)(intptr_t)vo->opts->WinID;
     ctx->native_window = ANativeWindow_fromSurface(env, surface);
     if (!ctx->native_window) {
@@ -66,11 +52,11 @@ int vo_android_init(struct vo *vo)
         goto fail;
     }
 
-    return 1;
+    return true;
 fail:
     talloc_free(ctx);
     vo->android = NULL;
-    return 0;
+    return false;
 }
 
 void vo_android_uninit(struct vo *vo)
@@ -95,16 +81,14 @@ ANativeWindow *vo_android_native_window(struct vo *vo)
 bool vo_android_surface_size(struct vo *vo, int *out_w, int *out_h)
 {
     struct vo_android_state *ctx = vo->android;
-    void *tmp = talloc_new(NULL);
-    struct android_opts *opts = mp_get_config_group(tmp, vo->global, &android_conf);
 
-    int w = opts->surface_size.w, h = opts->surface_size.h;
+    int w = vo->opts->android_surface_size.w,
+        h = vo->opts->android_surface_size.h;
     if (!w)
         w = ANativeWindow_getWidth(ctx->native_window);
     if (!h)
         h = ANativeWindow_getHeight(ctx->native_window);
 
-    talloc_free(tmp);
     if (w <= 0 || h <= 0) {
         MP_ERR(ctx, "Failed to get height and width.\n");
         return false;

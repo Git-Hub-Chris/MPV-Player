@@ -1,12 +1,15 @@
 #include <math.h>
-#include <pthread.h>
+#include <stdatomic.h>
+
+#include <libavutil/hwcontext.h>
 
 #include "common/common.h"
 #include "common/global.h"
 #include "common/msg.h"
-#include "osdep/atomic.h"
+#include "osdep/threads.h"
 #include "osdep/timer.h"
 #include "video/hwdec.h"
+#include "video/img_format.h"
 
 #include "filter.h"
 #include "filter_internal.h"
@@ -87,7 +90,7 @@ struct filter_runner {
 
     // For async notifications only. We don't bother making this fine grained
     // across filters.
-    pthread_mutex_t async_lock;
+    mp_mutex async_lock;
 
     // Wakeup is pending. Protected by async_lock.
     bool async_wakeup_sent;
@@ -110,12 +113,12 @@ struct mp_filter_internal {
     struct mp_filter *error_handler;
 
     char *name;
+    bool high_priority;
 
     bool pending;
     bool async_pending;
     bool failed;
 };
-
 
 // Called when new work needs to be done on a pin belonging to the filter:
 //  - new data was requested
@@ -133,7 +136,11 @@ static void add_pending(struct mp_filter *f)
     // This should probably really be some sort of priority queue, but for now
     // something naive and dumb does the job too.
     f->in->pending = true;
-    MP_TARRAY_APPEND(r, r->pending, r->num_pending, f);
+    if (f->in->high_priority) {
+        MP_TARRAY_INSERT_AT(r, r->pending, r->num_pending, 0, f);
+    } else {
+        MP_TARRAY_APPEND(r, r->pending, r->num_pending, f);
+    }
 }
 
 static void add_pending_pin(struct mp_pin *p)
@@ -189,7 +196,7 @@ void mp_filter_internal_mark_progress(struct mp_filter *f)
 // sync notifications don't need any locking.
 static void flush_async_notifications(struct filter_runner *r)
 {
-    pthread_mutex_lock(&r->async_lock);
+    mp_mutex_lock(&r->async_lock);
     for (int n = 0; n < r->num_async_pending; n++) {
         struct mp_filter *f = r->async_pending[n];
         add_pending(f);
@@ -197,7 +204,7 @@ static void flush_async_notifications(struct filter_runner *r)
     }
     r->num_async_pending = 0;
     r->async_wakeup_sent = false;
-    pthread_mutex_unlock(&r->async_lock);
+    mp_mutex_unlock(&r->async_lock);
 }
 
 bool mp_filter_graph_run(struct mp_filter *filter)
@@ -207,7 +214,7 @@ bool mp_filter_graph_run(struct mp_filter *filter)
 
     int64_t end_time = 0;
     if (isfinite(r->max_run_time))
-        end_time = mp_add_timeout(mp_time_us(), MPMAX(r->max_run_time, 0));
+        end_time = mp_time_ns_add(mp_time_ns(), MPMAX(r->max_run_time, 0));
 
     // (could happen with separate filter graphs calling each other, for now
     // ignore this issue as we don't use such a setup anywhere)
@@ -217,16 +224,18 @@ bool mp_filter_graph_run(struct mp_filter *filter)
 
     flush_async_notifications(r);
 
+    bool exit_req = false;
+
     while (1) {
         if (atomic_exchange_explicit(&r->interrupt_flag, false,
                                      memory_order_acq_rel))
         {
-            pthread_mutex_lock(&r->async_lock);
+            mp_mutex_lock(&r->async_lock);
             if (!r->async_wakeup_sent && r->wakeup_cb)
                 r->wakeup_cb(r->wakeup_ctx);
             r->async_wakeup_sent = true;
-            pthread_mutex_unlock(&r->async_lock);
-            break;
+            mp_mutex_unlock(&r->async_lock);
+            exit_req = true;
         }
 
         if (!r->num_pending) {
@@ -235,14 +244,24 @@ bool mp_filter_graph_run(struct mp_filter *filter)
                 break;
         }
 
-        struct mp_filter *next = r->pending[r->num_pending - 1];
-        r->num_pending -= 1;
-        next->in->pending = false;
+        struct mp_filter *next = NULL;
 
+        if (r->pending[0]->in->high_priority) {
+            next = r->pending[0];
+            MP_TARRAY_REMOVE_AT(r->pending, r->num_pending, 0);
+        } else if (!exit_req) {
+            next = r->pending[r->num_pending - 1];
+            r->num_pending -= 1;
+        }
+
+        if (!next)
+            break;
+
+        next->in->pending = false;
         if (next->in->info->process)
             next->in->info->process(next);
 
-        if (end_time && mp_time_us() >= end_time)
+        if (end_time && mp_time_ns() >= end_time)
             mp_filter_graph_interrupt(r->root_filter);
     }
 
@@ -356,7 +375,7 @@ static struct mp_pin *find_connected_end(struct mp_pin *p)
             return other;
         p = other->user_conn;
     }
-    assert(0);
+    MP_ASSERT_UNREACHABLE();
 }
 
 // With p being part of a connection, create the pin_connection and set all
@@ -381,7 +400,7 @@ static void init_connection(struct mp_pin *p)
     if (out->manual_connection)
         assert(out->manual_connection->in->runner == runner);
 
-    // Logicaly, the ends are always manual connections. A pin chain without
+    // Logically, the ends are always manual connections. A pin chain without
     // manual connections at the ends is still disconnected (or if this
     // attempted to extend an existing connection, becomes dangling and gets
     // disconnected).
@@ -512,6 +531,16 @@ const char *mp_filter_get_name(struct mp_filter *f)
     return f->in->name;
 }
 
+const struct mp_filter_info *mp_filter_get_info(struct mp_filter *f)
+{
+    return f->in->info;
+}
+
+void mp_filter_set_high_priority(struct mp_filter *f, bool pri)
+{
+    f->in->high_priority = pri;
+}
+
 void mp_filter_set_name(struct mp_filter *f, const char *name)
 {
     talloc_free(f->in->name);
@@ -563,6 +592,9 @@ static void reset_pin(struct mp_pin *p)
 
 void mp_filter_reset(struct mp_filter *filter)
 {
+    if (!filter)
+        return;
+
     for (int n = 0; n < filter->in->num_children; n++)
         mp_filter_reset(filter->in->children[n]);
 
@@ -656,21 +688,26 @@ struct mp_stream_info *mp_filter_find_stream_info(struct mp_filter *f)
     return NULL;
 }
 
-struct AVBufferRef *mp_filter_load_hwdec_device(struct mp_filter *f, int avtype)
+struct mp_hwdec_ctx *mp_filter_load_hwdec_device(struct mp_filter *f, int imgfmt,
+                                                 enum AVHWDeviceType device_type)
 {
     struct mp_stream_info *info = mp_filter_find_stream_info(f);
     if (!info || !info->hwdec_devs)
         return NULL;
 
-    hwdec_devices_request_all(info->hwdec_devs);
+    struct hwdec_imgfmt_request params = {
+        .imgfmt = imgfmt,
+        .probing = false,
+    };
+    hwdec_devices_request_for_img_fmt(info->hwdec_devs, &params);
 
-    return hwdec_devices_get_lavc(info->hwdec_devs, avtype);
+    return hwdec_devices_get_by_imgfmt_and_type(info->hwdec_devs, imgfmt, device_type);
 }
 
 static void filter_wakeup(struct mp_filter *f, bool mark_only)
 {
     struct filter_runner *r = f->in->runner;
-    pthread_mutex_lock(&r->async_lock);
+    mp_mutex_lock(&r->async_lock);
     if (!f->in->async_pending) {
         f->in->async_pending = true;
         // (not using a talloc parent for thread safety reasons)
@@ -681,7 +718,7 @@ static void filter_wakeup(struct mp_filter *f, bool mark_only)
             r->wakeup_cb(r->wakeup_ctx);
         r->async_wakeup_sent = true;
     }
-    pthread_mutex_unlock(&r->async_lock);
+    mp_mutex_unlock(&r->async_lock);
 }
 
 void mp_filter_wakeup(struct mp_filter *f)
@@ -751,7 +788,7 @@ static void filter_destructor(void *p)
 
     if (r->root_filter == f) {
         assert(!f->in->parent);
-        pthread_mutex_destroy(&r->async_lock);
+        mp_mutex_destroy(&r->async_lock);
         talloc_free(r->async_pending);
         talloc_free(r);
     }
@@ -783,7 +820,7 @@ struct mp_filter *mp_filter_create_with_params(struct mp_filter_params *params)
             .root_filter = f,
             .max_run_time = INFINITY,
         };
-        pthread_mutex_init(&f->in->runner->async_lock, NULL);
+        mp_mutex_init(&f->in->runner->async_lock);
     }
 
     if (!f->global)
@@ -839,10 +876,10 @@ void mp_filter_graph_set_wakeup_cb(struct mp_filter *root,
 {
     struct filter_runner *r = root->in->runner;
     assert(root == r->root_filter); // user is supposed to call this on root only
-    pthread_mutex_lock(&r->async_lock);
+    mp_mutex_lock(&r->async_lock);
     r->wakeup_cb = wakeup_cb;
     r->wakeup_ctx = ctx;
-    pthread_mutex_unlock(&r->async_lock);
+    mp_mutex_unlock(&r->async_lock);
 }
 
 static const char *filt_name(struct mp_filter *f)

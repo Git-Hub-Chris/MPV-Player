@@ -17,9 +17,6 @@ extern const int mp_sws_fast_flags;
 
 bool mp_sws_supported_format(int imgfmt);
 
-int mp_image_swscale(struct mp_image *dst, struct mp_image *src,
-                     int my_sws_flags);
-
 int mp_image_sw_blur_scale(struct mp_image *dst, struct mp_image *src,
                            float gblur);
 
@@ -63,6 +60,7 @@ struct mp_sws_context {
     struct mp_sws_context *cached; // contains parameters for which sws is valid
     struct mp_zimg_context *zimg;
     bool zimg_ok;
+    struct mp_image *aligned_src, *aligned_dst;
 };
 
 struct mp_sws_context *mp_sws_alloc(void *talloc_ctx);

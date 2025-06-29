@@ -512,20 +512,7 @@ static void print_timeline(struct demuxer *demuxer)
 // Imperfect and arbitrary, only suited for EDL stuff.
 static void apply_meta(struct sh_stream *dst, struct sh_stream *src)
 {
-    if (src->demuxer_id >= 0)
-        dst->demuxer_id = src->demuxer_id;
-    if (src->title)
-        dst->title = src->title;
-    if (src->lang)
-        dst->lang = src->lang;
-    dst->default_track = src->default_track;
-    dst->forced_track = src->forced_track;
-    if (src->hls_bitrate)
-        dst->hls_bitrate = src->hls_bitrate;
-    dst->missing_timestamps = src->missing_timestamps;
-    if (src->attached_picture)
-        dst->attached_picture = src->attached_picture;
-}
+
 
 // This is mostly for EDL user-defined metadata.
 static struct sh_stream *find_matching_meta(struct timeline_par *tl, int index)
@@ -535,7 +522,7 @@ static struct sh_stream *find_matching_meta(struct timeline_par *tl, int index)
         if (sh->index == index || sh->index < 0)
             return sh;
     }
-    return NULL;
+
 }
 
 static bool add_tl(struct demuxer *demuxer, struct timeline_par *tl)
@@ -560,31 +547,7 @@ static bool add_tl(struct demuxer *demuxer, struct timeline_par *tl)
 
     struct demuxer *meta = tl->track_layout;
 
-    // delay_open streams normally have meta==NULL, and 1 virtual stream
-    int num_streams = 0;
-    if (tl->delay_open) {
-        num_streams = tl->num_sh_meta;
-    } else if (meta) {
-        num_streams = demux_get_num_stream(meta);
-    }
-    for (int n = 0; n < num_streams; n++) {
-        struct sh_stream *new = NULL;
 
-        if (tl->delay_open) {
-            struct sh_stream *tsh = tl->sh_meta[n];
-            new = demux_alloc_sh_stream(tsh->type);
-            new->codec = tsh->codec;
-            apply_meta(new, tsh);
-            demuxer->is_network = true;
-            demuxer->is_streaming = true;
-        } else {
-            struct sh_stream *sh = demux_get_stream(meta, n);
-            new = demux_alloc_sh_stream(sh->type);
-            apply_meta(new, sh);
-            new->codec = sh->codec;
-            struct sh_stream *tsh = find_matching_meta(tl, n);
-            if (tsh)
-                apply_meta(new, tsh);
         }
 
         demux_add_sh_stream(demuxer, new);

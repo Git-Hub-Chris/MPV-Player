@@ -16,7 +16,6 @@
  */
 
 #include <poll.h>
-#include <pthread.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -32,6 +31,12 @@
 #include "stream/stream.h"
 
 extern char **environ;
+
+#ifdef SIGRTMAX
+#define SIGNAL_MAX SIGRTMAX
+#else
+#define SIGNAL_MAX 31
+#endif
 
 #define SAFE_CLOSE(fd) do { if ((fd) >= 0) close((fd)); (fd) = -1; } while (0)
 
@@ -65,6 +70,20 @@ static int as_execvpe(const char *path, const char *file, char *const argv[],
     return -1;
 }
 
+// In the child process, resets the signal mask to defaults. Also clears any
+// signal handlers first so nothing funny happens.
+static void reset_signals_child(void)
+{
+    struct sigaction sa = { 0 };
+    sigset_t sigmask;
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sigmask);
+
+    for (int nr = 1; nr <= SIGNAL_MAX; nr++)
+        sigaction(nr, &sa, NULL);
+    sigprocmask(SIG_SETMASK, &sigmask, NULL);
+}
+
 // Returns 0 on any error, valid PID on success.
 // This function must be async-signal-safe, as it may be called from a fork().
 static pid_t spawn_process(const char *path, struct mp_subprocess_opts *opts,
@@ -96,6 +115,7 @@ static pid_t spawn_process(const char *path, struct mp_subprocess_opts *opts,
     }
     if (fres == 0) {
         // child
+        reset_signals_child();
 
         for (int n = 0; n < opts->num_fds; n++) {
             if (src_fds[n] == opts->fds[n].fd) {
@@ -113,7 +133,7 @@ static pid_t spawn_process(const char *path, struct mp_subprocess_opts *opts,
         as_execvpe(path, opts->exe, opts->args, opts->env ? opts->env : environ);
 
     child_failed:
-        write(p[1], &(char){1}, 1); // shouldn't be able to fail
+        (void)write(p[1], &(char){1}, 1); // shouldn't be able to fail
         _exit(1);
     }
 
@@ -165,8 +185,21 @@ void mp_subprocess2(struct mp_subprocess_opts *opts,
     }
 
     for (int n = 0; n < opts->num_fds; n++) {
+        assert(!(opts->fds[n].on_read && opts->fds[n].on_write));
+
         if (opts->fds[n].on_read && mp_make_cloexec_pipe(comm_pipe[n]) < 0)
             goto done;
+
+        if (opts->fds[n].on_write || opts->fds[n].write_buf) {
+            assert(opts->fds[n].on_write && opts->fds[n].write_buf);
+            if (mp_make_cloexec_pipe(comm_pipe[n]) < 0)
+                goto done;
+            MPSWAP(int, comm_pipe[n][0], comm_pipe[n][1]);
+
+            struct sigaction sa = {.sa_handler = SIG_IGN, .sa_flags = SA_RESTART};
+            sigfillset(&sa.sa_mask);
+            sigaction(SIGPIPE, &sa, NULL);
+        }
     }
 
     devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -225,7 +258,7 @@ void mp_subprocess2(struct mp_subprocess_opts *opts,
             if (comm_pipe[n][0] >= 0) {
                 map_fds[num_fds] = n;
                 fds[num_fds++] = (struct pollfd){
-                    .events = POLLIN,
+                    .events = opts->fds[n].on_read ? POLLIN : POLLOUT,
                     .fd = comm_pipe[n][0],
                 };
             }
@@ -248,20 +281,42 @@ void mp_subprocess2(struct mp_subprocess_opts *opts,
                     if (pid)
                         kill(pid, SIGKILL);
                     killed_by_us = true;
-                    break;
-                } else {
+                    goto break_poll;
+                }
+                struct mp_subprocess_fd *fd = &opts->fds[n];
+                if (fd->on_read) {
                     char buf[4096];
                     ssize_t r = read(comm_pipe[n][0], buf, sizeof(buf));
                     if (r < 0 && errno == EINTR)
                         continue;
-                    if (r > 0 && opts->fds[n].on_read)
-                        opts->fds[n].on_read(opts->fds[n].on_read_ctx, buf, r);
+                    fd->on_read(fd->on_read_ctx, buf, MPMAX(r, 0));
                     if (r <= 0)
                         SAFE_CLOSE(comm_pipe[n][0]);
+                } else if (fd->on_write) {
+                    if (!fd->write_buf->len) {
+                        fd->on_write(fd->on_write_ctx);
+                        if (!fd->write_buf->len) {
+                            SAFE_CLOSE(comm_pipe[n][0]);
+                            continue;
+                        }
+                    }
+                    ssize_t r = write(comm_pipe[n][0], fd->write_buf->start,
+                                      fd->write_buf->len);
+                    if (r < 0 && errno == EINTR)
+                        continue;
+                    if (r < 0) {
+                        // Let's not signal an error for now - caller can check
+                        // whether all buffer was written.
+                        SAFE_CLOSE(comm_pipe[n][0]);
+                        continue;
+                    }
+                    *fd->write_buf = bstr_cut(*fd->write_buf, r);
                 }
             }
         }
     }
+
+break_poll:
 
     // Note: it can happen that a child process closes the pipe, but does not
     //       terminate yet. In this case, we would have to run waitpid() in

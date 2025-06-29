@@ -33,25 +33,22 @@ local -a tag_order
 zstyle -a ":completion:*:*:$service:*" tag-order tag_order ||
   zstyle  ":completion:*:*:$service:*" tag-order '!urls'
 
-# Use PCRE for regular expression matching if possible. This approximately
-# halves the execution time of generate_arguments compared to the default POSIX
-# regex, which translates to a more responsive first tab press. However, we
-# can't rely on PCRE being available, so we keep all our patterns
-# POSIX-compatible.
-setopt re_match_pcre &>/dev/null
+local -a urls
+zstyle -a ":completion:*:*:$service:*:urls" urls urls ||
+  zstyle ":completion:*:*:$service:*:urls" urls av://lavfi:testsrc av://lavfi:sine
 
 typeset -ga _mpv_completion_arguments _mpv_completion_protocols
 
-function generate_arguments {
+function _mpv_generate_arguments {
 
   _mpv_completion_arguments=()
 
   local -a option_aliases=()
 
   local list_options_line
-  for list_options_line in "${(@f)$($words[1] --list-options)}"; do
+  for list_options_line in "${(@f)$($~words[1] --no-config --list-options)}"; do
 
-    [[ $list_options_line =~ '^\s+--(\S+)\s*(.*)' ]] || continue
+    [[ $list_options_line =~ $'^[ \t]+--([^ \t]+)[ \t]*(.*)' ]] || continue
 
     local name=$match[1] desc=$match[2]
 
@@ -72,17 +69,21 @@ function generate_arguments {
         _mpv_completion_arguments+="$name"
       else
         # Find the parent option and use that with this option's name
-        _mpv_completion_arguments+="${_mpv_completion_arguments[(R)${name%-*}=*]/*=/$name=}"
+        _mpv_completion_arguments+="${(S)_mpv_completion_arguments[(R)${name%-*}=*]/*=/$name=}"
       fi
 
     elif [[ $desc == Print* ]]; then
 
       _mpv_completion_arguments+="$name"
 
-    elif [[ $desc =~ '^alias for --(\S+)' ]]; then
+    elif [[ $desc =~ $'^alias for (--)?([^ \t]+)' ]]; then
 
       # Save this for later; we might not have parsed the target option yet
-      option_aliases+="$name $match[1]"
+      option_aliases+="$name $match[2]"
+
+    elif [[ $desc =~ $'^removed ' ]]; then
+
+      # skip
 
     else
 
@@ -104,13 +105,17 @@ function generate_arguments {
 
         entry+='->files'
 
-      elif [[ $name == (ao|vo|af|vf|profile|audio-device|vulkan-device) ]]; then
+      elif [[ $desc = 'Object settings list'* || $name == (profile|audio-device|vulkan-device) ]]; then
 
         entry+="->parse-help-$name"
 
       elif [[ $name == show-profile ]]; then
 
         entry+="->parse-help-profile"
+
+      elif [[ $name == h(|elp) ]]; then
+
+        entry+="->help-options"
 
       fi
 
@@ -150,26 +155,32 @@ function generate_arguments {
 
 }
 
-function generate_protocols {
+function _mpv_generate_protocols {
   _mpv_completion_protocols=()
   local list_protos_line
-  for list_protos_line in "${(@f)$($words[1] --list-protocols)}"; do
-    if [[ $list_protos_line =~ '^\s+(.*)' ]]; then
+  for list_protos_line in "${(@f)$($~words[1] --no-config --list-protocols)}"; do
+    if [[ $list_protos_line =~ $'^[ \t]+(.*)' ]]; then
       _mpv_completion_protocols+="$match[1]"
     fi
   done
 }
 
-function generate_if_changed {
+function _mpv_generate_if_changed {
   # Called with $1 = 'arguments' or 'protocols'. Generates the respective list
   # on the first run and re-generates it if the executable being completed for
   # is different than the one we used to generate the cached list.
   typeset -gA _mpv_completion_binary
-  local current_binary=${words[1]:c}
+  local current_binary=${~words[1]:c}
   zmodload -F zsh/stat b:zstat
   current_binary+=T$(zstat +mtime $current_binary)
   if [[ $_mpv_completion_binary[$1] != $current_binary ]]; then
-    generate_$1
+    # Use PCRE for regular expression matching if possible. This approximately
+    # halves the execution time of generate_arguments compared to the default
+    # POSIX regex, which translates to a more responsive first tab press.
+    # However, we can't rely on PCRE being available, so we keep all our
+    # patterns POSIX-compatible.
+    zmodload -s -F zsh/pcre C:pcre-match && setopt re_match_pcre
+    _mpv_generate_$1
     _mpv_completion_binary[$1]=$current_binary
   fi
 }
@@ -178,7 +189,7 @@ function generate_if_changed {
 # an option. This way, the user should never see a delay when just completing a
 # filename.
 if [[ $words[$CURRENT] == -* ]]; then
-  generate_if_changed arguments
+  _mpv_generate_if_changed arguments
 fi
 
 local rc=1
@@ -189,26 +200,29 @@ case $state in
 
   parse-help-*)
     local option_name=${state#parse-help-}
+    local no_config="--no-config"
     # Can't do non-capturing groups without pcre, so we index the ones we want
     local pattern name_group=1 desc_group=2
     case $option_name in
       audio-device|vulkan-device)
-        pattern='^\s+'\''([^'\'']*)'\''\s+\((.*)\)'
+        pattern=$'^[ \t]+'\''([^'\'']*)'\'$'[ \t]+''\((.*)\)'
       ;;
       profile)
         # The generic pattern would actually work in most cases for --profile,
         # but would break if a profile name contained spaces. This stricter one
         # only breaks if a profile name contains tabs.
         pattern=$'^\t([^\t]*)\t(.*)'
+        # We actually want config so we can autocomplete the user's profiles
+        no_config=""
       ;;
       *)
-        pattern='^\s+(--'${option_name}'=)?(\S+)\s*[-:]?\s*(.*)'
+        pattern=$'^[ \t]+(--'${option_name}$'=)?([^ \t]+)[ \t]*[-:]?[ \t]*(.*)'
         name_group=2 desc_group=3
       ;;
     esac
     local -a values
     local current
-    for current in "${(@f)$($words[1] --${option_name}=help)}"; do
+    for current in "${(@f)$($~words[1] ${no_config} --${option_name}=help)}"; do
       [[ $current =~ $pattern ]] || continue;
       local name=${match[name_group]//:/\\:} desc=${match[desc_group]}
       if [[ -n $desc ]]; then
@@ -238,12 +252,16 @@ case $state in
       if _requested urls; then
         while _next_label urls expl URL; do
           _urls "$expl[@]" && rc=0
-          generate_if_changed protocols
+          _mpv_generate_if_changed protocols
           compadd -S '' "$expl[@]" $_mpv_completion_protocols && rc=0
         done
       fi
       (( rc )) || return 0
     done
+  ;;
+
+  help-options)
+    compadd ${${${_mpv_completion_arguments%%=*}:#no-*}:#*-(add|append|clr|pre|set|remove|toggle)}
   ;;
 
 esac

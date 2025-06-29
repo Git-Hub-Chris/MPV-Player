@@ -15,12 +15,12 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stddef.h>
-#include <stdbool.h>
-#include <errno.h>
 #include <assert.h>
+#include <errno.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stddef.h>
 
-#include "config.h"
 #include "mpv_talloc.h"
 
 #include "osdep/io.h"
@@ -32,7 +32,6 @@
 #include "options/m_property.h"
 #include "options/m_config.h"
 #include "common/common.h"
-#include "common/global.h"
 #include "common/encode.h"
 #include "common/playlist.h"
 #include "input/input.h"
@@ -44,6 +43,12 @@
 
 #include "core.h"
 #include "command.h"
+
+const int num_ptracks[STREAM_TYPE_COUNT] = {
+    [STREAM_VIDEO] = 1,
+    [STREAM_AUDIO] = 1,
+    [STREAM_SUB] = 2,
+};
 
 double rel_time_to_abs(struct MPContext *mpctx, struct m_rel_time t)
 {
@@ -123,6 +128,9 @@ bool get_ab_loop_times(struct MPContext *mpctx, double t[2])
     t[0] = opts->ab_loop[0];
     t[1] = opts->ab_loop[1];
 
+    if (!mpctx->remaining_ab_loops)
+        return false;
+
     if (t[0] == MP_NOPTS_VALUE || t[1] == MP_NOPTS_VALUE || t[0] == t[1])
         return false;
 
@@ -139,7 +147,12 @@ double get_track_seek_offset(struct MPContext *mpctx, struct track *track)
         if (track->type == STREAM_AUDIO)
             return -opts->audio_delay;
         if (track->type == STREAM_SUB)
-            return -opts->subs_rend->sub_delay;
+        {
+            for (int n = 0; n < num_ptracks[STREAM_SUB]; n++) {
+                if (mpctx->current_track[n][STREAM_SUB] == track)
+                    return -opts->subs_shared->sub_delay[n];
+            }
+        }
     }
     return 0;
 }
@@ -160,21 +173,36 @@ void issue_refresh_seek(struct MPContext *mpctx, enum seek_precision min_prec)
     queue_seek(mpctx, MPSEEK_ABSOLUTE, get_current_time(mpctx), min_prec, 0);
 }
 
+void update_content_type(struct MPContext *mpctx, struct track *track)
+{
+    enum mp_content_type content_type;
+    if (!track || !track->vo_c) {
+        content_type = MP_CONTENT_NONE;
+    } else if (track->image) {
+        content_type = MP_CONTENT_IMAGE;
+    } else {
+        content_type = MP_CONTENT_VIDEO;
+    }
+    if (mpctx->video_out)
+        vo_control(mpctx->video_out, VOCTRL_CONTENT_TYPE, &content_type);
+}
+
 void update_vo_playback_state(struct MPContext *mpctx)
 {
     if (mpctx->video_out && mpctx->video_out->config_ok) {
         struct voctrl_playback_state oldstate = mpctx->vo_playback_state;
+        double pos = get_current_pos_ratio(mpctx, false);
         struct voctrl_playback_state newstate = {
-            .taskbar_progress = mpctx->opts->vo->taskbar_progress,
+            .taskbar_progress = mpctx->opts->vo->taskbar_progress && pos >= 0,
             .playing = mpctx->playing,
             .paused = mpctx->paused,
-            .percent_pos = get_percent_pos(mpctx),
+            .position = pos > 0 ? lrint(pos * UINT8_MAX) : 0,
         };
 
         if (oldstate.taskbar_progress != newstate.taskbar_progress ||
             oldstate.playing != newstate.playing ||
             oldstate.paused != newstate.paused ||
-            oldstate.percent_pos != newstate.percent_pos)
+            oldstate.position != newstate.position)
         {
             // Don't update progress bar if it was and still is hidden
             if ((oldstate.playing && oldstate.taskbar_progress) ||
@@ -225,7 +253,8 @@ void error_on_track(struct MPContext *mpctx, struct track *track)
     if (track->type == STREAM_VIDEO)
         MP_INFO(mpctx, "Video: no video\n");
     if (mpctx->opts->stop_playback_on_init_failure ||
-        !(mpctx->vo_chain || mpctx->ao_chain))
+        (!mpctx->current_track[0][STREAM_AUDIO] &&
+         !mpctx->current_track[0][STREAM_VIDEO]))
     {
         if (!mpctx->stop_play)
             mpctx->stop_play = PT_ERROR;
@@ -238,19 +267,23 @@ void error_on_track(struct MPContext *mpctx, struct track *track)
 int stream_dump(struct MPContext *mpctx, const char *source_filename)
 {
     struct MPOpts *opts = mpctx->opts;
-    stream_t *stream = stream_open(source_filename, mpctx->global);
-    if (!stream)
-        return -1;
+    bool ok = false;
+
+    stream_t *stream = stream_create(source_filename,
+                                     STREAM_ORIGIN_DIRECT | STREAM_READ,
+                                     mpctx->playback_abort, mpctx->global);
+    if (!stream || stream->is_directory)
+        goto done;
 
     int64_t size = stream_get_size(stream);
 
     FILE *dest = fopen(opts->stream_dump, "wb");
     if (!dest) {
         MP_ERR(mpctx, "Error opening dump file: %s\n", mp_strerror(errno));
-        return -1;
+        goto done;
     }
 
-    bool ok = true;
+    ok = true;
 
     while (mpctx->stop_play == KEEP_PLAYING && ok) {
         if (!opts->quiet && ((stream->pos / (1024 * 1024)) % 2) == 1) {
@@ -270,17 +303,19 @@ int stream_dump(struct MPContext *mpctx, const char *source_filename)
     }
 
     ok &= fclose(dest) == 0;
+done:
     free_stream(stream);
     return ok ? 0 : -1;
 }
 
 void merge_playlist_files(struct playlist *pl)
 {
-    if (!pl->first)
+    if (!pl->num_entries)
         return;
     char *edl = talloc_strdup(NULL, "edl://");
-    for (struct playlist_entry *e = pl->first; e; e = e->next) {
-        if (e != pl->first)
+    for (int n = 0; n < pl->num_entries; n++) {
+        struct playlist_entry *e = pl->entries[n];
+        if (n)
             edl = talloc_strdup_append_buffer(edl, ";");
         // Escape if needed
         if (e->filename[strcspn(e->filename, "=%,;\n")] ||
@@ -292,6 +327,89 @@ void merge_playlist_files(struct playlist *pl)
         edl = talloc_strdup_append_buffer(edl, e->filename);
     }
     playlist_clear(pl);
-    playlist_add_file(pl, edl);
+    playlist_append_file(pl, edl);
     talloc_free(edl);
+}
+
+const char *mp_status_str(enum playback_status st)
+{
+    switch (st) {
+    case STATUS_SYNCING:    return "syncing";
+    case STATUS_READY:      return "ready";
+    case STATUS_PLAYING:    return "playing";
+    case STATUS_DRAINING:   return "draining";
+    case STATUS_EOF:        return "eof";
+    default:                return "bug";
+    }
+}
+
+bool str_in_list(bstr str, char **list)
+{
+    if (!list)
+        return false;
+    while (*list) {
+        if (!bstrcasecmp0(str, *list++))
+            return true;
+    }
+    return false;
+}
+
+#define ADD_FLAG(ctx, dst, flag, first) do {                           \
+    bstr_xappend_asprintf(ctx, &dst, " %s%s", first ? "[" : "", flag); \
+    first = false;                                                     \
+} while(0)
+
+char *mp_format_track_metadata(void *ctx, struct track *t, bool add_lang)
+{
+    struct sh_stream *s = t->stream;
+    bstr dst = {0};
+
+    if (t->title)
+        bstr_xappend_asprintf(ctx, &dst, "'%s' ", t->title);
+
+    const char *codec = s ? s->codec->codec : NULL;
+
+    bstr_xappend0(ctx, &dst, "(");
+
+    if (add_lang && t->lang)
+        bstr_xappend_asprintf(ctx, &dst, "%s ", t->lang);
+
+    bstr_xappend0(ctx, &dst, codec ? codec : "<unknown>");
+
+    if (s && s->codec->codec_profile)
+        bstr_xappend_asprintf(ctx, &dst, " [%s]", s->codec->codec_profile);
+    if (s && s->codec->disp_w)
+        bstr_xappend_asprintf(ctx, &dst, " %dx%d", s->codec->disp_w, s->codec->disp_h);
+    if (s && s->codec->fps && !t->image) {
+        char *fps = mp_format_double(ctx, s->codec->fps, 4, false, false, true);
+        bstr_xappend_asprintf(ctx, &dst, " %s fps", fps);
+    }
+    if (s && s->codec->channels.num)
+        bstr_xappend_asprintf(ctx, &dst, " %dch", s->codec->channels.num);
+    if (s && s->codec->samplerate)
+        bstr_xappend_asprintf(ctx, &dst, " %d Hz", s->codec->samplerate);
+    if (s && s->codec->bitrate) {
+        bstr_xappend_asprintf(ctx, &dst, " %d kbps", (s->codec->bitrate + 500) / 1000);
+    } else if (s && s->hls_bitrate) {
+        bstr_xappend_asprintf(ctx, &dst, " %d kbps", (s->hls_bitrate + 500) / 1000);
+    }
+    bstr_xappend0(ctx, &dst, ")");
+
+    bool first = true;
+    if (t->default_track)
+        ADD_FLAG(ctx, dst, "default", first);
+    if (t->forced_track)
+        ADD_FLAG(ctx, dst, "forced", first);
+    if (t->dependent_track)
+        ADD_FLAG(ctx, dst, "dependent", first);
+    if (t->visual_impaired_track)
+        ADD_FLAG(ctx, dst, "visual-impaired", first);
+    if (t->hearing_impaired_track)
+        ADD_FLAG(ctx, dst, "hearing-impaired", first);
+    if (t->is_external)
+        ADD_FLAG(ctx, dst, "external", first);
+    if (!first)
+        bstr_xappend0(ctx, &dst, "]");
+
+    return bstrto0(ctx, dst);
 }

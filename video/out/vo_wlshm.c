@@ -21,14 +21,16 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <libswscale/swscale.h>
-
+#include "osdep/endian.h"
+#include "present_sync.h"
 #include "sub/osd.h"
 #include "video/fmt-conversion.h"
 #include "video/mp_image.h"
 #include "video/sws_utils.h"
 #include "vo.h"
 #include "wayland_common.h"
+
+#define IMGFMT_WL_RGB MP_SELECT_LE_BE(IMGFMT_BGR0, IMGFMT_0RGB)
 
 struct buffer {
     struct vo *vo;
@@ -73,21 +75,6 @@ static void buffer_destroy(void *p)
     munmap(buf->mpi.planes[0], buf->size);
 }
 
-static int allocate_memfd(size_t size)
-{
-    int fd = memfd_create("mpv", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (fd < 0)
-        return -1;
-
-    fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_SEAL);
-
-    if (posix_fallocate(fd, 0, size) == 0)
-        return fd;
-
-    close(fd);
-    return -1;
-}
-
 static struct buffer *buffer_create(struct vo *vo, int width, int height)
 {
     struct priv *p = vo->priv;
@@ -98,9 +85,9 @@ static struct buffer *buffer_create(struct vo *vo, int width, int height)
     uint8_t *data;
     struct buffer *buf;
 
-    stride = MP_ALIGN_UP(width * 4, 16);
+    stride = MP_ALIGN_UP(width * 4, MP_IMAGE_BYTE_ALIGN);
     size = height * stride;
-    fd = allocate_memfd(size);
+    fd = vo_wayland_allocate_memfd(vo, size);
     if (fd < 0)
         goto error0;
     data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -112,8 +99,7 @@ static struct buffer *buffer_create(struct vo *vo, int width, int height)
     buf->vo = vo;
     buf->size = size;
     mp_image_set_params(&buf->mpi, &p->sws->dst);
-    buf->mpi.w = width;
-    buf->mpi.h = height;
+    mp_image_set_size(&buf->mpi, width, height);
     buf->mpi.planes[0] = data;
     buf->mpi.stride[0] = stride;
     buf->pool = wl_shm_create_pool(wl->shm, fd, size);
@@ -124,6 +110,7 @@ static struct buffer *buffer_create(struct vo *vo, int width, int height)
     if (!buf->buffer)
         goto error4;
     wl_buffer_add_listener(buf->buffer, &buffer_listener, buf);
+
     close(fd);
     talloc_set_destructor(buf, buffer_destroy);
 
@@ -141,22 +128,44 @@ error0:
     return NULL;
 }
 
+static void uninit(struct vo *vo)
+{
+    struct priv *p = vo->priv;
+    struct buffer *buf;
+
+    while (p->free_buffers) {
+        buf = p->free_buffers;
+        p->free_buffers = buf->next;
+        talloc_free(buf);
+    }
+    vo_wayland_uninit(vo);
+}
+
 static int preinit(struct vo *vo)
 {
     struct priv *p = vo->priv;
 
     if (!vo_wayland_init(vo))
-        return -1;
+        goto err;
+    if (!vo->wl->shm) {
+        MP_FATAL(vo->wl, "Compositor doesn't support the %s protocol!\n",
+                 wl_shm_interface.name);
+        goto err;
+    }
     p->sws = mp_sws_alloc(vo);
     p->sws->log = vo->log;
     mp_sws_enable_cmdline_opts(p->sws, vo->global);
 
     return 0;
+err:
+    uninit(vo);
+    return -1;
 }
 
 static int query_format(struct vo *vo, int format)
 {
-    return sws_isSupportedInput(imgfmt2pixfmt(format));
+    struct priv *p = vo->priv;
+    return mp_sws_supports_formats(p->sws, IMGFMT_WL_RGB, format) ? 1 : 0;
 }
 
 static int reconfig(struct vo *vo, struct mp_image_params *params)
@@ -174,46 +183,72 @@ static int resize(struct vo *vo)
 {
     struct priv *p = vo->priv;
     struct vo_wayland_state *wl = vo->wl;
-    const int32_t width = wl->scaling * mp_rect_w(wl->geometry);
-    const int32_t height = wl->scaling * mp_rect_h(wl->geometry);
+    const int32_t width = mp_rect_w(wl->geometry);
+    const int32_t height = mp_rect_h(wl->geometry);
+
+    if (width == 0 || height == 0)
+        return 1;
+
     struct buffer *buf;
 
+    vo_wayland_set_opaque_region(wl, false);
     vo->want_redraw = true;
     vo->dwidth = width;
     vo->dheight = height;
     vo_get_src_dst_rects(vo, &p->src, &p->dst, &p->osd);
+
     p->sws->dst = (struct mp_image_params) {
-        .imgfmt = IMGFMT_BGR0,
+        .imgfmt = IMGFMT_WL_RGB,
         .w = width,
         .h = height,
         .p_w = 1,
         .p_h = 1,
     };
     mp_image_params_guess_csp(&p->sws->dst);
+    mp_mutex_lock(&vo->params_mutex);
+    vo->target_params = &p->sws->dst;
+    mp_mutex_unlock(&vo->params_mutex);
+
     while (p->free_buffers) {
         buf = p->free_buffers;
         p->free_buffers = buf->next;
         talloc_free(buf);
     }
+
+    vo_wayland_handle_scale(wl);
+
     return mp_sws_reinit(p->sws);
 }
 
 static int control(struct vo *vo, uint32_t request, void *data)
 {
+    switch (request) {
+    case VOCTRL_SET_PANSCAN:
+        resize(vo);
+        return VO_TRUE;
+    }
+
     int events = 0;
     int ret = vo_wayland_control(vo, &events, request, data);
 
     if (events & VO_EVENT_RESIZE)
         ret = resize(vo);
+    if (events & VO_EVENT_EXPOSE)
+        vo->want_redraw = true;
     vo_event(vo, events);
     return ret;
 }
 
-static void draw_image(struct vo *vo, struct mp_image *src)
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *p = vo->priv;
     struct vo_wayland_state *wl = vo->wl;
+    struct mp_image *src = frame->current;
     struct buffer *buf;
+
+    bool render = vo_wayland_check_visible(vo);
+    if (!render)
+        return VO_FALSE;
 
     buf = p->free_buffers;
     if (buf) {
@@ -222,19 +257,19 @@ static void draw_image(struct vo *vo, struct mp_image *src)
         buf = buffer_create(vo, vo->dwidth, vo->dheight);
         if (!buf) {
             wl_surface_attach(wl->surface, NULL, 0, 0);
-            return;
+            goto done;
         }
     }
     if (src) {
         struct mp_image dst = buf->mpi;
         struct mp_rect src_rc;
         struct mp_rect dst_rc;
-        src_rc.x0 = MP_ALIGN_DOWN(p->src.x0, MPMAX(src->fmt.align_x, 4));
-        src_rc.y0 = MP_ALIGN_DOWN(p->src.y0, MPMAX(src->fmt.align_y, 4));
+        src_rc.x0 = MP_ALIGN_DOWN(p->src.x0, src->fmt.align_x);
+        src_rc.y0 = MP_ALIGN_DOWN(p->src.y0, src->fmt.align_y);
         src_rc.x1 = p->src.x1 - (p->src.x0 - src_rc.x0);
         src_rc.y1 = p->src.y1 - (p->src.y0 - src_rc.y0);
-        dst_rc.x0 = MP_ALIGN_DOWN(p->dst.x0, MPMAX(dst.fmt.align_x, 4));
-        dst_rc.y0 = MP_ALIGN_DOWN(p->dst.y0, MPMAX(dst.fmt.align_y, 4));
+        dst_rc.x0 = MP_ALIGN_DOWN(p->dst.x0, dst.fmt.align_x);
+        dst_rc.y0 = MP_ALIGN_DOWN(p->dst.y0, dst.fmt.align_y);
         dst_rc.x1 = p->dst.x1 - (p->dst.x0 - dst_rc.x0);
         dst_rc.y1 = p->dst.y1 - (p->dst.y0 - dst_rc.y0);
         mp_image_crop_rc(src, src_rc);
@@ -253,49 +288,46 @@ static void draw_image(struct vo *vo, struct mp_image *src)
         mp_image_clear(&buf->mpi, 0, 0, buf->mpi.w, buf->mpi.h);
         osd_draw_on_image(vo->osd, p->osd, 0, 0, &buf->mpi);
     }
-    talloc_free(src);
     wl_surface_attach(wl->surface, buf->buffer, 0, 0);
+
+done:
+    return VO_TRUE;
 }
 
 static void flip_page(struct vo *vo)
 {
     struct vo_wayland_state *wl = vo->wl;
 
-    wl_surface_damage(wl->surface, 0, 0, mp_rect_w(wl->geometry),
-                      mp_rect_h(wl->geometry));
+    wl_surface_damage_buffer(wl->surface, 0, 0, vo->dwidth,
+                             vo->dheight);
     wl_surface_commit(wl->surface);
+
+    if (!wl->opts->wl_disable_vsync)
+        vo_wayland_wait_frame(wl);
+
+    if (wl->use_present)
+        present_sync_swap(wl->present);
 }
 
-static void uninit(struct vo *vo)
+static void get_vsync(struct vo *vo, struct vo_vsync_info *info)
 {
-    struct priv *p = vo->priv;
-    struct buffer *buf;
-
-    while (p->free_buffers) {
-        buf = p->free_buffers;
-        p->free_buffers = buf->next;
-        talloc_free(buf);
-    }
-    vo_wayland_uninit(vo);
+    struct vo_wayland_state *wl = vo->wl;
+    if (wl->use_present)
+        present_sync_get_info(wl->present, info);
 }
-
-#define OPT_BASE_STRUCT struct priv
-static const m_option_t options[] = {
-    {0}
-};
 
 const struct vo_driver video_out_wlshm = {
-    .description = "Wayland SHM video output",
+    .description = "Wayland SHM video output (software scaling)",
     .name = "wlshm",
     .preinit = preinit,
     .query_format = query_format,
     .reconfig = reconfig,
     .control = control,
-    .draw_image = draw_image,
+    .draw_frame = draw_frame,
     .flip_page = flip_page,
+    .get_vsync = get_vsync,
     .wakeup = vo_wayland_wakeup,
     .wait_events = vo_wayland_wait_events,
     .uninit = uninit,
     .priv_size = sizeof(struct priv),
-    .options = options,
 };

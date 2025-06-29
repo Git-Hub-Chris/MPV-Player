@@ -22,10 +22,10 @@
  * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "config.h"
 #include "common/msg.h"
@@ -33,7 +33,6 @@
 #include "ao.h"
 #include "internal.h"
 #include "audio/format.h"
-#include "osdep/atomic.h"
 #include "osdep/timer.h"
 #include "options/m_config.h"
 #include "options/m_option.h"
@@ -47,25 +46,25 @@
 struct jack_opts {
     char *port;
     char *client_name;
-    int connect;
-    int autostart;
+    bool connect;
+    bool autostart;
     int stdlayout;
 };
 
 #define OPT_BASE_STRUCT struct jack_opts
 static const struct m_sub_options ao_jack_conf = {
     .opts = (const struct m_option[]){
-        OPT_STRING("jack-port", port, 0),
-        OPT_STRING("jack-name", client_name, 0),
-        OPT_FLAG("jack-autostart", autostart, 0),
-        OPT_FLAG("jack-connect", connect, 0),
-        OPT_CHOICE("jack-std-channel-layout", stdlayout, 0,
-                   ({"waveext", 0}, {"any", 1})),
+        {"jack-port", OPT_STRING(port)},
+        {"jack-name", OPT_STRING(client_name)},
+        {"jack-autostart", OPT_BOOL(autostart)},
+        {"jack-connect", OPT_BOOL(connect)},
+        {"jack-std-channel-layout", OPT_CHOICE(stdlayout,
+            {"waveext", 0}, {"any", 1})},
         {0}
     },
     .defaults = &(const struct jack_opts) {
         .client_name = "mpv",
-        .connect = 1,
+        .connect = true,
     },
     .size = sizeof(struct jack_opts),
 };
@@ -122,10 +121,10 @@ static int process(jack_nframes_t nframes, void *arg)
     jack_nframes_t jack_latency =
         atomic_load(&p->graph_latency_max) + atomic_load(&p->buffer_size);
 
-    int64_t end_time = mp_time_us();
-    end_time += (jack_latency + nframes) / (double)ao->samplerate * 1000000.0;
+    int64_t end_time = mp_time_ns();
+    end_time += MP_TIME_S_TO_NS((jack_latency + nframes) / (double)ao->samplerate);
 
-    ao_read_data(ao, buffers, nframes, end_time);
+    ao_read_data(ao, buffers, nframes, end_time, NULL, true, true);
 
     return 0;
 }
@@ -194,7 +193,7 @@ err_port_register:
     return -1;
 }
 
-static void resume(struct ao *ao)
+static void start(struct ao *ao)
 {
     struct priv *p = ao->priv;
     if (!p->activated) {
@@ -246,6 +245,8 @@ static int init(struct ao *ao)
     jack_set_process_callback(p->client, process, ao);
 
     ao->samplerate = jack_get_sample_rate(p->client);
+    // The actual device buffer can change, but this is enough for pre-buffer
+    ao->device_buffer = jack_get_buffer_size(p->client);
 
     jack_set_buffer_size_callback(p->client, buffer_size_cb, ao);
     jack_set_graph_order_callback(p->client, graph_order_cb, ao);
@@ -276,7 +277,7 @@ const struct ao_driver audio_out_jack = {
     .name        = "jack",
     .init      = init,
     .uninit    = uninit,
-    .resume    = resume,
+    .start     = start,
     .priv_size = sizeof(struct priv),
     .global_opts = &ao_jack_conf,
 };

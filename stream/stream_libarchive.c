@@ -25,16 +25,76 @@
 
 #include "stream_libarchive.h"
 
+#define MP_ARCHIVE_FLAG_MAYBE_ZIP       (MP_ARCHIVE_FLAG_PRIV << 0)
+#define MP_ARCHIVE_FLAG_MAYBE_RAR       (MP_ARCHIVE_FLAG_PRIV << 1)
+#define MP_ARCHIVE_FLAG_MAYBE_VOLUMES   (MP_ARCHIVE_FLAG_PRIV << 2)
+
 struct mp_archive_volume {
     struct mp_archive *mpa;
-    struct stream *src;
+    int index; // volume number (starting with 0, mp_archive.primary_src)
+    struct stream *src; // NULL => not current volume, or 0 sized dummy stream
     int64_t seek_to;
     char *url;
 };
 
+static bool probe_rar(struct stream *s)
+{
+    static uint8_t rar_sig[] = {0x52, 0x61, 0x72, 0x21, 0x1a, 0x07};
+    uint8_t buf[6];
+    if (stream_read_peek(s, buf, sizeof(buf)) != sizeof(buf))
+        return false;
+    return memcmp(buf, rar_sig, 6) == 0;
+}
+
+static bool probe_multi_rar(struct stream *s)
+{
+    uint8_t hdr[14];
+    if (stream_read_peek(s, hdr, sizeof(hdr)) == sizeof(hdr)) {
+        // Look for rar mark head & main head (assume they're in order).
+        if (hdr[6] == 0x00 && hdr[7 + 2] == 0x73) {
+            int rflags = hdr[7 + 3] | (hdr[7 + 4] << 8);
+            return rflags & 0x100;
+        }
+    }
+    return false;
+}
+
+static bool probe_zip(struct stream *s)
+{
+    uint8_t p[4];
+    if (stream_read_peek(s, p, sizeof(p)) != sizeof(p))
+        return false;
+    // Lifted from libarchive, BSD license.
+    if (p[0] == 'P' && p[1] == 'K') {
+        if ((p[2] == '\001' && p[3] == '\002') ||
+            (p[2] == '\003' && p[3] == '\004') ||
+            (p[2] == '\005' && p[3] == '\006') ||
+            (p[2] == '\006' && p[3] == '\006') ||
+            (p[2] == '\007' && p[3] == '\010') ||
+            (p[2] == '0' && p[3] == '0'))
+            return true;
+    }
+    return false;
+}
+
+static int mp_archive_probe(struct stream *src)
+{
+    int flags = 0;
+    assert(stream_tell(src) == 0);
+    if (probe_zip(src))
+        flags |= MP_ARCHIVE_FLAG_MAYBE_ZIP;
+
+    if (probe_rar(src)) {
+        flags |= MP_ARCHIVE_FLAG_MAYBE_RAR;
+        if (probe_multi_rar(src))
+            flags |= MP_ARCHIVE_FLAG_MAYBE_VOLUMES;
+    }
+    return flags;
+}
+
 static bool volume_seek(struct mp_archive_volume *vol)
 {
-    if (vol->seek_to < 0)
+    if (!vol->src || vol->seek_to < 0)
         return true;
     bool r = stream_seek(vol->src, vol->seek_to);
     vol->seek_to = -1;
@@ -44,6 +104,8 @@ static bool volume_seek(struct mp_archive_volume *vol)
 static ssize_t read_cb(struct archive *arch, void *priv, const void **buffer)
 {
     struct mp_archive_volume *vol = priv;
+    if (!vol->src)
+        return 0;
     if (!volume_seek(vol))
         return -1;
     int res = stream_read_partial(vol->src, vol->mpa->buffer,
@@ -57,6 +119,8 @@ static int64_t seek_cb(struct archive *arch, void *priv,
                        int64_t offset, int whence)
 {
     struct mp_archive_volume *vol = priv;
+    if (!vol->src)
+        return 0;
     switch (whence) {
     case SEEK_SET:
         vol->seek_to = offset;
@@ -81,6 +145,8 @@ static int64_t seek_cb(struct archive *arch, void *priv,
 static int64_t skip_cb(struct archive *arch, void *priv, int64_t request)
 {
     struct mp_archive_volume *vol = priv;
+    if (!vol->src)
+        return request;
     if (!volume_seek(vol))
         return -1;
     int64_t old = stream_tell(vol->src);
@@ -93,10 +159,32 @@ static int open_cb(struct archive *arch, void *priv)
     struct mp_archive_volume *vol = priv;
     vol->seek_to = -1;
     if (!vol->src) {
-        vol->src = stream_create(vol->url, STREAM_READ,
+        // Avoid annoying warnings/latency for known dummy volumes.
+        if (vol->index >= vol->mpa->num_volumes)
+            return ARCHIVE_OK;
+        MP_INFO(vol->mpa, "Opening volume '%s'...\n", vol->url);
+        vol->src = stream_create(vol->url,
+                                 STREAM_READ |
+                                    vol->mpa->primary_src->stream_origin,
                                  vol->mpa->primary_src->cancel,
                                  vol->mpa->primary_src->global);
-        return vol->src ? ARCHIVE_OK : ARCHIVE_FATAL;
+        if (vol->src && vol->src->is_directory) {
+            free_stream(vol->src);
+            vol->src = NULL;
+        }
+        // We pretend that failure to open a stream means it was not found,
+        // we assume in turn means that the volume doesn't exist (since
+        // libarchive builds volumes as some sort of abstraction on top of its
+        // stream layer, and its rar code cannot access volumes or signal
+        // anything related to this). libarchive also encounters a fatal error
+        // when a volume could not be opened. However, due to the way volume
+        // support works, it is fine with 0-sized volumes, which we simulate
+        // whenever vol->src==NULL for an opened volume.
+        if (!vol->src) {
+            vol->mpa->num_volumes = MPMIN(vol->mpa->num_volumes, vol->index);
+            MP_INFO(vol->mpa, "Assuming the volume above was not needed.\n");
+        }
+        return ARCHIVE_OK;
     }
 
     // just rewind the primary stream
@@ -116,15 +204,7 @@ static int close_cb(struct archive *arch, void *priv)
 {
     struct mp_archive_volume *vol = priv;
     volume_close(vol);
-    talloc_free(vol);
     return ARCHIVE_OK;
-}
-
-static int switch_cb(struct archive *arch, void *oldpriv, void *newpriv)
-{
-    struct mp_archive_volume *oldvol = oldpriv;
-    volume_close(oldvol);
-    return open_cb(arch, newpriv);
 }
 
 static void mp_archive_close(struct mp_archive *mpa)
@@ -156,6 +236,20 @@ void mp_archive_free(struct mp_archive *mpa)
     talloc_free(mpa);
 }
 
+static bool add_volume(struct mp_archive *mpa, struct stream *src,
+                       const char* url, int index)
+{
+    struct mp_archive_volume *vol = talloc_zero(mpa, struct mp_archive_volume);
+    vol->index = index;
+    vol->mpa = mpa;
+    vol->src = src;
+    vol->url = talloc_strdup(vol, url);
+    locale_t oldlocale = uselocale(mpa->locale);
+    bool res = archive_read_append_callback_data(mpa->arch, vol) == ARCHIVE_OK;
+    uselocale(oldlocale);
+    return res;
+}
+
 static char *standard_volume_url(void *ctx, const char *format,
                                  struct bstr base, int index)
 {
@@ -176,6 +270,7 @@ struct file_pattern {
                         struct bstr base, int index);
     int start;
     int stop;
+    bool legacy;
 };
 
 static const struct file_pattern patterns[] = {
@@ -183,16 +278,14 @@ static const struct file_pattern patterns[] = {
     { ".part01.rar",   "%.*s.part%.2d.rar", standard_volume_url, 2,   99 },
     { ".part001.rar",  "%.*s.part%.3d.rar", standard_volume_url, 2,  999 },
     { ".part0001.rar", "%.*s.part%.4d.rar", standard_volume_url, 2, 9999 },
-    { ".rar",          "%.*s.%c%.2d",       old_rar_volume_url,  0, 9999 },
+    { ".rar",          "%.*s.%c%.2d",       old_rar_volume_url,  0,   99, true },
     { ".001",          "%.*s.%.3d",         standard_volume_url, 2, 9999 },
     { NULL, NULL, NULL, 0, 0 },
 };
 
-static char **find_volumes(struct stream *primary_stream)
+static bool find_volumes(struct mp_archive *mpa, int flags)
 {
-    char **res = talloc_new(NULL);
-    int    num = 0;
-    struct bstr primary_url = bstr0(primary_stream->url);
+    struct bstr primary_url = bstr0(mpa->primary_src->url);
 
     const struct file_pattern *pattern = patterns;
     while (pattern->match) {
@@ -202,44 +295,30 @@ static char **find_volumes(struct stream *primary_stream)
     }
 
     if (!pattern->match)
-        goto done;
+        return true;
+    if (pattern->legacy && !(flags & MP_ARCHIVE_FLAG_MAYBE_VOLUMES))
+        return true;
 
-    struct bstr base = bstr_splice(primary_url, 0, -strlen(pattern->match));
+    struct bstr base = bstr_splice(primary_url, 0, -(int)strlen(pattern->match));
     for (int i = pattern->start; i <= pattern->stop; i++) {
-        char* url = pattern->volume_url(res, pattern->format, base, i);
-        struct stream *s = stream_create(url, STREAM_READ | STREAM_SAFE_ONLY,
-                                         primary_stream->cancel,
-                                         primary_stream->global);
-        if (!s) {
-            talloc_free(url);
-            goto done;
-        }
-        free_stream(s);
-        MP_TARRAY_APPEND(res, res, num, url);
+        char* url = pattern->volume_url(mpa, pattern->format, base, i);
+
+        if (!add_volume(mpa, NULL, url, i + 1))
+            return false;
     }
 
-done:
-    MP_TARRAY_APPEND(res, res, num, NULL);
-    return res;
+    MP_WARN(mpa, "This appears to be a multi-volume archive.\n"
+            "Support is not very good due to libarchive limitations.\n"
+            "There are known cases of libarchive crashing mpv on these.\n"
+            "This is also an excessively inefficient and stupid way to distribute\n"
+            "media files. People creating them should rethink this.\n");
+
+    return true;
 }
 
-
-static bool add_volume(struct mp_log *log, struct mp_archive *mpa,
-                       struct stream *src, const char* url)
-{
-    struct mp_archive_volume *vol = talloc_zero(mpa, struct mp_archive_volume);
-    mp_verbose(log, "Adding volume %s\n", url);
-    vol->mpa = mpa;
-    vol->src = src;
-    vol->url = talloc_strdup(vol, url);
-    locale_t oldlocale = uselocale(mpa->locale);
-    bool res = archive_read_append_callback_data(mpa->arch, vol) == ARCHIVE_OK;
-    uselocale(oldlocale);
-    return res;
-}
-
-struct mp_archive *mp_archive_new(struct mp_log *log, struct stream *src,
-                                  int flags)
+static struct mp_archive *mp_archive_new_raw(struct mp_log *log,
+                                             struct stream *src,
+                                             int flags, int max_volumes)
 {
     struct mp_archive *mpa = talloc_zero(NULL, struct mp_archive);
     mpa->log = log;
@@ -254,38 +333,47 @@ struct mp_archive *mp_archive_new(struct mp_log *log, struct stream *src,
     if (!mpa->arch)
         goto err;
 
-    // first volume is the primary streame
-    if (!add_volume(log ,mpa, src, src->url))
+    mpa->flags = flags;
+    mpa->num_volumes = max_volumes ? max_volumes : INT_MAX;
+
+    // first volume is the primary stream
+    if (!add_volume(mpa, src, src->url, 0))
         goto err;
 
-    // try to open other volumes
-    char** volumes = find_volumes(src);
-    for (int i = 0; volumes[i]; i++) {
-        if (!add_volume(log, mpa, NULL, volumes[i])) {
-            talloc_free(volumes);
+    if (!(flags & MP_ARCHIVE_FLAG_NO_VOLUMES)) {
+        // try to open other volumes
+        if (!find_volumes(mpa, flags))
             goto err;
-        }
     }
-    talloc_free(volumes);
 
     locale_t oldlocale = uselocale(mpa->locale);
 
-    archive_read_support_format_7zip(mpa->arch);
-    archive_read_support_format_iso9660(mpa->arch);
     archive_read_support_format_rar(mpa->arch);
-    archive_read_support_format_zip(mpa->arch);
-    archive_read_support_filter_bzip2(mpa->arch);
-    archive_read_support_filter_gzip(mpa->arch);
-    archive_read_support_filter_xz(mpa->arch);
-    if (flags & MP_ARCHIVE_FLAG_UNSAFE) {
-        archive_read_support_format_gnutar(mpa->arch);
-        archive_read_support_format_tar(mpa->arch);
+    archive_read_support_format_rar5(mpa->arch);
+
+    // Exclude other formats if it's probably RAR, because other formats may
+    // behave suboptimal with multiple volumes exposed, such as opening every
+    // single volume by seeking at the end of the file.
+    if (!(flags & MP_ARCHIVE_FLAG_MAYBE_RAR)) {
+        archive_read_support_format_7zip(mpa->arch);
+        archive_read_support_format_iso9660(mpa->arch);
+        archive_read_support_filter_bzip2(mpa->arch);
+        archive_read_support_filter_gzip(mpa->arch);
+        archive_read_support_filter_xz(mpa->arch);
+        archive_read_support_format_zip_streamable(mpa->arch);
+
+        // This zip reader is normally preferable. However, it seeks to the end
+        // of the file, which may be annoying (HTTP reconnect, volume skipping),
+        // so use it only as last resort, or if it's relatively likely that it's
+        // really zip.
+        if (flags & (MP_ARCHIVE_FLAG_UNSAFE | MP_ARCHIVE_FLAG_MAYBE_ZIP))
+            archive_read_support_format_zip_seekable(mpa->arch);
     }
 
     archive_read_set_read_callback(mpa->arch, read_cb);
     archive_read_set_skip_callback(mpa->arch, skip_cb);
-    archive_read_set_switch_callback(mpa->arch, switch_cb);
     archive_read_set_open_callback(mpa->arch, open_cb);
+    // Allow it to close a volume.
     archive_read_set_close_callback(mpa->arch, close_cb);
     if (mpa->primary_src->seekable)
         archive_read_set_seek_callback(mpa->arch, seek_cb);
@@ -295,11 +383,19 @@ struct mp_archive *mp_archive_new(struct mp_log *log, struct stream *src,
 
     if (fail)
         goto err;
+
     return mpa;
 
 err:
     mp_archive_free(mpa);
     return NULL;
+}
+
+struct mp_archive *mp_archive_new(struct mp_log *log, struct stream *src,
+                                  int flags, int max_volumes)
+{
+    flags |= mp_archive_probe(src);
+    return mp_archive_new_raw(log, src, flags, max_volumes);
 }
 
 // Iterate entries. The first call establishes the first entry. Returns false
@@ -360,9 +456,16 @@ struct priv {
 static int reopen_archive(stream_t *s)
 {
     struct priv *p = s->priv;
-    mp_archive_free(p->mpa);
     s->pos = 0;
-    p->mpa = mp_archive_new(s->log, p->src, MP_ARCHIVE_FLAG_UNSAFE);
+    if (!p->mpa) {
+        p->mpa = mp_archive_new(s->log, p->src, MP_ARCHIVE_FLAG_UNSAFE, 0);
+    } else {
+        int flags = p->mpa->flags;
+        int num_volumes = p->mpa->num_volumes;
+        mp_archive_free(p->mpa);
+        p->mpa = mp_archive_new_raw(s->log, p->src, flags, num_volumes);
+    }
+
     if (!p->mpa)
         return STREAM_ERROR;
 
@@ -484,11 +587,15 @@ static int archive_entry_open(stream_t *stream)
 
     char *base = talloc_strdup(p, stream->path);
     char *name = strchr(base, '|');
+    if (!name)
+        return STREAM_ERROR;
     *name++ = '\0';
+    if (name[0] == '/')
+        name += 1;
     p->entry_name = name;
     mp_url_unescape_inplace(base);
 
-    p->src = stream_create(base, STREAM_READ | STREAM_SAFE_ONLY,
+    p->src = stream_create(base, STREAM_READ | stream->stream_origin,
                            stream->cancel, stream->global);
     if (!p->src) {
         archive_entry_close(stream);

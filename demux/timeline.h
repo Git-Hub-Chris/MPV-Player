@@ -1,6 +1,9 @@
 #ifndef MP_TIMELINE_H_
 #define MP_TIMELINE_H_
 
+#include "common/common.h"
+#include "misc/bstr.h"
+
 // Single segment in a timeline.
 struct timeline_part {
     // (end time must match with start time of the next part)
@@ -20,7 +23,13 @@ struct timeline_part {
 // "par" is short for parallel stream.
 struct timeline_par {
     bstr init_fragment;
-    bool dash, no_clip;
+    bool dash, no_clip, delay_open;
+
+    // Of any of these, _some_ fields are used. If delay_open==true, this
+    // describes each sub-track, and the codec info is used.
+    // In both cases, the metadata is mapped to actual tracks in specific ways.
+    struct sh_stream **sh_meta;
+    int num_sh_meta;
 
     // Segments to play, ordered by time.
     struct timeline_part *parts;
@@ -36,6 +45,7 @@ struct timeline {
     struct mp_cancel *cancel;
 
     bool is_network, is_streaming;
+    int stream_origin;
     const char *format;
 
     // main source, and all other sources (this usually only has special meaning

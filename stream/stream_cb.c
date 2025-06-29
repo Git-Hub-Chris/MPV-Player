@@ -1,17 +1,13 @@
-#include "config.h"
-
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 
 #include "osdep/io.h"
 
 #include "common/common.h"
 #include "common/msg.h"
-#include "common/global.h"
 #include "stream.h"
 #include "options/m_option.h"
 #include "options/path.h"
@@ -106,4 +102,5 @@ static int open_cb(stream_t *stream)
 const stream_info_t stream_info_cb = {
     .name = "stream_callback",
     .open = open_cb,
+    .stream_origin = STREAM_ORIGIN_UNSAFE,
 };

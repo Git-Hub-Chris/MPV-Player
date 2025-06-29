@@ -450,7 +450,7 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
 
     pthread_mutex_init(&p->lock, NULL);
     pthread_cond_init(&p->wakeup, NULL);
-    p->ring = mp_ring_new(stream, 2 * 64 * 1024);
+    p->ring = mp_ring_new(stream, 1 * 64 * 1024);
     int r = pthread_create(&p->thread, NULL, read_thread, stream);
     if (r)
         return -1;

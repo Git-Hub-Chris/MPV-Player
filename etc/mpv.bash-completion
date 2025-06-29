@@ -1,5 +1,3 @@
-#!/bin/bash
-
 #
 # This file is part of mpv.
 #
@@ -17,46 +15,59 @@
 # License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+_mpv_options()
+{
+  if [ -z ${_mpv_options_cache+x} ]; then
+    _mpv_options_cache=$(mpv --no-config --list-options)
+  fi
+  echo "$_mpv_options_cache"
+}
+
 _mpv_get_args()
 {
-  local doc=$(mpv --list-options | grep -E "^\\s*$1\\s")
+  local doc=$(_mpv_options | grep -E "^\\s*$1\\s")
   local partial="$2"
   local type=$(echo "$doc" | awk '{print $2;}')
 
+  # We special-case profiles to ensure we read the config
   if [ "$1" = "--show-profile" ]; then
-    # This is a special case
+    type="ShowProfile"
+  elif [ "$1" = "--profile" ]; then
     type="Profile"
   fi
 
   declare -a candidates
   case $type in
     String)
-      echo "$doc" | grep -q '\[file\]'
-      if [ $? -eq 0 ]; then
+      if echo "$doc" | grep -q '\[file\]' ; then
         if [ "$cur" = '=' ]; then
           # Without this, _filedir will try and complete files starting with '='
           cur=""
         fi
-        _filedir
+        _filedir 2>/dev/null || COMPREPLY=($(compgen -f))
         return 0
       else
-        candidates=($(mpv $1=help | grep -v ':' | awk '{print $1;}'))
+        candidates=($(mpv --no-config $1=help | grep -v ':' | awk '{print $1;}'))
         candidates+=("help")
       fi
       ;;
     Flag)
       candidates=("yes" "no" "help")
       ;;
-    Choices:)
-      candidates=($(mpv $1=help | grep -v ':' | awk '{print $1;}'))
+    Choices:|Object)
+      candidates=($(mpv --no-config $1=help | grep -v ':' | awk '{print $1;}'))
       candidates+=("help")
       ;;
     Image)
-      candidates=($(mpv $1=help))
+      candidates=($(mpv --no-config $1=help))
       candidates=("${candidates[@]:2}")
       candidates+=("help")
       ;;
     Profile)
+      candidates=($(mpv $1=help | grep -v ':' | awk '{print $1;}'))
+      candidates+=("help")
+      ;;
+    ShowProfile)
       candidates=($(mpv $1= | grep -v ':' | awk '{print $1;}'))
       ;;
     *)
@@ -68,6 +79,30 @@ _mpv_get_args()
   if [ ${#COMPREPLY[@]} -gt 1 ]; then
     compopt -o nospace mpv
   fi
+}
+
+# This regex detects special options where we don't want an '=' appended
+_mpv_special_regex='\s(Flag.*\[not in config files\]|Print)'
+_mpv_skip_regex='\sremoved \[deprecated\]'
+
+_mpv_regular_options()
+{
+  if [ -z ${_mpv_regular_options_cache+x} ]; then
+    _mpv_regular_options_cache=($(_mpv_options | grep -vE "$_mpv_skip_regex" | \
+      grep -vE "$_mpv_special_regex" | awk '{print "\\"$1;}' | grep '\--'))
+    _mpv_regular_options_cache="${_mpv_regular_options_cache[*]}"
+  fi
+  echo "$_mpv_regular_options_cache"
+}
+
+_mpv_special_options()
+{
+  if [ -z ${_mpv_special_options_cache+x} ]; then
+    _mpv_special_options_cache=($(_mpv_options | grep -vE "$_mpv_skip_regex" | \
+      grep -E "$_mpv_special_regex" | awk '{print "\\"$1;}' | grep '\--'))
+    _mpv_special_options_cache="${_mpv_special_options_cache[*]}"
+  fi
+  echo "$_mpv_special_options_cache"
 }
 
 _mpv()
@@ -90,20 +125,15 @@ _mpv()
   else
     case $cur in
       -*)
-        # This regex detects special options where we don't want an '=' appended
-        local special_regex='Flag.*\[not in config files\]|Print'
-        local options=($(mpv --list-options | grep -v -E "$special_regex" |awk '{print "\\"$1;}' | grep '\--'))
-        local specials=($(mpv --list-options | grep -E "$special_regex" |awk '{print "\\"$1;}' | grep '\--'))
-
-        COMPREPLY=($(compgen -W "${options[*]}" -S '=' -- "${cur}"))
+        COMPREPLY=($(compgen -W "$(_mpv_regular_options)" -S '=' -- "${cur}"))
         local normal_count=${#COMPREPLY[@]}
-        COMPREPLY+=($(compgen -W "${specials[*]}" -- "${cur}"))
+        COMPREPLY+=($(compgen -W "$(_mpv_special_options)" -- "${cur}"))
         if [ $normal_count -gt 0 -o ${#COMPREPLY[@]} -gt 1 ]; then
           compopt -o nospace mpv
         fi
         ;;
       *)
-        _filedir
+        _filedir 2>/dev/null || COMPREPLY=($(compgen -f))
         ;;
     esac
   fi

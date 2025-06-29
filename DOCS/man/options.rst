@@ -5,10 +5,11 @@ Track Selection
 ---------------
 
 ``--alang=<languagecode[,languagecode,...]>``
-    Specify a priority list of audio languages to use. Different container
-    formats employ different language codes. DVDs use ISO 639-1 two-letter
-    language codes, Matroska, MPEG-TS and NUT use ISO 639-2 three-letter
-    language codes, while OGM uses a free-form identifier. See also ``--aid``.
+    Specify a prioritized list of audio languages to use, as IETF language tags.
+    Equivalent ISO 639-1 two-letter and ISO 639-2 three-letter codes are treated
+    the same. The first tag in the list that matches track's language in the file
+    will be used. A track that matches more subtags will be preferred over one
+    that matches fewer. See also ``--aid``.
 
     This is a string list option. See `List Options`_ for details.
 
@@ -20,10 +21,7 @@ Track Selection
           audio.
 
 ``--slang=<languagecode[,languagecode,...]>``
-    Specify a priority list of subtitle languages to use. Different container
-    formats employ different language codes. DVDs use ISO 639-1 two letter
-    language codes, Matroska uses ISO 639-2 three letter language codes while
-    OGM uses a free-form identifier. See also ``--sid``.
+    Equivalent to ``--alang``, for subtitle tracks.
 
     This is a string list option. See `List Options`_ for details.
 
@@ -33,6 +31,8 @@ Track Selection
           a DVD and falls back on English if Hungarian is not available.
         - ``mpv --slang=jpn example.mkv`` plays a Matroska file with Japanese
           subtitles.
+        - ``mpv --slang=pt-BR example.mkv`` plays a Matroska file with Brazilian
+          Portuguese subtitles if available, and otherwise any Portuguese subtitles.
 
 ``--vlang=<...>``
     Equivalent to ``--alang`` and ``--slang``, for video tracks.
@@ -46,8 +46,55 @@ Track Selection
 
     ``--audio`` is an alias for ``--aid``.
 
-    ``--aid=no`` or ``--audio=no`` or ``--no-audio`` disables audio playback.
+    ``--aid=no`` or ``--audio=no`` disables audio playback.
     (The latter variant does not work with the client API.)
+
+    .. note::
+
+        The track selection options (``--aid`` but also ``--sid`` and the
+        others) sometimes expose behavior that may appear strange. Also, the
+        behavior tends to change around with each mpv release.
+
+        The track selection properties will return the option value outside of
+        playback (as expected), but during playback, the affective track
+        selection is returned. For example, with ``--aid=auto``, the ``aid``
+        property will suddenly return ``2`` after playback initialization
+        (assuming the file has at least 2 audio tracks, and the second is the
+        default).
+
+        At mpv 0.32.0 (and some releases before), if you passed a track value
+        for which a corresponding track didn't exist (e.g. ``--aid=2`` and there
+        was only 1 audio track), the ``aid`` property returned ``no``. However if
+        another audio track was added during playback, and you tried to set the
+        ``aid`` property to ``2``, nothing happened, because the ``aid`` option
+        still had the value ``2``, and writing the same value has no effect.
+
+        With mpv 0.33.0, the behavior was changed. Now track selection options
+        are reset to ``auto`` at playback initialization, if the option had
+        tries to select a track that does not exist. The same is done if the
+        track exists, but fails to initialize. The consequence is that unlike
+        before mpv 0.33.0, the user's track selection parameters are clobbered
+        in certain situations.
+
+        Also since mpv 0.33.0, trying to select a track by number will strictly
+        select this track. Before this change, trying to select a track which
+        did not exist would fall back to track default selection at playback
+        initialization. The new behavior is more consistent.
+
+        Setting a track selection property at runtime, and then playing a new
+        file might reset the track selection to defaults, if the fingerprint
+        of the track list of the new file is different.
+
+        Be aware of tricky combinations of all of all of the above: for example,
+        ``mpv --aid=2 file_with_2_audio_tracks.mkv file_with_1_audio_track.mkv``
+        would first play the correct track, and the second file without audio.
+        If you then go back the first file, its first audio track will be played,
+        and the second file is played with audio. If you do the same thing again
+        but instead of using ``--aid=2`` you run ``set aid 2`` while the file is
+        playing, then changing to the second file will play its audio track.
+        This is because runtime selection enables the fingerprint heuristic.
+
+        Most likely this is not the end.
 
 ``--sid=<ID|auto|no>``
     Display the subtitle stream specified by ``<ID>``. ``auto`` selects
@@ -55,7 +102,7 @@ Track Selection
 
     ``--sub`` is an alias for ``--sid``.
 
-    ``--sid=no`` or ``--sub=no`` or ``--no-sub`` disables subtitle decoding.
+    ``--sid=no`` or ``--sub=no`` disables subtitle decoding.
     (The latter variant does not work with the client API.)
 
 ``--vid=<ID|auto|no>``
@@ -63,7 +110,7 @@ Track Selection
 
     ``--video`` is an alias for ``--vid``.
 
-    ``--vid=no`` or ``--video=no`` or ``--no-video`` disables video playback.
+    ``--vid=no`` or ``--video=no`` disables video playback.
     (The latter variant does not work with the client API.)
 
     If video is disabled, mpv will try to download the audio only if media is
@@ -87,6 +134,32 @@ Track Selection
     mode, and then set select tracks at runtime by setting the filter graph.
     Note that if ``--lavfi-complex`` is set before playback is started, the
     referenced tracks are always selected.
+
+``--subs-with-matching-audio=<yes|forced|no>``
+    When autoselecting a subtitle track, select it even if the selected audio
+    stream matches you preferred subtitle language (default: yes). If this
+    option is set to ``no``, then no subtitle track that matches the audio
+    language will ever be autoselected by mpv regardless of ``--slang`` or
+    ``subs-fallback``. If set to ``forced``, then only forced subtitles
+    will be selected.
+
+``--subs-match-os-language=<yes|no>``
+    When autoselecting a subtitle track, select the track that matches the language of your OS
+    if the audio stream is in a different language if suitable (default track or a forced track
+    under the right conditions). Note that if ``--slang`` is set, this will be completely ignored
+    (default: yes).
+
+``--subs-fallback=<yes|default|no>``
+    When autoselecting a subtitle track, if no tracks match your preferred languages,
+    select a full track even if it doesn't match your preferred subtitle language (default: default).
+    Setting this to `default` means that only streams flagged as `default` will be selected.
+
+``--subs-fallback-forced=<yes|no|always>``
+    When autoselecting a subtitle track, the default value of `yes` will prefer using a forced
+    subtitle track if the subtitle language matches the audio language and matches your list of
+    preferred languages. The special value `always` will only select forced subtitle tracks and
+    never fallback on a non-forced track. Conversely, `no` will never select a forced subtitle
+    track.
 
 
 Playback Control
@@ -161,8 +234,37 @@ Playback Control
     Slow down or speed up playback by the factor given as parameter.
 
     If ``--audio-pitch-correction`` (on by default) is used, playing with a
-    speed higher than normal automatically inserts the ``scaletempo`` audio
+    speed higher than normal automatically inserts the ``scaletempo2`` audio
     filter.
+
+``--pitch=<0.01-100>``
+    Raise or lower the audio's pitch by the factor given as parameter. Does not
+    affect playback speed. Playing with an altered pitch automatically inserts
+    the ``scaletempo2`` audio filter.
+
+    Since pitch change is achieved by combining pitch-preserving speed change and
+    resampling, the range of pitch change is effectively limited by the
+    ``min-speed`` and ``max-speed`` parameters of ``scaletempo2``: for example,
+    a ``min-speed`` of 0.25 limits the highest pitch factor to 4 (1/0.25).
+
+    In a standard 12-tone scale system, octaves are separated by a factor of 2
+    whereas semitones are represented by a factor of 2^(1/12). This means
+    pitches can easily be shifted up or down with a simple multiplier.
+
+    .. admonition:: Examples
+
+        ``--pitch=2``
+            Shifts the pitch up a full octave.
+        ``--pitch=0.5``
+            Shifts the pitch down an octave.
+        ``--pitch=1.498307`` (2^(7/12))
+            Shifts the pitch up a perfect fifth.
+        ``--pitch=0.667420`` (2^(-7/12))
+            Shifts the pitch down a perfect fifth.
+        ``--pitch=1.059463`` (2^(1/12))
+            Shifts the pitch up a semitone.
+        ``--pitch=0.943874`` (2^(-1/12))
+            Shifts the pitch down a semitone.
 
 ``--pause``
     Start the player in paused state.
@@ -184,27 +286,40 @@ Playback Control
     The value ``no`` is a deprecated alias for ``auto``.
 
 ``--playlist=<filename>``
-    Play files according to a playlist file (Supports some common formats. If
+    Play files according to a playlist file. Supports some common formats. If
     no format is detected, it will be treated as list of files, separated by
-    newline characters. Note that XML playlist formats are not supported.)
+    newline characters. You may need this option to load plaintext files as
+    a playlist. Note that XML playlist formats are not supported.
 
-    You can play playlists directly and without this option, however, this
-    option disables any security mechanisms that might be in place. You may
-    also need this option to load plaintext files as playlist.
+    This option forces ``--demuxer=playlist`` to interpret the playlist file.
+    Some playlist formats, notably CUE and optical disc formats, need to use
+    different demuxers and will not work with this option. They still can be
+    played directly, without using this option.
+
+    You can play playlists directly, without this option. Before mpv version
+    0.31.0, this option disabled any security mechanisms that might be in
+    place, but since 0.31.0 it uses the same security mechanisms as playing a
+    playlist file directly. If you trust the playlist file, you can disable
+    any security checks with ``--load-unsafe-playlists``. Because playlists
+    can load other playlist entries, consider applying this option only to the
+    playlist itself and not its entries, using something along these lines:
+
+        ``mpv --{ --playlist=filename --load-unsafe-playlists --}``
 
     .. warning::
 
-        The way mpv uses playlist files via ``--playlist`` is not safe against
-        maliciously constructed files. Such files may trigger harmful actions.
-        This has been the case for all mpv and MPlayer versions, but
-        unfortunately this fact was not well documented earlier, and some people
-        have even misguidedly recommended use of ``--playlist`` with untrusted
-        sources. Do NOT use ``--playlist`` with random internet sources or files
-        you do not trust!
+        The way older versions of mpv played playlist files via ``--playlist``
+        was not safe against maliciously constructed files. Such files may
+        trigger harmful actions. This has been the case for all versions of
+        mpv prior to 0.31.0, and all MPlayer versions, but unfortunately this
+        fact was not well documented earlier, and some people have even
+        misguidedly recommended the use of ``--playlist`` with untrusted
+        sources. Do NOT use ``--playlist`` with random internet sources or
+        files you do not trust if you are not sure your mpv is at least 0.31.0.
 
-        Playlist can contain entries using other protocols, such as local files,
-        or (most severely), special protocols like ``avdevice://``, which are
-        inherently unsafe.
+        In particular, playlists can contain entries using protocols other than
+        local files, such as special protocols like ``avdevice://`` (which are
+        inherently unsafe).
 
 ``--chapter-merge-threshold=<number>``
     Threshold for merging almost consecutive ordered chapter parts in
@@ -222,7 +337,7 @@ Playback Control
     chapter instead. A negative value means always go back to the previous
     chapter.
 
-``--hr-seek=<no|absolute|yes>``
+``--hr-seek=<no|absolute|yes|default>``
     Select when to use precise seeks that are not limited to keyframes. Such
     seeks require decoding video from the previous keyframe up to the target
     position and so can take some time depending on decoding performance. For
@@ -233,7 +348,10 @@ Playback Control
     :no:       Never use precise seeks.
     :absolute: Use precise seeks if the seek is to an absolute position in the
                file, such as a chapter seek, but not for relative seeks like
-               the default behavior of arrow keys (default).
+               the default behavior of arrow keys.
+    :default:  Like ``absolute``, but enable hr-seeks in audio-only cases. The
+               exact behavior is implementation specific and may change with
+               new releases (default).
     :yes:      Use precise seeks whenever possible.
     :always:   Same as ``yes`` (for compatibility).
 
@@ -282,9 +400,6 @@ Playback Control
     location. (Instead, the behavior is as if the playlist entries were provided
     directly to mpv command line or ``loadfile`` command.)
 
-    Note that ``--playlist`` always loads all entries, so you use that instead
-    if you really have the need for this functionality.
-
 ``--access-references=<yes|no>``
     Follow any references in the file being opened (default: yes). Disabling
     this is helpful if the file is automatically scanned (e.g. thumbnail
@@ -327,6 +442,13 @@ Playback Control
     difference between the two option is that this option performs a seek on
     loop, instead of reloading the file.
 
+    .. note::
+
+        ``--loop-file`` counts the number of times it causes the player to
+        seek to the beginning of the file, not the number of full playthroughs. This
+        means ``--loop-file=1`` will end up playing the file twice. Contrast with
+        ``--loop-playlist``, which counts the number of full playthroughs.
+
     ``--loop`` is an alias for this option.
 
 ``--ab-loop-a=<time>``, ``--ab-loop-b=<time>``
@@ -346,11 +468,17 @@ Playback Control
     The loop-points can be adjusted at runtime with the corresponding
     properties. See also ``ab-loop`` command.
 
-``--ordered-chapters``, ``--no-ordered-chapters``
-    Enabled by default.
-    Disable support for Matroska ordered chapters. mpv will not load or
-    search for video segments from other files, and will also ignore any
-    chapter order specified for the main file.
+``--ab-loop-count=<N|inf>``
+    Run A-B loops only N times, then ignore the A-B loop points (default: inf).
+    ``inf`` means that looping goes on forever. If this option is set to 0, A-B
+    looping is ignored, and even the ``ab-loop`` command will not enable looping
+    again (the command will show ``(disabled)`` on the OSD message if both loop
+    points are set, but ``ab-loop-count`` is 0).
+
+``--ordered-chapters=<yes|no>``
+    Enable support for Matroska ordered chapters. mpv will load and
+    search for video segments from other files, and will also respect any
+    chapter order specified for the main file (default: yes).
 
 ``--ordered-chapters-files=<playlist-file>``
     Loads the given file as playlist, and tries to use the files contained in
@@ -385,7 +513,7 @@ Playback Control
     of them fails. This doesn't affect playback of audio-only or video-only
     files.
 
-``--play-dir=<forward|+|backward|->``
+``--play-direction=<forward|+|backward|->``
     Control the playback direction (default: forward). Setting ``backward``
     will attempt to play the file in reverse direction, with decreasing
     playback time. If this is set on playback starts, playback will start from
@@ -445,8 +573,8 @@ Playback Control
 
     Known problems:
 
-    - It's fragile. If anything doesn't work, random non-useful behavior may
-      occur. In simple cases, the player will just play nonsense and artifacts.
+    - It's fragile. If anything doesn't work, random behavior may occur.
+      In simple cases, the player will just play nonsense and artifacts.
       In other cases, it may get stuck or heat the CPU. (Exceeding memory usage
       significantly beyond the user-set limits would be a bug, though.)
 
@@ -503,7 +631,7 @@ Playback Control
     Tuning:
 
     - Remove all ``--vf``/``--af`` filters you have set. Disable hardware
-      decoding. Disable idiotic nonsense like SPDIF passthrough.
+      decoding. Disable functions like SPDIF passthrough.
 
     - Increasing ``--video-reversal-buffer`` might help if reversal queue
       overflow is reported, which may happen in high bitrate video, or video
@@ -512,14 +640,16 @@ Playback Control
       logged errors).
 
     - The demuxer cache is essential for backward demuxing. Make sure to set
-      ``--demuxer-seekable-cache`` (or just use ``--cache``). The cache size
-      might matter. If it's too small, a queue overflow will be logged, and
-      backward playback cannot continue, or it performs too many low level
-      seeks. If it's too large, implementation tradeoffs may cause general
-      performance issues. Use ``--demuxer-max-bytes`` to potentially increase
-      the amount of packets the demuxer layer can queue for reverse demuxing
-      (basically it's the ``--video-reversal-buffer`` equivalent for the
-      demuxer layer).
+      ``--cache=yes``. The cache size might matter. If it's too small, a queue
+      overflow will be logged, and backward playback cannot continue, or it
+      performs too many low level seeks. If it's too large, implementation
+      tradeoffs may cause general performance issues. Use
+      ``--demuxer-max-bytes`` to potentially increase the amount of packets the
+      demuxer layer can queue for reverse demuxing (basically it's the
+      ``--video-reversal-buffer`` equivalent for the demuxer layer).
+
+    - Setting ``--vd-queue-enable=yes`` can help a lot to make playback smooth
+      (once it works).
 
     - ``--demuxer-backward-playback-step`` also factors into how many seeks may
       be performed, and whether backward demuxing could break due to queue
@@ -600,7 +730,7 @@ Playback Control
 ``--demuxer-backward-playback-step=<seconds>``
     Number of seconds the demuxer should seek back to get new packets during
     backward playback (default: 60). This is useful for tuning backward
-    playback, see ``--play-dir`` for details.
+    playback, see ``--play-direction`` for details.
 
     Setting this to a very low value or 0 may make the player think seeking is
     broken, or may make it perform multiple seeks.
@@ -626,9 +756,10 @@ Program Behavior
     Print version string and exit.
 
 ``--no-config``
-    Do not load default configuration files. This prevents loading of both the
-    user-level and system-wide ``mpv.conf`` and ``input.conf`` files. Other
-    configuration files are blocked as well, such as resume playback files.
+    Do not load default configuration or any user files. This prevents loading of
+    both the user-level and system-wide ``mpv.conf`` and ``input.conf`` files. Other
+    user files are blocked as well, such as resume playback files and cache files.
+    This option only takes effect when used as a command line flag.
 
     .. note::
 
@@ -652,6 +783,9 @@ Program Behavior
     can be raised via ``--msg-level`` (the option cannot lower it below the
     forced minimum log level).
 
+    A special case is the macOS bundle, it will create a log file at
+    ``~/Library/Logs/mpv.log`` by default.
+
 ``--config-dir=<path>``
     Force a different configuration directory. If this is set, the given
     directory is used to load configuration files, and all other configuration
@@ -659,24 +793,10 @@ Program Behavior
     as well as per-user directories are ignored, and overrides through
     environment variables (``MPV_HOME``) are also ignored.
 
+    Note that the cache and state paths (``~~/cache``, ``~~/state``) are not
+    considered "configuration" and keep their auto-detection logic.
+
     Note that the ``--no-config`` option takes precedence over this option.
-
-``--save-position-on-quit``
-    Always save the current playback position on quit. When this file is
-    played again later, the player will seek to the old playback position on
-    start. This does not happen if playback of a file is stopped in any other
-    way than quitting. For example, going to the next file in the playlist
-    will not save the position, and start playback at beginning the next time
-    the file is played.
-
-    This behavior is disabled by default, but is always available when quitting
-    the player with Shift+Q.
-
-``--watch-later-directory=<path>``
-    The directory in which to store the "watch later" temporary files.
-
-    The default is a subdirectory named "watch_later" underneath the
-    config directory (usually ``~/.config/mpv/``).
 
 ``--dump-stats=<filename>``
     Write certain statistics to the given file. The file is truncated on
@@ -708,28 +828,19 @@ Program Behavior
 
     ``--scripts`` is a path list option. See `List Options`_ for details.
 
-``--script-opts=key1=value1,key2=value2,...``
+``--script-opt=<key=value>``, ``--script-opts=key1=value1,key2=value2,...``
     Set options for scripts. A script can query an option by key. If an
     option is used and what semantics the option value has depends entirely on
     the loaded scripts. Values not claimed by any scripts are ignored.
 
-    This is a key/value list option. See `List Options`_ for details.
+    Each use of the ``--script-opt`` option will add another option to the
+    internal list, while ``--script-opts`` takes a list of options at once,
+    and overwrites the internal list with it. The latter is a key/value list
+    option. See `List Options`_ for details.
 
 ``--merge-files``
     Pretend that all files passed to mpv are concatenated into a single, big
     file. This uses timeline/EDL support internally.
-
-``--no-resume-playback``
-    Do not restore playback position from the ``watch_later`` configuration
-    subdirectory (usually ``~/.config/mpv/watch_later/``).
-    See ``quit-watch-later`` input command.
-
-``--resume-playback-check-mtime``
-    Only restore the playback position from the ``watch_later`` configuration
-    subdirectory (usually ``~/.config/mpv/watch_later/``) if the file's
-    modification time is the same as at the time of saving. This may prevent
-    skipping forward in files with the same name which have different content.
-    (Default: ``no``)
 
 ``--profile=<profile1,profile2,...>``
     Use the given profile(s), ``--profile=help`` displays a list of the
@@ -748,10 +859,6 @@ Program Behavior
     value. The initial value is either the default value, or as set by the
     config file or command line.
 
-    In some cases, this might not work as expected. For example, ``--volume``
-    will only be reset if it is explicitly set in the config file or the
-    command line.
-
     The special name ``all`` resets as many options as possible.
 
     This is a string list option. See `List Options`_ for details.
@@ -766,19 +873,6 @@ Program Behavior
         - ``--reset-on-next-file=all``
           Try to reset all settings that were changed during playback.
 
-``--write-filename-in-watch-later-config``
-    Prepend the watch later config files with the name of the file they refer
-    to. This is simply written as comment on the top of the file.
-
-    .. warning::
-
-        This option may expose privacy-sensitive information and is thus
-        disabled by default.
-
-``--ignore-path-in-watch-later-config``
-    Ignore path (i.e. use filename only) when using watch later feature.
-    (Default: disabled)
-
 ``--show-profile=<profile>``
     Show the description and content of a profile. Lists all profiles if no
     parameter is provided.
@@ -791,48 +885,140 @@ Program Behavior
 
         May be dangerous if playing from untrusted media.
 
-``--ytdl``, ``--no-ytdl``
+``--ytdl=<yes|no>``
     Enable the youtube-dl hook-script. It will look at the input URL, and will
     play the video located on the website. This works with many streaming sites,
     not just the one that the script is named after. This requires a recent
-    version of youtube-dl to be installed on the system. (Enabled by default.)
+    version of youtube-dl to be installed on the system (default: yes).
 
     If the script can't do anything with an URL, it will do nothing.
 
-    The ``try_ytdl_first`` script option accepts a boolean 'yes' or 'no', and if
-    'yes' will try parsing the URL with youtube-dl first, instead of the default
-    where it's only after mpv failed to open it. This mostly depends on whether
-    most of your URLs need youtube-dl parsing.
+    This accepts a set of options, which can be passed to it with the
+    ``--script-opts`` option (using ``ytdl_hook-`` as prefix):
 
-    The ``exclude`` script option accepts a ``|``-separated list of URL patterns
-    which mpv should not use with youtube-dl. The patterns are matched after
-    the ``http(s)://`` part of the URL.
+    ``try_ytdl_first=<yes|no>``
+        If 'yes' will try parsing the URL with youtube-dl first, instead of the
+        default where it's only after mpv failed to open it. This mostly depends
+        on whether most of your URLs need youtube-dl parsing.
 
-    ``^`` matches the beginning of the URL, ``$`` matches its end, and you
-    should use ``%`` before any of the characters ``^$()%|,.[]*+-?`` to match
-    that character.
+    ``exclude=<URL1|URL2|...``
+        A ``|``-separated list of URL patterns which mpv should not use with
+        youtube-dl. The patterns are matched after the ``http(s)://`` part of
+        the URL.
 
-    .. admonition:: Examples
+        ``^`` matches the beginning of the URL, ``$`` matches its end, and you
+        should use ``%`` before any of the characters ``^$()%|,.[]*+-?`` to
+        match that character.
 
-        - ``--script-opts=ytdl_hook-exclude='^youtube%.com'``
-          will exclude any URL that starts with ``http://youtube.com`` or
-          ``https://youtube.com``.
-        - ``--script-opts=ytdl_hook-exclude='%.mkv$|%.mp4$'``
-          will exclude any URL that ends with ``.mkv`` or ``.mp4``.
+        URLs are converted to lower case before matching.
 
-    See more lua patterns here: https://www.lua.org/manual/5.1/manual.html#5.4.1
+        .. admonition:: Examples
 
-    The ``use_manifests`` script option makes mpv use the master manifest URL for
-    formats like HLS and DASH, if available, allowing for video/audio selection
-    in runtime. It's disabled ("no") by default for performance reasons.
+            - ``--script-opts=ytdl_hook-exclude='^youtube%.com'``
+              will exclude any URL that starts with ``http://youtube.com`` or
+              ``https://youtube.com``.
+            - ``--script-opts=ytdl_hook-exclude='%.mkv$|%.mp4$'``
+              will exclude any URL that ends with ``.mkv`` or ``.mp4``.
 
-``--ytdl-format=<best|worst|mp4|webm|...>``
+        See more lua patterns here: https://www.lua.org/manual/5.1/manual.html#5.4.1
+
+    ``include=<URL1|URL2|...``
+        A ``|``-separated list of URL patterns which mpv should try to parse with
+        youtube-dl first when ``try_ytdl_first`` is ``no``. The patterns are
+        matched in the same way as ``exclude``.
+
+        Default: ``^%w+%.youtube%.com/|^youtube%.com/|^youtu%.be/|^%w+%.twitch%.tv/|^twitch%.tv/``
+
+    ``all_formats=<yes|no>``
+        If 'yes' will attempt to add all formats found reported by youtube-dl
+        (default: no). Each format is added as a separate track. In addition,
+        they are delay-loaded, and actually opened only when a track is selected
+        (this should keep load times as low as without this option).
+
+        It adds average bitrate metadata, if available, which means you can use
+        ``--hls-bitrate`` to decide which track to select. (HLS used to be the
+        only format whose alternative quality streams were exposed in a similar
+        way, thus the option name.)
+
+        Tracks which represent formats that were selected by youtube-dl as
+        default will have the default flag set. This means mpv should generally
+        still select formats chosen with ``--ytdl-format`` by default.
+
+        Although this mechanism makes it possible to switch streams at runtime,
+        it's not suitable for this purpose for various technical reasons. (It's
+        slow, which can't be really fixed.) In general, this option is not
+        useful, and was only added to show that it's possible.
+
+        There are two cases that must be considered when doing quality/bandwidth
+        selection:
+
+            1. Completely separate audio and video streams (DASH-like). Each of
+               these streams contain either only audio or video, so you can
+               mix and combine audio/video bandwidths without restriction. This
+               intuitively matches best with the concept of selecting quality
+               by track (what ``all_formats`` is supposed to do).
+
+            2. Separate sets of muxed audio and video streams. Each version of
+               the media contains both an audio and video stream, and they are
+               interleaved. In order not to waste bandwidth, you should only
+               select one of these versions (if, for example, you select an
+               audio stream, then video will be downloaded, even if you selected
+               video from a different stream).
+
+               mpv will still represent them as separate tracks, but will set
+               the title of each track to ``muxed-N``, where ``N`` is replaced
+               with the youtube-dl format ID of the originating stream.
+
+        Some sites will mix 1. and 2., but we assume that they do so for
+        compatibility reasons, and there is no reason to use them at all.
+
+    ``force_all_formats=<yes|no>``
+        If set to 'yes', and ``all_formats`` is also set to 'yes', this will
+        try to represent all youtube-dl reported formats as tracks, even if
+        mpv would normally use the direct URL reported by it (default: yes).
+
+        It appears this normally makes a difference if youtube-dl works on a
+        master HLS playlist.
+
+        If this is set to 'no', this specific kind of stream is treated like
+        ``all_formats`` is set to 'no', and the stream selection as done by
+        youtube-dl (via ``--ytdl-format``) is used.
+
+    ``thumbnails=<all|best|none>``
+        Add thumbnails as video tracks (default: none).
+
+        Thumbnails get downloaded when they are added as tracks, so 'all' can
+        have a noticeable impact on how long it takes to open the video when
+        there are a lot of thumbnails.
+
+    ``use_manifests=<yes|no>``
+        Make mpv use the master manifest URL for formats like HLS and DASH,
+        if available, allowing for video/audio selection in runtime (default:
+        no). It's disabled ("no") by default for performance reasons.
+
+    ``ytdl_path=youtube-dl``
+        Configure paths to youtube-dl's executable or a compatible fork's. The
+        paths should be separated by : on Unix and ; on Windows. mpv looks in
+        order for the configured paths in PATH and in mpv's config directory.
+        The defaults are "yt-dlp", "yt-dlp_x86" and "youtube-dl". On Windows
+        the suffix extension is not necessary, but only ".exe" is acceptable.
+
+    .. admonition:: Why do the option names mix ``_`` and ``-``?
+
+        I have no idea.
+
+``--ytdl-format=<ytdl|best|worst|mp4|webm|...>``
     Video format/quality that is directly passed to youtube-dl. The possible
     values are specific to the website and the video, for a given url the
     available formats can be found with the command
     ``youtube-dl --list-formats URL``. See youtube-dl's documentation for
     available aliases.
-    (Default: youtube-dl's default, currently ``bestvideo+bestaudio/best``)
+    (Default: ``bestvideo+bestaudio/best``)
+
+    The ``ytdl`` value does not pass a ``--format`` option to youtube-dl at all,
+    and thus does not override its default. Note that sometimes youtube-dl
+    returns a format that mpv cannot use, and in these cases the mpv default
+    may work better.
 
 ``--ytdl-raw-options=<key>=<value>[,<key>=<value>[,...]]``
     Pass arbitrary options to youtube-dl. Parameter and argument should be
@@ -856,22 +1042,111 @@ Program Behavior
         - ``--ytdl-raw-options=proxy=[http://127.0.0.1:3128]``
         - ``--ytdl-raw-options-append=proxy=http://127.0.0.1:3128``
 
+``--js-memory-report=<yes|no>``
+    Enable memory reporting for javascript scripts in the stats overlay.
+    This is disabled by default because it has an overhead and increases
+    memory usage. This option will only work if it is enabled before mpv is
+    started.
+
 ``--load-stats-overlay=<yes|no>``
     Enable the builtin script that shows useful playback information on a key
     binding (default: yes). By default, the ``i`` key is used (``I`` to make
     the overlay permanent).
 
-``--load-osd-console=<yes|no>``
-    Enable the builtin script that shows a console on a key binding and lets
-    you enter commands (default: yes). By default,. The ``´`` key is used to
-    show the console, and ``ESC`` to hide it again. (This is based on  a user
-    script called ``repl.lua``.)
+``--load-console=<yes|no>``
+    Enable the built-in script that shows a console on a key binding and lets
+    you enter commands (default: yes). The ````` key is used to show the
+    console by default, and ``ESC`` to hide it again.
+
+``--load-auto-profiles=<yes|no|auto>``
+    Enable the builtin script that does auto profiles (default: auto). See
+    `Conditional auto profiles`_ for details. ``auto`` will load the script,
+    but immediately unload it if there are no conditional profiles.
+
+``--load-select=<yes|no>``
+    Enable the builtin script that lets you select from lists of items (default:
+    yes). By default, its keybindings start with the ``g`` key.
 
 ``--player-operation-mode=<cplayer|pseudo-gui>``
     For enabling "pseudo GUI mode", which means that the defaults for some
     options are changed. This option should not normally be used directly, but
     only by mpv internally, or mpv-provided scripts, config files, or .desktop
-    files.
+    files. See `PSEUDO GUI MODE`_ for details.
+
+Watch Later
+-----------
+
+``--save-position-on-quit``
+    Always save the current playback position on quit. When this file is
+    played again later, the player will seek to the old playback position on
+    start. This does not happen if playback of a file is stopped in any other
+    way than quitting. For example, going to the next file in the playlist
+    will not save the position, and start playback at beginning the next time
+    the file is played.
+
+    This behavior is disabled by default, but is always available when quitting
+    the player with Shift+Q.
+
+    See `RESUMING PLAYBACK`_.
+
+``--watch-later-dir=<path>``
+    The directory in which to store the "watch later" temporary files.
+
+    ``--watch-later-directory`` is an alias for ``--watch-later-dir``.
+
+    If this option is unset, the files will be stored in a subdirectory
+    named "watch_later" underneath the local state directory
+    (usually ``~/.local/state/mpv/``).
+
+``--resume-playback=<yes|no>``
+    Restore playback position from the ``watch_later`` configuration
+    subdirectory, usually ``~/.config/mpv/watch_later/`` (default: yes).
+
+``--resume-playback-check-mtime=<yes|no>``
+    Only restore the playback position from the ``watch_later`` configuration
+    subdirectory (usually ``~/.config/mpv/watch_later/``) if the file's
+    modification time is the same as at the time of saving. This may prevent
+    skipping forward in files with the same name which have different content.
+    (Default: ``no``)
+
+``--watch-later-options=option1,option2,...``
+    The options that are saved in "watch later" files if they have been changed
+    since when mpv started. These values will be restored the next time the
+    files are played. Note that the playback position is saved via the ``start``
+    option.
+
+    When removing options, existing watch later data won't be modified and will
+    still be applied fully, but new watch later data won't contain these
+    options.
+
+    See ``--help=watch-later-options`` for the list of the properties that are
+    restored by default.
+
+    This is a string list option. See `List Options`_ for details.
+
+    .. admonition:: Examples
+
+        - ``--watch-later-options-remove=sid``
+          The subtitle track selection will not be restored.
+        - ``--watch-later-options-remove=volume``
+          ``--watch-later-options-remove=mute``
+          The volume and mute state won't be saved to watch later files.
+        - ``--watch-later-options=start``
+          No option will be saved to watch later files, except the playback
+          position.
+
+``--write-filename-in-watch-later-config``
+    Prepend the watch later config files with the name of the file they refer
+    to. This is simply written as comment on the top of the file.
+
+    .. warning::
+
+        This option may expose privacy-sensitive information and is thus
+        disabled by default.
+
+``--ignore-path-in-watch-later-config``
+    Ignore path (i.e. use filename only) when using watch later feature.
+    (Default: disabled)
 
 Video
 -----
@@ -893,13 +1168,13 @@ Video
 ``--vf=<filter1[=parameter1:parameter2:...],filter2,...>``
     Specify a list of video filters to apply to the video stream. See
     `VIDEO FILTERS`_ for details and descriptions of the available filters.
-    The option variants ``--vf-add``, ``--vf-pre``, ``--vf-del`` and
-    ``--vf-clr`` exist to modify a previously specified list, but you
-    should not need these for typical use.
+    The option variants ``--vf-add``, ``--vf-pre``, and ``--vf-clr`` exist
+    to modify a previously specified list, but you should not need these for
+    typical use.
 
 ``--untimed``
     Do not sleep when outputting video frames. Useful for benchmarks when used
-    with ``--no-audio.``
+    with ``--audio=no``.
 
 ``--framedrop=<mode>``
     Skip displaying some frames to maintain A/V sync on slow systems, or
@@ -954,12 +1229,13 @@ Video
     Enable some things which tend to reduce video latency by 1 or 2 frames
     (default: no). Note that this option might be removed without notice once
     the player's timing code does not inherently need to do these things
-    anymore.
+    anymore. Using this option is known to break other options such as
+    interpolation, so it is not recommended to enable this.
 
     This does:
 
-    - Use the demuxer reported FPS for frame dropping. This avoids that the
-      player needs to decode 1 frame in advance, lowering total latency in
+    - Use the demuxer reported FPS for frame dropping. This avoids the
+      player needing to decode 1 frame in advance, lowering total latency in
       effect. This also means that if the demuxer reported FPS is wrong, or
       the video filter chain changes FPS (e.g. deinterlacing), then it could
       drop too many or not enough frames.
@@ -969,7 +1245,7 @@ Video
       frame, so if this is not done, there is some likeliness that the VO has
       to drop some frames if rendering the first frame takes longer than needed.
 
-``--override-display-fps=<fps>``
+``--display-fps-override=<fps>``
     Set the display FPS used with the ``--video-sync=display-*`` modes. By
     default, a detected value is used. Keep in mind that setting an incorrect
     value (even if slightly incorrect) can ruin video playback. On multi-monitor
@@ -979,34 +1255,45 @@ Video
     Set this option only if you have reason to believe the automatically
     determined value is wrong.
 
-``--display-fps=<fps>``
-    Deprecated alias for ``--override-display-fps``.
-
-``--hwdec=<api>``
+``--hwdec=<api1,api2,...|no|auto|auto-safe|auto-copy>``
     Specify the hardware video decoding API that should be used if possible.
     Whether hardware decoding is actually done depends on the video codec. If
     hardware decoding is not possible, mpv will fall back on software decoding.
 
-    Hardware decoding is not enabled by default, because it is typically an
-    additional source of errors. It is worth using only if your CPU is too
-    slow to decode a specific video.
+    Hardware decoding is not enabled by default, to keep the out-of-the-box
+    configuration as reliable as possible. However, when using modern hardware,
+    hardware video decoding should work correctly, offering reduced CPU usage,
+    and possibly lower power consumption. On older systems, it may be necessary
+    to use hardware decoding due to insufficient CPU resources; and even on
+    modern systems, sufficiently complex content (eg: 4K60 AV1) may require it.
 
     .. note::
 
         Use the ``Ctrl+h`` shortcut to toggle hardware decoding at runtime. It
-        toggles this option between ``auto`` and ``no``.
+        toggles this option between ``auto-safe`` and ``no``.
 
-        Always enabling HW decoding by putting it into the config file is
-        discouraged. If you use the Ubuntu package, delete ``/etc/mpv/mpv.conf``,
-        as the package tries to enable HW decoding by default by setting
-        ``hwdec=vaapi`` (which is less than ideal, and may even cause
-        sub-optimal wrappers to be used). Or at least change it to
-        ``hwdec=auto-safe``.
+        If you decide you want to use hardware decoding by default, the general
+        recommendation is to try out decoding with the command line option, and
+        prove to yourself that it works as desired for the content you care
+        about. After that, you can add it to your config file.
 
-    Use one of the auto modes if you want to enable hardware decoding.
-    Explicitly selecting the mode is mostly meant for testing and debugging.
-    It's a bad idea to put explicit selection into the config file if you
-    want thing to just keep working after updates and so on.
+        When testing, you should start by using ``hwdec=auto-safe`` as it will
+        limit itself to choosing from hwdecs that are actively supported by the
+        development team. If that doesn't result in working hardware decoding,
+        you can try ``hwdec=auto`` to have it attempt to load every possible
+        hwdec, but if ``auto-safe`` didn't work, you will probably need to know
+        exactly which hwdec matches your hardware and read up on that entry
+        below.
+
+        If ``auto-safe`` or ``auto`` produced the desired results, we recommend
+        just sticking with that and only setting a specific hwdec in your config
+        file if it is really necessary.
+
+        If you use the Ubuntu package, keep in mind that their
+        ``/etc/mpv/mpv.conf`` contains ``hwdec=vaapi``, which is less than
+        ideal as it may not be the right choice for your system, and it may end
+        up using an inefficient wrapper library under the covers. We recommend
+        removing this line or deleting the file altogether.
 
     .. note::
 
@@ -1021,51 +1308,67 @@ Video
           ``Ctrl+h`` default binding to enable it at runtime.
         - If you're not sure, but want hardware decoding always enabled by
           default, put ``hwdec=auto-safe`` into your ``mpv.conf``, and
-          acknowledge that this use case is not "really" supported and may cause
-          problems.
+          acknowledge that this may cause problems.
         - If you want to test available hardware decoding methods, pass
           ``--hwdec=auto --hwdec-codecs=all`` and look at the terminal output.
         - If you're a developer, or want to perform elaborate tests, you may
           need any of the other possible option values.
 
-    ``<api>`` can be one of the following:
+    This option accepts a comma delimited list of ``api`` types, along with certain
+    special values:
 
     :no:        always use software decoding (default)
-    :auto:      forcibly enable any hw decoder found (see below)
-    :yes:       exactly the same as ``auto``
     :auto-safe: enable any whitelisted hw decoder (see below)
+    :auto:      forcibly enable any hw decoder found (see below)
+    :yes:       exactly the same as ``auto-safe``
     :auto-copy: enable best hw decoder with copy-back (see below)
-    :vdpau:     requires ``--vo=gpu`` with X11, or ``--vo=vdpau`` (Linux only)
-    :vdpau-copy: copies video back into system RAM (Linux with some GPUs only)
-    :vaapi:     requires ``--vo=gpu`` or ``--vo=vaapi`` (Linux only)
-    :vaapi-copy: copies video back into system RAM (Linux with some GPUs only)
-    :videotoolbox: requires ``--vo=gpu`` (OS X 10.8 and up),
+
+    .. note::
+
+        Special values can be mixed with api names. eg: ``vaapi,auto`` will try
+        and use the ``vaapi`` hwdec, and if that fails, will run through the
+        normal ``auto`` logic.
+
+    Actively supported hwdecs:
+
+    :d3d11va:   requires ``--vo=gpu`` with ``--gpu-context=d3d11`` or
+                ``--gpu-context=angle`` (Windows 8+ only)
+    :d3d11va-copy: copies video back to system RAM (Windows 8+ only)
+    :videotoolbox: requires ``--vo=gpu`` (macOS 10.8 and up),
                    or ``--vo=libmpv`` (iOS 9.0 and up)
-    :videotoolbox-copy: copies video back into system RAM (OS X 10.8 or iOS 9.0 and up)
+    :videotoolbox-copy: copies video back into system RAM (macOS 10.8 or iOS 9.0 and up)
+    :vaapi:     requires ``--vo=gpu``, ``--vo=vaapi`` or ``--vo=dmabuf-wayland`` (Linux only)
+    :vaapi-copy: copies video back into system RAM (Linux with some GPUs or Windows)
+    :nvdec:     requires ``--vo=gpu`` (Any platform CUDA is available)
+    :nvdec-copy: copies video back to system RAM (Any platform CUDA is available)
+    :drm:       requires ``--vo=gpu`` (Linux only)
+    :drm-copy:   copies video back to system RAM (Linux only)
+    :vulkan:    requires ``--vo=gpu-next`` (Any platform with Vulkan Video Decoding)
+    :vulkan-copy: copies video back to system RAM (Any platform with Vulkan Video Decoding)
+
+    Other hwdecs (only use if you know you have to):
+
     :dxva2:     requires ``--vo=gpu`` with ``--gpu-context=d3d11``,
                 ``--gpu-context=angle`` or ``--gpu-context=dxinterop``
                 (Windows only)
     :dxva2-copy: copies video back to system RAM (Windows only)
-    :d3d11va:   requires ``--vo=gpu`` with ``--gpu-context=d3d11`` or
-                ``--gpu-context=angle`` (Windows 8+ only)
-    :d3d11va-copy: copies video back to system RAM (Windows 8+ only)
-    :mediacodec: requires ``--vo=mediacodec_embed`` (Android only)
+    :vdpau:     requires ``--vo=gpu`` with ``--gpu-context=x11``, or
+                ``--vo=vdpau`` (Linux only)
+    :vdpau-copy: copies video back into system RAM (Linux with some GPUs only)
+    :mediacodec: requires ``--vo=gpu --gpu-context=android``
+                 or ``--vo=mediacodec_embed`` (Android only)
     :mediacodec-copy: copies video back to system RAM (Android only)
-    :mmal:      requires ``--vo=gpu`` (Raspberry Pi only - default if available)
-    :mmal-copy: copies video back to system RAM (Raspberry Pi only)
-    :nvdec:     requires ``--vo=gpu`` (Any platform CUDA is available)
-    :nvdec-copy: copies video back to system RAM (Any platform CUDA is available)
     :cuda:      requires ``--vo=gpu`` (Any platform CUDA is available)
     :cuda-copy: copies video back to system RAM (Any platform CUDA is available)
     :crystalhd: copies video back to system RAM (Any platform supported by hardware)
     :rkmpp:     requires ``--vo=gpu`` (some RockChip devices only)
 
     ``auto`` tries to automatically enable hardware decoding using the first
-    available method. This still depends what VO you are using. For example,
-    if you are not using ``--vo=gpu`` or ``--vo=vdpau``, vdpau decoding will
-    never be enabled. Also note that if the first found method doesn't actually
-    work, it will always fall back to software decoding, instead of trying the
-    next method (might matter on some Linux systems).
+    available method. This still depends what VO you are using. See the list
+    above, for which ``--vo`` and ``gpu-context`` is required for a given
+    hwdec. It will go down the list of available hwdecs until one is
+    successfully initialised. If all of them fail, it will fallback to software
+    decoding.
 
     ``auto-safe`` is similar to ``auto``, but allows only whitelisted methods
     that are considered "safe". This is supposed to be a reasonable way to
@@ -1091,12 +1394,13 @@ Video
 
     Because these copy the decoded video back to system RAM, they're often less
     efficient than the direct modes, and may not help too much over software
-    decoding.
+    decoding if you are short on CPU resources.
 
     .. note::
 
        Most non-copy methods only work with the OpenGL GPU backend. Currently,
-       only the ``vaapi``, ``nvdec`` and ``cuda`` methods work with Vulkan.
+       only the ``vaapi``, ``nvdec``, ``cuda`` and ``vulkan`` methods work with
+       Vulkan.
 
     The ``vaapi`` mode, if used with ``--vo=gpu``, requires Mesa 11, and most
     likely works with Intel and AMD GPUs only. It also requires the opengl EGL
@@ -1120,7 +1424,12 @@ Video
         In theory, hardware decoding does not reduce video quality (at least
         for the codecs h264 and HEVC). However, due to restrictions in video
         output APIs, as well as bugs in the actual hardware decoders, there can
-        be some loss, or even blatantly incorrect results.
+        be some loss, or even blatantly incorrect results. This has largely
+        ceased to be a problem with modern hardware, but there is a lot of
+        hardware out there, so caveat emptor. Known problems are discussed
+        below, but the list cannot be considered exhaustive, as even hwdecs that
+        work well on certain hardware generations may be problematic on other
+        ones.
 
         In some cases, RGB conversion is forced, which means the RGB conversion
         is performed by the hardware decoding API, instead of the shaders
@@ -1136,10 +1445,6 @@ Video
         doesn't support 10 bit or HDR encodings, so these limitations are
         unlikely to be relevant.
 
-        ``vaapi`` and ``d3d11va`` are safe. Enabling deinterlacing (or simply
-        their respective post-processing filters) will possibly at least reduce
-        color quality by converting the output to a 8 bit format.
-
         ``dxva2`` is not safe. It appears to always use BT.601 for forced RGB
         conversion, but actual behavior depends on the GPU drivers. Some drivers
         appear to convert to limited range RGB, which gives a faded appearance.
@@ -1147,8 +1452,10 @@ Video
         affect this additionally. This can give incorrect results even with
         completely ordinary video sources.
 
-        ``rpi`` always uses the hardware overlay renderer, even with
-        ``--vo=gpu``.
+        ``mediacodec`` is not safe. It forces RGB conversion (not with ``-copy``)
+        and how well it handles non-standard colorspaces is not known.
+        In the rare cases where 10-bit is supported the bit depth of the output
+        will be reduced to 8.
 
         ``cuda`` should usually be safe, but depending on how a file/stream
         has been mixed, it has been reported to corrupt the timestamps causing
@@ -1161,20 +1468,9 @@ Video
         conversion. It also discards the top left pixel of each frame for
         some reason.
 
-        All other methods, in particular the copy-back methods (like
-        ``dxva2-copy`` etc.) should hopefully be safe, although they can still
-        cause random decoding issues. At the very least, they shouldn't affect
-        the colors of the image.
-
-        In particular, ``auto-copy`` will only select "safe" modes
-        (although potentially slower than other methods), but there's still no
-        guarantee the chosen hardware decoder will actually work correctly.
-
-        In general, it's very strongly advised to avoid hardware decoding
-        unless **absolutely** necessary, i.e. if your CPU is insufficient to
-        decode the file in questions. If you run into any weird decoding issues,
-        frame glitches or discoloration, and you have ``--hwdec`` turned on,
-        the first thing you should try is disabling it.
+        If you run into any weird decoding issues, frame glitches or
+        discoloration, and you have ``--hwdec`` turned on, the first thing you
+        should try is disabling it.
 
 ``--gpu-hwdec-interop=<auto|all|no|name>``
     This option is for troubleshooting hwdec interop issues. Since it's a
@@ -1199,10 +1495,6 @@ Video
 
     Runtime changes to this are ignored (the current option value is used
     whenever the renderer is created).
-
-    The old aliases ``--opengl-hwdec-interop`` and ``--hwdec-preload`` are
-    barely related to this anymore, but will be somewhat compatible in some
-    cases.
 
 ``--hwdec-extra-frames=<N>``
     Number of GPU frames hardware decoding should preallocate (default: see
@@ -1245,9 +1537,12 @@ Video
     For the Vulkan GPU backend, decoding must always happen on the display
     device, and this option has no effect.
 
-``--vaapi-device=<device file>``
+``--vaapi-device=<device file|adapter name>``
     Choose the DRM device for ``vaapi-copy``. This should be the path to a
     DRM device file. (Default: ``/dev/dri/renderD128``)
+
+    On Windows this takes adapter name as an input. Will pick the default adapter
+    if unset. Alternatives are listed when the name "help" is given.
 
 ``--panscan=<0.0-1.0>``
     Enables pan-and-scan functionality (cropping the sides of e.g. a 16:9
@@ -1305,7 +1600,7 @@ Video
     also still be scaled in one dimension if the source uses non-square pixels
     (e.g. anamorphic widescreen DVDs).
 
-    This option is disabled if the ``--no-keepaspect`` option is used.
+    This option is disabled if ``--keepaspect=no`` is used.
 
 ``--video-pan-x=<value>``, ``--video-pan-y=<value>``
     Moves the displayed video rectangle by the given value in the X or Y
@@ -1313,18 +1608,31 @@ Video
     full size, even if parts of the video are not visible due to panscan or
     other options).
 
-    For example, displaying a 1280x720 video fullscreen on a 1680x1050 screen
-    with ``--video-pan-x=-0.1`` would move the video 168 pixels to the left
-    (making 128 pixels of the source video invisible).
+    For example, displaying a video fullscreen on a 1920x1080 screen with
+    ``--video-pan-x=-0.1`` would move the video 192 pixels to the left and
+    ``--video-pan-y=-0.1`` would move the video 108 pixels up.
 
-    This option is disabled if the ``--no-keepaspect`` option is used.
+    This option is disabled if ``--keepaspect=no`` is used.
 
 ``--video-rotate=<0-359|no>``
-    Rotate the video clockwise, in degrees. Currently supports 90° steps only.
-    If ``no`` is given, the video is never rotated, even if the file has
-    rotation metadata. (The rotation value is added to the rotation metadata,
-    which means the value ``0`` would rotate the video according to the
-    rotation metadata.)
+    Rotate the video clockwise, in degrees. If ``no`` is given, the video is
+    never rotated, even if the file has rotation metadata. (The rotation value
+    is added to the rotation metadata, which means the value ``0`` would rotate
+    the video according to the rotation metadata.)
+
+    When using hardware decoding without copy-back, only 90° steps work, while
+    software decoding and hardware decoding methods that copy the video back to
+    system memory support all values between 0 and 359.
+
+``--video-crop=<[W[xH]][+x+y]>``, ``--video-crop=<x:y>``
+    Crop the video by starting at the x, y offset for w, h pixels. The crop is
+    applied to the source video rectangle (before anamorphic stretch) by the VO.
+    A crop rectangle that is not within the video rectangle will be ignored.
+    This works with hwdec, unlike the equivalent 'lavfi-crop'. When offset is
+    omitted, the central area will be cropped. Setting the crop to empty one
+    ``--video-crop=0x0+0+0`` overrides container crop and disables cropping.
+    Setting the crop to ``--video-crop=""`` disables manual cropping and restores
+    the container crop if it's specified.
 
 ``--video-zoom=<value>``
     Adjust the video display scale factor by the given value. The parameter is
@@ -1332,19 +1640,48 @@ Video
     ``--video-zoom=1`` is twice the size, ``--video-zoom=-2`` is one fourth of
     the size, and so on.
 
-    This option is disabled if the ``--no-keepaspect`` option is used.
+    This option is disabled if ``--keepaspect=no`` is used.
+
+``--video-scale-x=<value>``, ``--video-scale-y=<value>``
+    Multiply the video display size with the given value (default: 1.0). If a
+    non-default value is used, this will be different from the window size, so
+    video will be either cut off, or black bars are added.
+
+    This value is multiplied with the value derived from ``--video-zoom`` and
+    the normal video aspect ratio. This option is disabled if
+    ``--keepaspect=no`` is used.
 
 ``--video-align-x=<-1-1>``, ``--video-align-y=<-1-1>``
-    Moves the video rectangle within the black borders, which are usually added
-    to pad the video to screen if video and screen aspect ratios are different.
-    ``--video-align-y=-1`` would move the video to the top of the screen
-    (leaving a border only on the bottom), a value of ``0`` centers it
-    (default), and a value of ``1`` would put the video at the bottom of the
-    screen.
+    When the video is bigger than the window, these move the displayed rectangle
+    to show different parts of the video. ``--video-align-y=-1`` would display
+    the top of the video, ``0`` would display the center (default), and ``1``
+    would display the bottom.
+
+    When the video is smaller than the window and ``--video-recenter`` is
+    disabled, these move the video rectangle within the black borders, which are
+    usually added to pad the video to the window if video and window aspect
+    ratios are different. ``--video-align-y=-1`` would move the video to the top
+    of the window (leaving a border only on the bottom), ``0`` would center it,
+    and ``1`` would put the video at the bottom of the window.
 
     If video and screen aspect match perfectly, these options do nothing.
 
-    This option is disabled if the ``--no-keepaspect`` option is used.
+    Unlike ``--video-pan-x`` and ``--video-pan-y``, these don't go beyond the
+    video's or window's boundaries or make the displayed rectangle drift off
+    after zooming.
+
+    This option is disabled if ``--keepaspect=no`` is used.
+
+``--video-recenter=<yes|no>``
+    Whether to behave as if ``--video-align-x`` and ``--video-align-y`` were 0
+    when the video becomes smaller than the window in the respective direction
+
+    After zooming in until the video is bigger the window, panning with
+    `--video-align-x` and/or `--video-align-y`, and zooming out until the video
+    is smaller than the window, this is useful to recenter the video in the
+    window.
+
+    Default: no.
 
 ``--video-margin-ratio-left=<val>``, ``--video-margin-ratio-right=<val>``, ``--video-margin-ratio-top=<val>``, ``--video-margin-ratio-bottom=<val>``
     Set extra video margins on each border (default: 0). Each value is a ratio
@@ -1359,7 +1696,7 @@ Video
     The margins are applied after 90° video rotation, but before any other video
     transformations.
 
-    This option is disabled if the ``--no-keepaspect`` option is used.
+    This option is disabled if ``--keepaspect=no`` is used.
 
     Subtitles still may use the margins, depending on ``--sub-use-margins`` and
     similar options.
@@ -1370,38 +1707,48 @@ Video
     more generally useful. The behavior of these options may change to fit
     OSC requirements better, too.
 
-``--correct-pts``, ``--no-correct-pts``
-    ``--no-correct-pts`` switches mpv to a mode where video timing is
-    determined using a fixed framerate value (either using the ``--fps``
-    option, or using file information). Sometimes, files with very broken
-    timestamps can be played somewhat well in this mode. Note that video
-    filters, subtitle rendering, seeking (including hr-seeks and backstepping),
-    and audio synchronization can be completely broken in this mode.
+``--correct-pts=<yes|no>``
+    ``--correct-pts=no`` switches mpv to a mode where video timing is
+    determined using a fixed framerate value (either using the
+    ``--container-fps-override`` option, or using file information). Sometimes,
+    files with very broken timestamps can be played somewhat well in this mode.
+    Note that video filters, subtitle rendering, seeking (including hr-seeks and
+    backstepping), and audio synchronization can be completely broken in this mode.
 
-``--fps=<float>``
+``--container-fps-override=<float>``
     Override video framerate. Useful if the original value is wrong or missing.
 
     .. note::
 
-        Works in ``--no-correct-pts`` mode only.
+        Works in ``--correct-pts=no`` mode only.
 
-``--deinterlace=<yes|no>``
-    Enable or disable interlacing (default: no).
+``--deinterlace=<yes|no|auto>``
+    Enable or disable deinterlacing (default: no).
     Interlaced video shows ugly comb-like artifacts, which are visible on
-    fast movement. Enabling this typically inserts the yadif video filter in
+    fast movement. Enabling this typically inserts the bwdif video filter in
     order to deinterlace the video, or lets the video output apply deinterlacing
     if supported.
 
-    This behaves exactly like the ``deinterlace`` input property (usually
-    mapped to ``d``).
+    When using ``auto``, mpv will insert a deinterlacing filter if ffmpeg
+    detects that the video frame is interlaced. Be aware that there can be false
+    positives in certain cases, such as when files are encoded as interlaced
+    despite the video not actually being so. This is why ``auto`` is not the
+    default value.
 
-    Keep in mind that this **will** conflict with manually inserted
-    deinterlacing filters, unless you take care. (Since mpv 0.27.0, even the
-    hardware deinterlace filters will conflict. Also since that version,
-    ``--deinterlace=auto`` was removed, which used to mean that the default
-    interlacing option of possibly inserted video filters was used.)
+    Keep in mind that using this filter **will** conflict with any manually
+    inserted deinterlacing filters, and that this will make video look worse if
+    it's not actually interlaced.
 
-    Note that this will make video look worse if it's not actually interlaced.
+``--deinterlace-field-parity=<tff|bff|auto>``
+    Specify the field parity/order when deinterlacing (default: auto).
+    Each frame of an interlaced video is divided into two fields, which are
+    then separately transmitted. Top field represents even lines while bottom
+    field represents odd lines. When deinterlacing the deinterlacer needs to
+    know the correct temporal order of the fields else the video will appear
+    jittery.
+
+    ``auto`` will automatically try to detect the field order of the video,
+    ``tff`` forces top field first while ``bff`` forces bottom field first.
 
 ``--frames=<number>``
     Play/convert only first ``<number>`` video frames, then quit.
@@ -1440,16 +1787,23 @@ Video
     You can get the list of allowed codecs with ``mpv --vd=help``. Remove the
     prefix, e.g. instead of ``lavc:h264`` use ``h264``.
 
-    By default, this is set to ``h264,vc1,hevc,vp9``. Note that
+    By default, this is set to ``h264,vc1,hevc,vp8,vp9,av1,prores``. Note that
     the hardware acceleration special codecs like ``h264_vdpau`` are not
-    relevant anymore, and in fact have been removed from Libav in this form.
+    relevant anymore, and in fact have been removed from FFmpeg in this form.
 
     This is usually only needed with broken GPUs, where a codec is reported
     as supported, but decoding causes more problems than it solves.
 
+    .. note::
+
+        On some broken drivers (e.g. NVIDIA on Linux), probing for codecs which
+        the GPU does not support can unnecessarily slow down video playback
+        initialization. To alleviate this, explicitly specify a list which
+        only includes the codecs supported on the setup.
+
     .. admonition:: Example
 
-        ``mpv --hwdec=vdpau --vo=vdpau --hwdec-codecs=h264,mpeg2video``
+        ``mpv --hwdec=vdpau --hwdec-codecs=h264,mpeg2video``
             Enable vdpau decoding for h264 and mpeg2 only.
 
 ``--vd-lavc-check-hw-profile=<yes|no>``
@@ -1469,16 +1823,29 @@ Video
     the number of packets that could not be decoded. Values below an unspecified
     count will not have this problem, because mpv retains the packets.
 
-``--vd-lavc-dr=<yes|no>``
-    Enable direct rendering (default: yes). If this is set to ``yes``, the
+``--vd-lavc-film-grain=<auto|cpu|gpu>``
+    Enables film grain application on the GPU. If video decoding is done on
+    the CPU, doing film grain application on the GPU can speed up decoding.
+    This option can also help hardware decoding, as it can reduce the number
+    of frame copies done.
+
+    By default, it's set to ``auto``, so if the VO supports film grain
+    application, then it will be treated as ``gpu``. If the VO does not
+    support this, then it will be treated as ``cpu``, regardless of the setting.
+    Currently, only ``gpu-next`` supports film grain application.
+
+``--vd-lavc-dr=<auto|yes|no>``
+    Enable direct rendering (default: auto). If this is set to ``yes``, the
     video will be decoded directly to GPU video memory (or staging buffers).
     This can speed up video upload, and may help with large resolutions or
     slow hardware. This works only with the following VOs:
 
         - ``gpu``: requires at least OpenGL 4.4 or Vulkan.
+        - ``libmpv``: The libmpv render API has optional support.
 
-    (In particular, this can't be made work with ``opengl-cb``, but the libmpv
-    render API has optional support.)
+    The ``auto`` option will try to guess whether DR can improve performance
+    on your particular hardware. Currently this enables it on AMD or NVIDIA
+    if using OpenGL or unconditionally if using Vulkan.
 
     Using video filters of any kind that write to the image data (or output
     newly allocated frames) will silently disable the DR code path.
@@ -1486,7 +1853,7 @@ Video
 ``--vd-lavc-bitexact``
     Only use bit-exact algorithms in all decoding steps (for codec testing).
 
-``--vd-lavc-fast`` (MPEG-2, MPEG-4, and H.264 only)
+``--vd-lavc-fast`` (MPEG-1/2 and H.264 only)
     Enable optimizations which do not comply with the format specification and
     potentially cause problems, like simpler dequantization, simpler motion
     compensation, assuming use of the default quantization matrix, assuming YUV
@@ -1512,12 +1879,14 @@ Video
     no, libavcodec won't output frames that were either decoded before an
     initial keyframe was decoded, or frames that are recognized as corrupted.
 
-``--vd-lavc-skiploopfilter=<skipvalue> (H.264 only)``
-    Skips the loop filter (AKA deblocking) during H.264 decoding. Since
+``--vd-lavc-skiploopfilter=<skipvalue>`` (H.264, HEVC only)
+    Skips the loop filter (AKA deblocking) during decoding. Since
     the filtered frame is supposed to be used as reference for decoding
     dependent frames, this has a worse effect on quality than not doing
     deblocking on e.g. MPEG-2 video. But at least for high bitrate HDTV,
     this provides a big speedup with little visible quality loss.
+    Codecs other than H.264 or HEVC may have partial support for this option
+    (often only ``all`` and ``none``).
 
     ``<skipvalue>`` can be one of the following:
 
@@ -1529,7 +1898,7 @@ Video
     :nonkey:  Skip all frames except keyframes.
     :all:     Skip all frames.
 
-``--vd-lavc-skipidct=<skipvalue> (MPEG-1/2 only)``
+``--vd-lavc-skipidct=<skipvalue>`` (MPEG-1/2/4 only)
     Skips the IDCT step. This degrades quality a lot in almost all cases
     (see skiploopfilter for available skip values).
 
@@ -1552,13 +1921,20 @@ Video
     Normally, this is autodetected by libavcodec. But if the bitstream contains
     no x264 version info (or it was somehow skipped), and the stream was in fact
     encoded by an old x264 version (build 150 or earlier), and if the stream
-    uses ``4:4:4`` chroma, then libavcodec will by default show corrupted video.
+    uses 4:4:4 chroma, then libavcodec will by default show corrupted video.
     This option sets the libavcodec ``x264_build`` option to ``150``, which
     means that if the stream contains no version info, or was not encoded by
     x264 at all, it assumes it was encoded by the old version. Enabling this
     option is pretty safe if you want your broken files to work, but in theory
     this can break on streams not encoded by x264, or if a stream encoded by a
     newer x264 version contains no version info.
+
+``--vd-apply-cropping``
+    Certain video codecs support cropping, meaning that only a sub-rectangle of
+    the decoded frame is intended for display. This option controls how cropping
+    is handled by libavcodec. Cropping during decoding has certain limitations
+    with regards to alignment and hardware decoding. If this option is enabled,
+    decoder will apply the crop, else VO will handle it. Enabled by default.
 
 ``--swapchain-depth=<N>``
     Allow up to N in-flight frames. This essentially controls the frame
@@ -1573,8 +1949,22 @@ Audio
 
 ``--audio-pitch-correction=<yes|no>``
     If this is enabled (default), playing with a speed different from normal
-    automatically inserts the ``scaletempo`` audio filter. For details, see
-    audio filter section.
+    automatically inserts the ``scaletempo2`` audio filter. You can insert
+    filters besides ``scaletempo2`` and modify their params using
+    `Conditional auto profiles`:
+
+    ::
+
+        [af_insert]
+        profile-cond=speed ~= 1
+        profile-restore=copy
+        af-add=scaletempo2=search-interval=50 # Insert filter and params here.
+
+    Filters set this way replace the ``scaletempo2`` default, instead of
+    overlapping with it. If there are multiple audio filters inserted that can do
+    pitch correction, then only the last one in the filter chain is used.
+    For details on the specifics of each available filter, see the audio filter
+    section.
 
 ``--audio-device=<name>``
     Use the given audio device. This consists of the audio output name, e.g.
@@ -1611,10 +2001,10 @@ Audio
     Enable exclusive output mode. In this mode, the system is usually locked
     out, and only mpv will be able to output audio.
 
-    This only works for some audio outputs, such as ``wasapi`` and
-    ``coreaudio``. Other audio outputs silently ignore this options. They either
-    have no concept of exclusive mode, or the mpv side of the implementation is
-    missing.
+    This only works for some audio outputs, such as ``wasapi``, ``coreaudio``,
+    ``pipewire`` and ``audiounit``. Other audio outputs silently ignore this option.
+    They either have no concept of exclusive mode, or the mpv side of the
+    implementation is missing.
 
 ``--audio-fallback-to-null=<yes|no>``
     If no audio device can be opened, behave as if ``--ao=null`` was given. This
@@ -1631,9 +2021,9 @@ Audio
 ``--af=<filter1[=parameter1:parameter2:...],filter2,...>``
     Specify a list of audio filters to apply to the audio stream. See
     `AUDIO FILTERS`_ for details and descriptions of the available filters.
-    The option variants ``--af-add``, ``--af-pre``, ``--af-del`` and
-    ``--af-clr`` exist to modify a previously specified list, but you
-    should not need these for typical use.
+    The option variants ``--af-add``, ``--af-pre``, and ``--af-clr`` exist
+    to modify a previously specified list, but you should not need these for
+    typical use.
 
 ``--audio-spdif=<codecs>``
     List of codecs for which compressed audio passthrough should be used. This
@@ -1648,7 +2038,7 @@ Audio
     In earlier mpv versions you could use ``--ad`` to force the spdif wrapper.
     This does not work anymore.
 
-    .. admonition:: Warning
+    .. warning::
 
         There is not much reason to use this. HDMI supports uncompressed
         multichannel PCM, and mpv supports lossless DTS-HD decoding via
@@ -1669,13 +2059,13 @@ Audio
     .. admonition:: Examples
 
         ``--ad=mp3float``
-            Prefer the FFmpeg/Libav ``mp3float`` decoder over all other MP3
+            Prefer the FFmpeg ``mp3float`` decoder over all other MP3
             decoders.
 
         ``--ad=help``
             List all available decoders.
 
-    .. admonition:: Warning
+    .. warning::
 
         Enabling compressed audio passthrough (AC3 and DTS via SPDIF/HDMI) with
         this option is not possible. Use ``--audio-spdif`` instead.
@@ -1685,7 +2075,19 @@ Audio
     amplification. Negative values can be passed for compatibility, but are
     treated as 0.
 
-    Since mpv 0.18.1, this always controls the internal mixer (aka "softvol").
+    Since mpv 0.18.1, this always controls the internal mixer (aka software
+    volume).
+
+``--volume-max=<100.0-1000.0>``
+    Set the maximum amplification level in percent (default: 130). A value of
+    130 will allow you to adjust the volume up to about double the normal level.
+
+``--volume-gain=<db>``
+    Set the volume gain in dB. This is applied on top of other volume and gain
+    settings.
+
+``--volume-gain-max=<0.0-150.0>``, ``--volume-gain-min=<-150.0-0.0>``
+    Set the volume gain range in dB (default: -96 dB min, 12 dB max).
 
 ``--replaygain=<no|track|album>``
     Adjust volume gain according to replaygain values stored in the file
@@ -1698,8 +2100,8 @@ Audio
     (default: 0).
 
 ``--replaygain-clip=<yes|no>``
-    Prevent clipping caused by replaygain by automatically lowering the
-    gain (default). Use ``--replaygain-clip=no`` to disable this.
+    Allow the volume gain to clip (default: no). If this option is not
+    enabled, mpv automatically will prevent clipping by lowering the gain.
 
 ``--replaygain-fallback=<db>``
     Gain in dB to apply if the file has no replay gain tags. This option
@@ -1710,24 +2112,10 @@ Audio
     Audio delay in seconds (positive or negative float value). Positive values
     delay the audio, and negative values delay the video.
 
-``--mute=<yes|no|auto>``
+``--mute=<yes|no>``
     Set startup audio mute status (default: no).
 
-    ``auto`` is a deprecated possible value that is equivalent to ``no``.
-
     See also: ``--volume``.
-
-``--softvol=<no|yes|auto>``
-    Deprecated/unfunctional. Before mpv 0.18.1, this used to control whether
-    to use the volume controls of the audio output driver or the internal mpv
-    volume filter.
-
-    The current behavior is that softvol is always enabled, i.e. as if this
-    option is set to ``yes``. The other behaviors are not available anymore,
-    although ``auto`` almost matches current behavior in most cases.
-
-    The ``no`` behavior is still partially available through the ``ao-volume``
-    and ``ao-mute`` properties. But there are no options to reset these.
 
 ``--audio-demuxer=<[+]name>``
     Use this audio demuxer type when using ``--audio-file``. Use a '+' before
@@ -1746,7 +2134,7 @@ Audio
     other players) ignore this for the sake of better audio quality.
 
 ``--ad-lavc-downmix=<yes|no>``
-    Whether to request audio channel downmixing from the decoder (default: yes).
+    Whether to request audio channel downmixing from the decoder (default: no).
     Some decoders, like AC-3, AAC and DTS, can remix audio on decoding. The
     requested number of output channels is set with the ``--audio-channels`` option.
     Useful for playing surround audio on a stereo system.
@@ -1764,10 +2152,10 @@ Audio
 
     This is a key/value list option. See `List Options`_ for details.
 
-``--ad-spdif-dtshd=<yes|no>``, ``--dtshd``, ``--no-dtshd``
+``--ad-spdif-dtshd=<yes|no>``, ``--dtshd=<yes|no>``
     If DTS is passed through, use DTS-HD.
 
-    .. admonition:: Warning
+    .. warning::
 
         This and enabling passthrough via ``--ad`` are deprecated in favor of
         using ``--audio-spdif=dts-hd``.
@@ -1796,9 +2184,9 @@ Audio
 
         Using this mode is recommended for direct hardware output, especially
         over HDMI (see HDMI warning below).
-    - ``--audio-channels=stereo``
-        Force  a plain stereo downmix. This is a special-case of the previous
-        item. (See paragraphs below for implications.)
+    - ``--audio-channels=<stereo|mono>``
+        Force a downmix to stereo or mono. These are special-cases of the
+        previous item. (See paragraphs below for implications.)
 
     If a list of layouts is given, each item can be either an explicit channel
     layout name (like ``5.1``), or a channel number. Channel numbers refer to
@@ -1825,7 +2213,7 @@ Audio
     work-around for this on some AOs is to use ``--audio-exclusive=yes`` to
     circumvent the system mixer entirely.
 
-    .. admonition:: Warning
+    .. warning::
 
         Using ``auto`` can cause issues when using audio over HDMI. The OS will
         typically report all channel layouts that _can_ go over HDMI, even if
@@ -1837,14 +2225,17 @@ Audio
         want. For example, most A/V receivers connected via HDMI and that can
         do 7.1 would  be served by: ``--audio-channels=7.1,5.1,stereo``
 
-``--audio-display=<no|attachment>``
-    Setting this option to ``attachment`` (default) will display image
-    attachments (e.g. album cover art) when playing audio files. It will
-    display the first image found, and additional images are available as
-    video tracks.
+``--audio-display=<no|embedded-first|external-first>``
+    Determines whether to display cover art when playing audio files and with
+    what priority. It will display the first image found, and additional images
+    are available as video tracks.
 
-    Setting this option to ``no`` disables display of video entirely when
-    playing audio files.
+    :no:             Disable display of video entirely when playing audio
+                     files.
+    :embedded-first: Display embedded images and external cover art, giving
+                     priority to embedded images (default).
+    :external-first: Display embedded images and external cover art, giving
+                     priority to external files.
 
     This option has no influence on files with normal video tracks.
 
@@ -1866,8 +2257,8 @@ Audio
 ``--audio-samplerate=<Hz>``
     Select the output sample rate to be used (of course sound cards have
     limits on this). If the sample frequency selected is different from that
-    of the current media, the lavrresample audio filter will be inserted into
-    the audio filter layer to compensate for the difference.
+    of the current media, the internal swresample audio filter will be inserted
+    into the audio filter layer to compensate for the difference.
 
 ``--gapless-audio=<no|yes|weak>``
     Try to play consecutive audio files with no silence or disruption at the
@@ -1904,7 +2295,7 @@ Audio
         then the buffered audio may run out before playback of the new file
         can start.
 
-``--initial-audio-sync``, ``--no-initial-audio-sync``
+``--initial-audio-sync=<yes|no>``
     When starting a video file or after events such as seeking, mpv will by
     default modify the audio stream to make it start from the same timestamp
     as video, by either inserting silence at the start or cutting away the
@@ -1913,21 +2304,22 @@ Audio
     their start timestamps differ, and then video timing is gradually adjusted
     if necessary to reach correct synchronization later.
 
-``--volume-max=<100.0-1000.0>``, ``--softvol-max=<...>``
-    Set the maximum amplification level in percent (default: 130). A value of
-    130 will allow you to adjust the volume up to about double the normal level.
-
-    ``--softvol-max`` is a deprecated alias and should not be used.
-
-``--audio-file-auto=<no|exact|fuzzy|all>``, ``--no-audio-file-auto``
+``--audio-file-auto=<no|exact|fuzzy|all>``
     Load additional audio files matching the video filename. The parameter
     specifies how external audio files are matched.
 
     :no:    Don't automatically load external audio files (default).
     :exact: Load the media filename with audio file extension.
-    :fuzzy: Load all audio files containing media filename.
+    :fuzzy: Load all audio files containing the media filename.
     :all:   Load all audio files in the current and ``--audio-file-paths``
             directories.
+
+``--audio-exts=ext1,ext2,...``
+    Audio file extensions to try to match when using ``--audio-file-auto``,
+    ``--autocreate-playlist`` or ``--directory-filter-types``.
+
+    This is a string list option. See `List Options`_ for details.
+    Use ``--help=audio-exts`` to see default extensions.
 
 ``--audio-file-paths=<path1:path2:...>``
     Equivalent to ``--sub-file-paths`` option, but for auto-loaded audio files.
@@ -1944,7 +2336,7 @@ Audio
     a larger buffer if it pleases. If the device creates a smaller buffer,
     additional audio is buffered in an additional software buffer.
 
-    Making this larger will make soft-volume and other filters react slower,
+    Making this larger may make soft-volume and other filters react slower,
     introduce additional issues on playback speed change, and block the
     player on audio format changes. A smaller buffer might lead to audio
     dropouts.
@@ -1965,6 +2357,11 @@ Audio
 
     Not all AOs support this.
 
+    .. warning::
+
+        This modifies certain subtle player behavior, like A/V-sync and underrun
+        handling. Enabling this option is strongly discouraged.
+
 ``--audio-wait-open=<secs>``
     This makes sense for use with ``--audio-stream-silence=yes``. If this option
     is given, the player will wait for the given amount of seconds after opening
@@ -1983,17 +2380,22 @@ Subtitles
     Subtitles in ASS format are normally not changed intentionally, but
     overriding them can be controlled with ``--sub-ass-override``.
 
-    Previously some options working on text subtitles were called
-    ``--sub-text-*``, they are now named ``--sub-*``, and those specifically
-    for ASS have been renamed from ``--ass-*`` to ``--sub-ass-*``.
-    They are now all in this section.
-
 ``--sub-demuxer=<[+]name>``
     Force subtitle demuxer type for ``--sub-file``. Give the demuxer name as
     printed by ``--sub-demuxer=help``.
 
+``--sub-lavc-o=<key>=<value>[,<key>=<value>[,...]]``
+    Pass AVOptions to libavcodec decoder. Note, a patch to make the o=
+    unneeded and pass all unknown options through the AVOption system is
+    welcome. A full list of AVOptions can be found in the FFmpeg manual.
+
+    This is a key/value list option. See `List Options`_ for details.
+
 ``--sub-delay=<sec>``
-    Delays subtitles by ``<sec>`` seconds. Can be negative.
+    Delays primary subtitles by ``<sec>`` seconds. Can be negative.
+
+``--secondary-sub-delay=<sec>``
+    Delays secondary subtitles by ``<sec>`` seconds. Can be negative.
 
 ``--sub-files=<file-list>``, ``--sub-file=<filename>``
     Add a subtitle file to the list of external subtitles.
@@ -2016,8 +2418,8 @@ Subtitles
 ``--secondary-sid=<ID|auto|no>``
     Select a secondary subtitle stream. This is similar to ``--sid``. If a
     secondary subtitle is selected, it will be rendered as toptitle (i.e. on
-    the top of the screen) alongside the normal subtitle, and provides a way
-    to render two subtitles at once.
+    the top of the screen) alongside the normal subtitle by default, and
+    provides a way to render two subtitles at once.
 
     There are some caveats associated with this feature. For example, bitmap
     subtitles will always be rendered in their usual position, so selecting a
@@ -2027,14 +2429,14 @@ Subtitles
     .. note::
 
         Styling and interpretation of any formatting tags is disabled for the
-        secondary subtitle. Internally, the same mechanism as ``--no-sub-ass``
+        secondary subtitle. Internally, the same mechanism as ``--sub-ass=no``
         is used to strip the styling.
 
     .. note::
 
         If the main subtitle stream contains formatting tags which display the
         subtitle at the top of the screen, it will overlap with the secondary
-        subtitle. To prevent this, you could use ``--no-sub-ass`` to disable
+        subtitle. To prevent this, you could use ``--sub-ass=no`` to disable
         styling in the main subtitle stream.
 
 ``--sub-scale=<0-100>``
@@ -2045,27 +2447,35 @@ Subtitles
         This affects ASS subtitles as well, and may lead to incorrect subtitle
         rendering. Use with care, or use ``--sub-font-size`` instead.
 
+``--sub-scale-signs=<yes|no>``
+    When set to yes, also apply ``--sub-scale`` to typesetting (or "signs").
+    When this is set to no, ``--sub-scale`` is only applied to dialogue. The
+    distinction between dialogue and typesetting is done on a best effort basis
+    and is not infallible (default: no).
+
 ``--sub-scale-by-window=<yes|no>``
     Whether to scale subtitles with the window size (default: yes). If this is
-    disabled, changing the window size won't change the subtitle font size.
-
-    Like ``--sub-scale``, this can break ASS subtitles.
-
-``--sub-scale-with-window=<yes|no>``
-    Make the subtitle font size relative to the window, instead of the video.
-    This is useful if you always want the same font size, even if the video
-    doesn't cover the window fully, e.g. because screen aspect and window
-    aspect mismatch (and the player adds black bars).
-
-    Default: yes.
-
-    This option is misnamed. The difference to the confusingly similar sounding
-    option ``--sub-scale-by-window`` is that ``--sub-scale-with-window`` still
-    scales with the approximate window size, while the other option disables
-    this scaling.
+    disabled while ``--sub-scale-with-window`` is set to yes, changing the window
+    size won't change the subtitle font size.
 
     Affects plain text subtitles only (or ASS if ``--sub-ass-override`` is set
     high enough).
+
+``--sub-scale-with-window=<yes|no>``
+    Make the subtitle font size relative to the window (default: yes). If this is
+    disabled while ``--sub-scale-by-window`` is set to yes, the subtitle font
+    size is scaled relative to the video size instead.
+
+    Affects plain text subtitles only (or ASS if ``--sub-ass-override`` is set
+    high enough).
+
+    .. note::
+
+        By default, the subtitle font size is scaled with the window size.
+        To make the font size constant, set only ``--sub-scale-by-window`` to no.
+        To make the font size scale with video size instead, set only
+        ``--sub-scale-with-window`` to no.
+        It's not meaningful to set both options to no.
 
 ``--sub-ass-scale-with-window=<yes|no>``
     Like ``--sub-scale-with-window``, but affects subtitles in ASS format only.
@@ -2077,14 +2487,26 @@ Subtitles
     Use fonts embedded in Matroska container files and ASS scripts (default:
     yes). These fonts can be used for SSA/ASS subtitle rendering.
 
-``--sub-pos=<0-100>``
+``--sub-pos=<0-150>``
     Specify the position of subtitles on the screen. The value is the vertical
-    position of the subtitle in % of the screen height.
+    position of the subtitle in % of the screen height. 100 is the original
+    position, which is often not the absolute bottom of the screen, but with
+    some margin between the bottom and the subtitle. Values above 100 move the
+    subtitle further down.
 
-    .. note::
+    .. warning::
+
+        Text subtitles (as opposed to image subtitles) may be cut off if the
+        value of the option is above 100. This is a libass restriction.
 
         This affects ASS subtitles as well, and may lead to incorrect subtitle
-        rendering. Use with care, or use ``--sub-margin-y`` instead.
+        rendering in addition to the problem above.
+
+        Using ``--sub-margin-y`` can achieve this in a better way.
+
+``--secondary-sub-pos=<0-150>``
+    Specify the position of secondary subtitles on the screen. This is similar
+    to ``--sub-pos`` but for secondary subtitles.
 
 ``--sub-speed=<0.1-10.0>``
     Multiply the subtitle event timestamps with the given value. Can be used
@@ -2096,21 +2518,21 @@ Subtitles
         ``--sub-speed=25/23.976`` plays frame based subtitles which have been
         loaded assuming a framerate of 23.976 at 25 FPS.
 
-``--sub-ass-force-style=<[Style.]Param=Value[,...]>``
+``--sub-ass-style-overrides=<[Style.]Param=Value[,...]>``
     Override some style or script info parameters.
 
     This is a string list option. See `List Options`_ for details.
 
     .. admonition:: Examples
 
-        - ``--sub-ass-force-style=FontName=Arial,Default.Bold=1``
-        - ``--sub-ass-force-style=PlayResY=768``
+        - ``--sub-ass-style-overrides=FontName=Arial,Default.Bold=1``
+        - ``--sub-ass-style-overrides=PlayResY=768``
 
     .. note::
 
         Using this option may lead to incorrect subtitle rendering.
 
-``--sub-ass-hinting=<none|light|normal|native>``
+``--sub-hinting=<none|light|normal|native>``
     Set font hinting type. <type> can be:
 
     :none:       no hinting (default)
@@ -2118,17 +2540,17 @@ Subtitles
     :normal:     FreeType autohinter, normal mode
     :native:     font native hinter
 
-    .. admonition:: Warning
+    .. warning::
 
         Enabling hinting can lead to mispositioned text (in situations it's
         supposed to match up video background), or reduce the smoothness
         of animations with some badly authored ASS scripts. It is recommended
         to not use this option, unless really needed.
 
-``--sub-ass-line-spacing=<value>``
+``--sub-line-spacing=<value>``
     Set line spacing value for SSA/ASS renderer.
 
-``--sub-ass-shaper=<simple|complex>``
+``--sub-shaper=<simple|complex>``
     Set the text layout engine used by libass.
 
     :simple:   uses Fribidi only, fast, doesn't render some languages correctly
@@ -2136,6 +2558,22 @@ Subtitles
 
     ``complex`` is the default. If libass hasn't been compiled against HarfBuzz,
     libass silently reverts to ``simple``.
+
+``--sub-ass-prune-delay=<-1|seconds>``
+    Set the delay for automatic pruning of events from memory in libass. When
+    enabled, subtitle events are removed from memory once their end timestamp is
+    older than the specified delay.
+
+    :-1:        disables automatic pruning (default).
+    :seconds:   specify how many seconds after an event is no longer displayed
+                should the pruning occur. ``0`` prunes events as soon as they're
+                off screen.
+
+    .. note::
+
+        This breaks sub-seek and subtitle rendering when changing play-direction
+        from forward to backward during runtime for events that were already
+        "seen" and need to be rendered again, if those events got pruned.
 
 ``--sub-ass-styles=<filename>``
     Load all SSA/ASS styles found in the specified file and use them for
@@ -2146,24 +2584,32 @@ Subtitles
 
         Using this option may lead to incorrect subtitle rendering.
 
-``--sub-ass-override=<yes|no|force|scale|strip>``
+``--sub-ass-override=<no|yes|scale|force|strip>``
     Control whether user style overrides should be applied. Note that all of
     these overrides try to be somewhat smart about figuring out whether or not
-    a subtitle is considered a "sign".
+    a subtitle is considered a "sign" and try to be as non-destructive as
+    possible.
 
     :no:    Render subtitles as specified by the subtitle scripts, without
             overrides.
     :yes:   Apply all the ``--sub-ass-*`` style override options. Changing the
             default for any of these options can lead to incorrect subtitle
-            rendering (default).
+            rendering.
+    :scale: Like ``yes``, but also apply ``--sub-scale`` (default).
     :force: Like ``yes``, but also force all ``--sub-*`` options. Can break
-            rendering easily.
-    :scale: Like ``yes``, but also apply ``--sub-scale``.
+            rendering easily. Certain options aren't overridden if they can
+            potentially be too destructive.
     :strip: Radically strip all ASS tags and styles from the subtitle. This
             is equivalent to the old ``--no-ass`` / ``--no-sub-ass`` options.
 
     This also controls some bitmap subtitle overrides, as well as HTML tags in
     formats like SRT, despite the name of the option.
+
+``--secondary-sub-ass-override=<no|yes|scale|force|strip>``
+    Control whether user secondary substyle overrides should be applied. This
+    works exactly like ``--sub-ass-override``.
+
+    Default: strip.
 
 ``--sub-ass-force-margins``
     Enables placing toptitles and subtitles in black borders when they are
@@ -2178,34 +2624,46 @@ Subtitles
 
     Default: yes.
 
-    Renamed from ``--sub-ass-use-margins``. To place ASS subtitles in the borders
-    too (like the old option did), also add ``--sub-ass-force-margins``.
+``--sub-ass-use-video-data=<none|aspect-ratio|all>``
+    Controls which information about the video stream is passed to libass.
+    Any option but ``all`` is incompatible with standard ASS as defined by VSFilter,
+    whose behavior most subtitle scripts and renderers target, including libass.
+    Video stream properties are needed to accurately emulate VSFilter semantics and
+    withholding them will likely result in broken subtitle rendering for most files.
+    It's thus recommended to only change this selectively if required on a per-file basis.
 
-``--sub-ass-vsfilter-aspect-compat=<yes|no>``
-    Stretch SSA/ASS subtitles when playing anamorphic videos for compatibility
-    with traditional VSFilter behavior. This switch has no effect when the
-    video is stored with square pixels.
+    :none:  Don't forward any video stream information.
+    :aspect-ratio: Only forward aspect ratio; fallbacks are used for other properties.
+                   This makes behaviour consistent across different video resolutions.
+    :all:   Forward all available information, notably including storage resolution.
 
-    The renderer historically most commonly used for the SSA/ASS subtitle
-    formats, VSFilter, had questionable behavior that resulted in subtitles
-    being stretched too if the video was stored in anamorphic format that
-    required scaling for display.  This behavior is usually undesirable and
-    newer VSFilter versions may behave differently. However, many existing
-    scripts compensate for the stretching by modifying things in the opposite
-    direction.  Thus, if such scripts are displayed "correctly", they will not
-    appear as intended.  This switch enables emulation of the old VSFilter
-    behavior (undesirable but expected by many existing scripts).
+    For certain kinds of broken ASS files which got repurposed across
+    several video resolutions without either setting ``LayoutRes`` headers
+    or adjusting affected effects, it may be desirable to withhold storage resolution
+    information from libass to ensure consistent rendering across resolutions.
+    Among others this affects 3D rotations and blurs.
+    When encountering such files, try setting ``aspect-ratio``.
 
-    Enabled by default.
+    Even more broken files on anamorphic video might also exhibit stretching
+    unless aspect ratio information is also faked, in this case you can try
+    using ``none``. This has never an effect on non-anamorphic video.
 
-``--sub-ass-vsfilter-blur-compat=<yes|no>``
-    Scale ``\blur`` tags by video resolution instead of script resolution
-    (enabled by default). This is bug in VSFilter, which according to some,
-    can't be fixed anymore in the name of compatibility.
+    Default: ``all``
 
-    Note that this uses the actual video resolution for calculating the
-    offset scale factor, not what the video filter chain or the video output
-    use.
+``--sub-ass-video-aspect-override=<no|ratio>``
+    Allows passing any arbitrary aspect ratio to libass instead of the video’s
+    actual aspect ratio. Zero or negative aspect ratios are identical to ``no``.
+
+    This has no effect if ``sub-ass-use-video-data`` is set to ``none``.
+
+``--sub-vsfilter-bidi-compat=<yes|no>``
+    Set implicit bidi detection to ``ltr`` instead of ``auto`` to match ASS'
+    default. This also disables libass' incompatible extensions. This currently
+    includes bracket pair matching according to the revised Unicode
+    Bidirectional Algorithm introduced in Unicode 6.3, and also affects how BiDi
+    runs are split and processed, as well as soft linewrapping of Unicode text.
+
+    This affects plaintext (non-ASS) subtitles only. Default: no.
 
 ``--sub-ass-vsfilter-color-compat=<basic|full|force-601|no>``
     Mangle colors like (xy-)vsfilter do (default: basic). Historically, VSFilter
@@ -2262,10 +2720,10 @@ Subtitles
     (default: no). Normally, the subtitle canvas is fit into the video canvas
     (e.g. letterboxed). Setting this option uses the video size as subtitle
     canvas size. Can be useful to test broken subtitles, which often happen
-    when the video was trancoded, while attempting to keep the old subtitles.
+    when the video was transcoded, while attempting to keep the old subtitles.
 
-``--sub-ass``, ``--no-sub-ass``
-    Render ASS subtitles natively (enabled by default).
+``--sub-ass=<yes|no>``
+    Render ASS subtitles natively (default: yes).
 
     .. note::
 
@@ -2274,25 +2732,33 @@ Subtitles
         using ``--sub-ass-override=style`` should give better results
         without breaking subtitles too much.
 
-    If ``--no-sub-ass`` is specified, all tags and style declarations are
+    If ``--sub-ass=no`` is specified, all tags and style declarations are
     stripped and ignored on display. The subtitle renderer uses the font style
     as specified by the ``--sub-`` options instead.
 
     .. note::
 
-        Using ``--no-sub-ass`` may lead to incorrect or completely broken
+        Using ``--sub-ass=no`` may lead to incorrect or completely broken
         rendering of ASS/SSA subtitles. It can sometimes be useful to forcibly
         override the styling of ASS subtitles, but should be avoided in general.
 
-``--sub-auto=<no|exact|fuzzy|all>``, ``--no-sub-auto``
+``--sub-auto=<no|exact|fuzzy|all>``
     Load additional subtitle files matching the video filename. The parameter
     specifies how external subtitle files are matched. ``exact`` is enabled by
     default.
 
     :no:    Don't automatically load external subtitle files.
-    :exact: Load the media filename with subtitle file extension (default).
-    :fuzzy: Load all subs containing media filename.
+    :exact: Load the media filename with subtitle file extension and possibly
+            language suffixes (default).
+    :fuzzy: Load all subs containing the media filename.
     :all:   Load all subs in the current and ``--sub-file-paths`` directories.
+
+``--sub-auto-exts=ext1,ext2,...``
+    Subtitle extensions to try and match when using ``--sub-auto``. Note that
+    modifying this list will also affect what mpv recognizes as subtitles when
+    using drag and drop.
+
+    This is a string list option. See `List Options`_ for details.
 
 ``--sub-codepage=<codepage>``
     You can use this option to specify the subtitle codepage. uchardet will be
@@ -2318,23 +2784,30 @@ Subtitles
     subtitles are interpreted as UTF-8 with "Latin 1" as fallback for bytes
     which are not valid UTF-8 sequences. iconv is never involved in this mode.
 
-    This option changed in mpv 0.23.0. Support for the old syntax was fully
-    removed in mpv 0.24.0.
-
     .. note::
 
         This works for text subtitle files only. Other types of subtitles (in
         particular subtitles in mkv files) are always assumed to be UTF-8.
 
 
+``--sub-stretch-durations=<yes|no>``
+    Stretch a subtitle duration so it ends when the next one starts.
+    Should help with subtitles which erroneously have zero durations.
+
+    .. note::
+
+        Only applies to text subtitles.
+
 ``--sub-fix-timing=<yes|no>``
     Adjust subtitle timing is to remove minor gaps or overlaps between
     subtitles (if the difference is smaller than 210 ms, the gap or overlap
     is removed).
 
-``--sub-forced-only``
-    Display only forced subtitles for the DVD subtitle stream selected by e.g.
-    ``--slang``.
+``--sub-forced-events-only=<yes|no>``
+    Enabling this displays only forced events within subtitle streams. Only
+    some bitmap subtitle formats (such as DVD or PGS) are capable of having a
+    mixture of forced and unforced events within the stream. Enabling this on
+    text subtitles will cause no subtitles to be displayed (default: ``no``).
 
 ``--sub-fps=<rate>``
     Specify the framerate of the subtitle file (default: video fps). Affects
@@ -2364,9 +2837,6 @@ Subtitles
 
         Never applied to text subtitles.
 
-``--sub-paths=<path1:path2:...>``
-    Deprecated, use ``--sub-file-paths``.
-
 ``--sub-file-paths=<path-list>``
     Specify extra directories to search for subtitles matching the video.
     Multiple directories can be separated by ":" (";" on Windows).
@@ -2388,9 +2858,13 @@ Subtitles
 
     This is a path list option. See `List Options`_ for details.
 
-``--sub-visibility``, ``--no-sub-visibility``
+``--sub-visibility=<yes|no>``
     Can be used to disable display of subtitles, but still select and decode
     them.
+
+``--secondary-sub-visibility=<yes|no>``
+    Can be used to disable display of secondary subtitles, but still select and
+    decode them.
 
 ``--sub-clear-on-seek``
     (Obscure, rarely useful.) Can be used to play broken mkv files with
@@ -2398,11 +2872,32 @@ Subtitles
     Matroska-style ASS subtitle packets. It should be unique, and libass
     uses it for fast elimination of duplicates. This option disables caching
     of subtitles across seeks, so after a seek libass can't eliminate subtitle
-    packets with the same ReadOrder as earlier packets.
+    packets with the same ReadOrder as earlier packets. Note that enabling this
+    option can result in broken subtitle behavior if you are not actually
+    playing one of the aforementioned broken mkv files.
 
-``--teletext-page=<1-999>``
+``--teletext-page=<-1-999>``
+    Select a teletext page number to decode.
+
     This works for ``dvb_teletext`` subtitle streams, and if FFmpeg has been
     compiled with support for it.
+
+    Values ``1-999`` are for individual pages. Special value ``0`` (default)
+    matches all subtitle pages. Special value ``-1`` matches all pages.
+
+    Note that page ``100`` is the default start page of actual teletext. It is
+    also the former default value of this option.
+
+    See the ``libzvbi-teletext`` section in FFmpeg documentation for details.
+
+    Default: 0
+
+``--sub-past-video-end``
+    After the last frame of video, if this option is enabled, subtitles will
+    continue to update based on audio timestamps. Otherwise, the subtitles
+    for the last video frame will stay onscreen.
+
+    Default: disabled
 
 ``--sub-font=<name>``
     Specify font to use for subtitles that do not themselves
@@ -2416,8 +2911,8 @@ Subtitles
     .. note::
 
         The ``--sub-font`` option (and many other style related ``--sub-``
-        options) are ignored when ASS-subtitles are rendered, unless the
-        ``--no-sub-ass`` option is specified.
+        options) are ignored when ASS-subtitles are rendered, unless
+        ``--sub-ass=no`` is specified.
 
         This used to support fontconfig patterns. Starting with libass 0.13.0,
         this stopped working.
@@ -2428,14 +2923,11 @@ Subtitles
     height: if the window height is larger or smaller than 720, the actual size
     of the text increases or decreases as well.
 
-    Default: 55.
-
-``--sub-back-color=<color>``
-    See ``--sub-color``. Color used for sub text background. You can use
-    ``--sub-shadow-offset`` to change its size relative to the text.
+    Default: 38
 
 ``--sub-blur=<0..20.0>``
-    Gaussian blur factor. 0 means no blur applied (default).
+    Gaussian blur factor applied to the sub font border.
+    0 means no blur applied (default).
 
 ``--sub-bold=<yes|no>``
     Format text on bold.
@@ -2443,20 +2935,57 @@ Subtitles
 ``--sub-italic=<yes|no>``
     Format text on italic.
 
-``--sub-border-color=<color>``
-    See ``--sub-color``. Color used for the sub font border.
+``--sub-outline-color=<color>``
+    See ``--sub-color``. Color used for the sub font outline.
 
-    .. note::
+    ``--sub-border-color`` is an alias for ``--sub-outline-color``.
 
-        ignored when ``--sub-back-color`` is
-        specified (or more exactly: when that option is not set to completely
-        transparent).
+``--sub-back-color=<color>``
+    See ``--sub-color``. Color used for sub text background.
 
-``--sub-border-size=<size>``
-    Size of the sub font border in scaled pixels (see ``--sub-font-size``
-    for details). A value of 0 disables borders.
+    ``--sub-shadow-color`` is an alias for ``--sub-back-color``.
 
-    Default: 3.
+``--sub-outline-size=<size>``
+    Size of the sub font outline in scaled pixels (see ``--sub-font-size``
+    for details). A value of 0 disables outlines.
+
+    ``--sub-border-size`` is an alias for ``--sub-outline-size``.
+
+    Default: 1.65
+
+``--sub-border-style=<outline-and-shadow|opaque-box|background-box>``
+    The style of the border.
+
+    - ``outline-and-shadow``: draw outline and shadow.
+      The size of the outline is determined by ``--sub-outline-size``,
+      and the offset of the shadow is determined by ``--sub-shadow-offset``.
+      The outline is colored by ``--sub-outline-color``,
+      and the shadow is colored by ``--sub-back-color``.
+      This corresponds to ``BorderStyle=1`` in the ASS spec.
+    - ``opaque-box``: draw outline and shadow as opaque boxes that tightly wrap each lines of text.
+      The margin of the outline opaque box is determined by ``--sub-outline-size``,
+      and the offset of the shadow opaque box is determined by ``--sub-shadow-offset``.
+      The outline opaque box is colored by ``--sub-outline-color``,
+      and the shadow opaque box is colored by ``--sub-back-color``.
+      Despite its name, the opaque box can be semi-transparent.
+      This corresponds to ``BorderStyle=3`` in the ASS spec.
+    - ``background-box``: draw a background box that bounds all lines of text.
+      The background box is colored by ``--sub-back-color``,
+      and the margin of the background box is determined by ``--sub-shadow-offset``.
+      The behavior of the outline is the same as the ``outline-and-shadow`` style.
+      This corresponds to ``BorderStyle=4``, which is a libass-specific extension.
+
+    Default: ``outline-and-shadow``.
+
+    Predefined profiles are available to enable optimized ``background-box`` style
+    for OSD and subtitles.
+
+    .. admonition:: Profiles
+
+        - ``--profile=sub-box`` applies the ``background-box`` style to subtitles
+        - ``--profile=osd-box`` applies the ``background-box`` style to the OSD,
+          including stats and console
+        - ``--profile=box`` applies the ``background-box`` style to both subtitles and OSD
 
 ``--sub-color=<color>``
     Specify the color used for unstyled text subtitles.
@@ -2479,7 +3008,7 @@ Subtitles
     Alternatively, the color can be specified as a RGB hex triplet in the form
     ``#RRGGBB``, where each 2-digit group expresses a color value in the
     range 0 (``00``) to 255 (``FF``). For example, ``#FF0000`` is red.
-    This is similar to web colors. Alpha is given with ``#AARRGGBB``.
+    Alpha is given with ``#AARRGGBB``.
 
     .. admonition:: Examples
 
@@ -2493,7 +3022,7 @@ Subtitles
     This option specifies the distance of the sub to the left, as well as at
     which distance from the right border long sub text will be broken.
 
-    Default: 25.
+    Default: 19
 
 ``--sub-margin-y=<size>``
     Top and bottom screen margin for the subs in scaled pixels (see
@@ -2502,13 +3031,13 @@ Subtitles
     This option specifies the vertical margins of unstyled text subtitles.
     If you just want to raise the vertical subtitle position, use ``--sub-pos``.
 
-    Default: 22.
+    Default: 34
 
 ``--sub-align-x=<left|center|right>``
     Control to which corner of the screen text subtitles should be
     aligned to (default: ``center``).
 
-    Never applied to ASS subtitles, except in ``--no-sub-ass`` mode. Likewise,
+    Never applied to ASS subtitles, except in ``--sub-ass=no`` mode. Likewise,
     this does not apply to image subtitles.
 
 ``--sub-align-y=<top|center|bottom>``
@@ -2518,7 +3047,7 @@ Subtitles
 ``--sub-justify=<auto|left|center|right>``
     Control how multi line subs are justified irrespective of where they
     are aligned (default: ``auto`` which justifies as defined by
-    ``--sub-align-y``).
+    ``--sub-align-x``).
     Left justification is recommended to make the subs easier to read
     as it is easier for the eyes.
 
@@ -2526,9 +3055,6 @@ Subtitles
     Applies justification as defined by ``--sub-justify`` on ASS subtitles
     if ``--sub-ass-override`` is not set to ``no``.
     Default: ``no``.
-
-``--sub-shadow-color=<color>``
-    See ``--sub-color``. Color used for sub text shadow.
 
 ``--sub-shadow-offset=<size>``
     Displacement of the sub text shadow in scaled pixels (see
@@ -2548,8 +3074,12 @@ Subtitles
     This is intended for English, but may in part work for other languages too.
     The intention is that it can be always enabled so may not remove
     all parts added.
-    It removes speaker labels (like MAN:), upper case text in parentheses and
-    any text in brackets.
+
+    It removes speaker labels (like MAN:) and any text enclosed within symbols like
+    parentheses or brackets as specified by the ``--sub-filter-sdh-enclosures`` option.
+    Note that parenthesis (full width parenthesis and the normal variant) are a special
+    case and only upper case text is removed. For more filtering, you can use the
+    ``--sub-filter-sdh-harder`` option.
 
     Default: ``no``.
 
@@ -2559,6 +3089,67 @@ Subtitles
     lower and upper case letters.
 
     Default: ``no``.
+
+``--sub-filter-sdh-enclosures=<string>``
+    Specify a string of characters that ``--sub-filter-sdh`` will use to potentially
+    remove text. Text that is enclosed within characters specified by this string will
+    be removed. Note that bracket characters with known pairs (such as ``(`` or ``[``)
+    will be mapped internally to their matching right hand character, so you only need
+    to specify left hand characters.
+
+    Default: ``([（``.
+
+``--sub-filter-regex-...=...``
+    Set a list of regular expressions to match on text subtitles, and remove any
+    lines that match (default: empty). This is a string list option. See
+    `List Options`_ for details. Normally, you should use
+    ``--sub-filter-regex-append=<regex>``, where each option use will append a
+    new regular expression, without having to fight escaping problems.
+
+    List items are matched in order. If a regular expression matches, the
+    process is stopped, and the subtitle line is discarded. The text matched
+    against is, by default, the ``Text`` field of ASS events (if the
+    subtitle format is different, it is always converted). This may include
+    formatting tags. Matching is case-insensitive, but how this is done depends
+    on the libc, and most likely works in ASCII only. It does not work on
+    bitmap/image subtitles. Unavailable on inferior OSes (requires POSIX regex
+    support).
+
+    .. admonition:: Example
+
+        ``--sub-filter-regex-append=opensubtitles\.org`` filters some ads.
+
+    Technically, using a list for matching is redundant, since you could just
+    use a single combined regular expression. But it helps with diagnosis,
+    ease of use, and temporarily disabling or enabling individual filters.
+
+    .. warning::
+
+        This is experimental. The semantics most likely will change, and if you
+        use this, you should be prepared to update the option later. Ideas
+        include replacing the regexes with a very primitive and small subset of
+        sed, or some method to control case-sensitivity.
+
+``--sub-filter-jsre-...=...``
+    Same as ``--sub-filter-regex`` but with JavaScript regular expressions.
+    Shares/affected-by all ``--sub-filter-regex-*`` control options (see below),
+    and also experimental. Requires only JavaScript support.
+
+``--sub-filter-regex-plain=<yes|no>``
+    Whether to first convert the ASS "Text" field to plain-text (default: no).
+    This strips ASS tags and applies ASS directives, like ``\N`` to new-line.
+    If the result is multi-line then the regexp anchors ``^`` and ``$`` match
+    each line, but still any match discards all lines.
+
+``--sub-filter-regex-warn=<yes|no>``
+    Log dropped lines with warning log level, instead of verbose (default: no).
+    Helpful for testing.
+
+``--sub-filter-regex-enable=<yes|no>``
+    Whether to enable regex filtering (default: yes). Note that if no regexes
+    are added to the ``--sub-filter-regex`` list, setting this option to ``yes``
+    has no effect. It's meant to easily disable or enable filtering
+    temporarily.
 
 ``--sub-create-cc-track=<yes|no>``
     For every video stream, create a closed captions track (default: no). The
@@ -2575,7 +3166,7 @@ Subtitles
 ``--sub-font-provider=<auto|none|fontconfig>``
     Which libass font provider backend to use (default: auto). ``auto`` will
     attempt to use the native font provider: fontconfig on Linux, CoreText on
-    OSX, DirectWrite on Windows. ``fontconfig`` forces fontconfig, if libass
+    macOS, DirectWrite on Windows. ``fontconfig`` forces fontconfig, if libass
     was built with support (if not, it behaves like ``none``).
 
     The ``none`` font provider effectively disables system fonts. It will still
@@ -2585,6 +3176,15 @@ Subtitles
     fallback is more strict than that of other font providers, and if a font
     name does not match, it may prefer not to render any text that uses the
     missing font.)
+
+``--sub-fonts-dir=<path>``
+    Font files in this directory are used by mpv/libass for subtitles. Useful
+    if you do not want to install fonts to your system. Note that files in this
+    directory are loaded into memory before being used by mpv. If you have a
+    lot of fonts, consider using fonts.conf (see `FILES`_ section) to include
+    additional mpv user settings.
+
+    If this option is not specified, ``~~/fonts`` will be used by default.
 
 Window
 ------
@@ -2613,7 +3213,20 @@ Window
         explicitly. It's also possible that the window manager provides native
         features to control which screens application windows should use.
 
+    .. admonition:: Note (Wayland)
+
+        This option does not actually work on wayland since window placement is
+        not allowed. However setting this option does influence mpv's initial
+        guess at finding an output which may be useful for options like
+        ``--geometry`` or ``--autofit`` which depend on the monitor resolution.
+
     See also ``--fs-screen``.
+
+``--screen-name=<string>``
+    In multi-monitor configurations, this option tells mpv which screen to
+    display the video on based on the screen name from the video backend. The
+    same caveats in the ``--screen`` option also apply here. This option is
+    ignored and does nothing if ``--screen`` is explicitly set.
 
 ``--fullscreen``, ``--fs``
     Fullscreen playback.
@@ -2629,15 +3242,21 @@ Window
         This option works properly only with window managers which
         understand the EWMH ``_NET_WM_FULLSCREEN_MONITORS`` hint.
 
-    .. admonition:: Note (OS X)
+    .. admonition:: Note (macOS)
 
-        ``all`` does not work on OS X and will behave like ``current``.
+        ``all`` does not work on macOS and will behave like ``current``.
 
     See also ``--screen``.
 
+``--fs-screen-name=<string>``
+    In multi-monitor configurations, this option tells mpv which screen to go
+    fullscreen to based on the screen name from the video backend. The same
+    caveats in the ``--fs-screen`` option also apply here. This option is
+    ignored and does nothing if ``--fs-screen`` is explicitly set.
+
 ``--keep-open=<yes|no|always>``
     Do not terminate when playing or seeking beyond the end of the file, and
-    there is not next file to be played (and ``--loop`` is not used).
+    there is no next file to be played (and ``--loop`` is not used).
     Instead, pause the player. When trying to seek beyond end of the file, the
     player will attempt to seek to the last frame.
 
@@ -2677,7 +3296,7 @@ Window
 
 ``--image-display-duration=<seconds|inf>``
     If the current file is an image, play the image for the given amount of
-    seconds (default: 1). ``inf`` means the file is kept open forever (until
+    seconds (default: 5). ``inf`` means the file is kept open forever (until
     the user stops playback manually).
 
     Unlike ``--keep-open``, the player is not paused, but simply continues
@@ -2692,17 +3311,17 @@ Window
     This option does not affect the framerate used for ``mf://`` or
     ``--merge-files``. For that, use ``--mf-fps`` instead.
 
-    Setting ``--image-display-duration`` hides the OSC and does not track
-    playback time on the command-line output, and also does not duplicate
-    the image frame when encoding. To force the player into "dumb mode"
-    and actually count out seconds, or to duplicate the image when
-    encoding, you need to use ``--demuxer=lavf --demuxer-lavf-o=loop=1``,
-    and use ``--length`` or ``--frames`` to stop after a particular time.
+    When viewing images, the playback time is not tracked on the command line
+    output, and the image frame is not duplicated when encoding. To force the
+    player into "dumb mode" and actually count out seconds, or to duplicate the
+    image when encoding, you need to use ``--demuxer=lavf
+    --demuxer-lavf-o=loop=1``, and use ``--length`` or ``--frames`` to stop
+    after a particular time.
 
 ``--force-window=<yes|no|immediate>``
     Create a video output window even if there is no video. This can be useful
     when pretending that mpv is a GUI application. Currently, the window
-    always has the size 640x480, and is subject to ``--geometry``,
+    always has the size 960x540, and is subject to ``--geometry``,
     ``--autofit``, and similar options.
 
     .. warning::
@@ -2715,7 +3334,7 @@ Window
         mode can be used to create the window always on program start, but this
         may cause other issues.
 
-``--taskbar-progress``, ``--no-taskbar-progress``
+``--taskbar-progress=<yes|no>``
     (Windows only)
     Enable/disable playback progress rendering in taskbar (Windows 7 and above).
 
@@ -2724,6 +3343,15 @@ Window
 ``--snap-window``
     (Windows only) Snap the player window to screen edges.
 
+``--drag-and-drop=<no|auto|replace|append|insert-next>``
+    Controls the default behavior of drag and drop on platforms that support
+    this. ``auto`` will obey what the underlying os/platform gives mpv.
+    Typically, holding shift during the drag and drop will append the item to
+    the playlist. Otherwise, it will completely replace it. ``replace``,
+    ``append``, and ``insert-next`` always force replacing, appending to, and
+    inserting next into the playlist respectively. ``no`` disables all drag and
+    drop behavior.
+
 ``--ontop``
     Makes the player window stay on top of other windows.
 
@@ -2731,29 +3359,47 @@ Window
     treated as exclusive fullscreen window that bypasses the Desktop Window
     Manager.
 
-``--ontop-level=<window|system|level>``
-    (OS X only)
-    Sets the level of an ontop window (default: window).
+``--ontop-level=<window|system|desktop|level>``
+    (macOS only)
+    Sets the level of an on-top window (default: window).
 
     :window:  On top of all other windows.
     :system:  On top of system elements like Taskbar, Menubar and Dock.
+    :desktop: On top of the Desktop behind windows and Desktop icons.
     :level:   A level as integer.
 
-``--border``, ``--no-border``
+``--focus-on=<never|open|all>``,
+    (macOS only)
+    Focus the video window and make it the front most window on specific events (default: open).
+
+    :never: Never focus the window on open or new file load events.
+    :open:  Focus the window on creation, eg when a vo is initialised.
+    :all:   Focus the window on open and new file load event.
+
+``--window-corners=<default|donotround|round|roundsmall>``
+    (Windows only)
+    Set the preference for window corner rounding.
+
+    :default: Let the system decide whether or not to round window corners
+    :donotround: Never round window corners
+    :round: Round the corners if appropriate
+    :roundsmall: Round the corners if appropriate, with a small radius
+
+``--border=<yes|no>``
     Play video with window border and decorations. Since this is on by
     default, use ``--no-border`` to disable the standard window decorations.
 
-``--fit-border``, ``--no-fit-border``
-    (Windows only) Fit the whole window with border and decorations on the
-    screen. Since this is on by default, use ``--no-fit-border`` to make mpv
-    try to only fit client area with video on the screen. This behavior only
-    applied to window/video with size exceeding size of the screen.
+``--title-bar=<yes|no>``
+    (Windows and X11 only)
+    Play video with the window title bar. Since this is on by default,
+    use ``--title-bar=no`` to hide the title bar. The ``--border`` option takes
+    precedence.
 
 ``--on-all-workspaces``
-    (X11 only)
+    (X11 and macOS only)
     Show the video window on all virtual desktops.
 
-``--geometry=<[W[xH]][+-x+-y]>``, ``--geometry=<x:y>``
+``--geometry=<[W[xH]][+-x+-y][/WS]>``, ``--geometry=<x:y>``
     Adjust the initial window position or size. ``W`` and ``H`` set the window
     size in pixels. ``x`` and ``y`` set the window position, measured in pixels
     from the top-left corner of the screen to the top-left corner of the image
@@ -2762,7 +3408,9 @@ Window
     Positions are specified similar to the standard X11 ``--geometry`` option
     format, in which e.g. +10-50 means "place 10 pixels from the left border and
     50 pixels from the lower border" and "--20+-10" means "place 20 pixels
-    beyond the right and 10 pixels beyond the top border".
+    beyond the right and 10 pixels beyond the top border". A trailing ``/``
+    followed by an integer denotes on which workspace (virtual desktop) the
+    window should appear (X11 only).
 
     If an external window is specified using the ``--wid`` option, this
     option is ignored.
@@ -2770,19 +3418,30 @@ Window
     The coordinates are relative to the screen given with ``--screen`` for the
     video output drivers that fully support ``--screen``.
 
+    Some backends update this option at runtime (like all options, it's exposed
+    as property, in this case ``geometry``), and resize their window if the user
+    sets the property. This means the window size is not reset when playing a
+    video with different file. Use ``--reset-on-next-file=geometry`` to get
+    the old behavior.
+
     .. note::
 
         Generally only supported by GUI VOs. Ignored for encoding.
 
-    .. admonition: Note (OS X)
+    .. admonition:: Note (macOS)
 
-        On Mac OS X the origin of the screen coordinate system is located on the
+        On macOS, the origin of the screen coordinate system is located on the
         bottom-left corner. For instance, ``0:0`` will place the window at the
         bottom-left of the screen.
 
     .. admonition:: Note (X11)
 
         This option does not work properly with all window managers.
+
+    .. admonition:: Note (Wayland)
+
+        Wayland does not allow a client to position itself so this option will
+        only affect the window size.
 
     .. admonition:: Examples
 
@@ -2798,10 +3457,11 @@ Window
         ``50%x50%``
             Forces the window width and height to half the screen width and
             height. Will show black borders to compensate for the video aspect
-            ratio (with most VOs and without ``--no-keepaspect``).
-        ``50%+10+10``
+            ratio (with most VOs and with ``--keepaspect=yes``).
+        ``50%+10+10/2``
             Sets the window to half the screen widths, and positions it 10
-            pixels below/left of the top left corner of the screen.
+            pixels below/left of the top left corner of the screen, on the
+            second workspace.
 
     See also ``--autofit`` and ``--autofit-larger`` for fitting the window into
     a given size without changing aspect ratio.
@@ -2845,8 +3505,8 @@ Window
             of the screen width, or higher than 60% of the screen height.
 
 ``--autofit-larger=<[W[xH]]>``
-    This option behaves exactly like ``--autofit``, except the window size is
-    only changed if the window would be larger than the specified size.
+    This option behaves exactly like ``--autofit``, except that it sets the
+    maximum size of the window.
 
     .. admonition:: Example
 
@@ -2869,14 +3529,17 @@ Window
 ``--window-scale=<factor>``
     Resize the video window to a multiple (or fraction) of the video size. This
     option is applied before ``--autofit`` and other options are applied (so
-    they override this option).
+    they override this option). Changing this option while the window is
+    maximized can unmaximize the window depending on the OS and window manager.
+    If the window does not unmaximize, the multiplier will be applied if the user
+    unmaximizes the window later.
 
     For example, ``--window-scale=0.5`` would show the window at half the
     video size.
 
 ``--window-minimized=<yes|no>``
     Whether the video window is minimized or not. Setting this will minimize,
-    or unminimze, the video window if the current VO supports it. Note that
+    or unminimize, the video window if the current VO supports it. Note that
     some VOs may support minimization while not supporting unminimization
     (eg: Wayland).
 
@@ -2892,18 +3555,14 @@ Window
     ``--window-minimized`` for further remarks.
 
 ``--cursor-autohide=<number|no|always>``
-    Make mouse cursor automatically hide after given number of milliseconds.
-    ``no`` will disable cursor autohide. ``always`` means the cursor will stay
-    hidden.
+    Make mouse cursor automatically hide after given number of milliseconds
+    (default: 1000 ms). ``no`` will disable cursor autohide. ``always``
+    means the cursor will stay hidden.
 
 ``--cursor-autohide-fs-only``
     If this option is given, the cursor is always visible in windowed mode. In
     fullscreen mode, the cursor is shown or hidden according to
     ``--cursor-autohide``.
-
-``--no-fixed-vo``, ``--fixed-vo``
-    ``--no-fixed-vo`` enforces closing and reopening the video window for
-    multiple files (one (un)initialization for each file).
 
 ``--force-rgba-osd-rendering``
     Change how some video outputs render the OSD and text subtitles. This
@@ -2913,19 +3572,31 @@ Window
     depending on GPU drivers and hardware. For other VOs, this just makes
     rendering slower.
 
+``--force-render``
+    Forces mpv to always render frames regardless of the visibility of the
+    window. Currently only affects X11 and Wayland VOs since they are the
+    only ones that have this optimization (i.e. everything else always renders
+    regardless of visibility).
+
 ``--force-window-position``
     Forcefully move mpv's video output window to default location whenever
     there is a change in video parameters, video stream or file. This used to
-    be the default behavior. Currently only affects X11 VOs.
+    be the default behavior. Currently only affects X11, macvk and SDL VOs.
 
-``--no-keepaspect``, ``--keepaspect``
-    ``--no-keepaspect`` will always stretch the video to window size, and will
+``--auto-window-resize=<yes|no>``
+    By default, mpv will automatically resize itself if the video's size changes
+    (i.e. advancing forward in a playlist). Setting this to ``no`` disables this
+    behavior so the window size never changes automatically. This option does
+    not have any impact on the ``--autofit`` or ``--geometry`` options.
+
+``--keepaspect=<yes|no>``
+    ``--keepaspect=no`` will always stretch the video to window size, and will
     disable the window manager hints that force the window aspect ratio.
     (Ignored in fullscreen mode.)
 
-``--no-keepaspect-window``, ``--keepaspect-window``
-    ``--keepaspect-window`` (the default) will lock the window size to the
-    video aspect. ``--no-keepaspect-window`` disables this behavior, and will
+``--keepaspect-window=<yes|no>``
+    ``--keepaspect-window=yes`` (the default) will lock the window size to the
+    video aspect. ``--keepaspect-window=no`` disables this behavior, and will
     instead add black bars if window aspect and video aspect mismatch. Whether
     this actually works depends on the VO backend.
     (Ignored in fullscreen mode.)
@@ -2942,29 +3613,38 @@ Window
         - ``--monitoraspect=4:3``  or ``--monitoraspect=1.3333``
         - ``--monitoraspect=16:9`` or ``--monitoraspect=1.7777``
 
-``--hidpi-window-scale``, ``--no-hidpi-window-scale``
-    (OS X, X11, and Wayland only)
-    Scale the window size according to the backing scale factor (default: yes).
-    On regular HiDPI resolutions the window opens with double the size but appears
-    as having the same size as on none-HiDPI resolutions. This is the default OS X
-    behavior.
+``--hidpi-window-scale=<yes|no>``
+    Scale the window size according to the backing DPI scale factor from the OS
+    (default: no). For example, if the OS DPI scaling is set to 200%, mpv's window
+    size will be multiplied by 2.
 
-``--native-fs``, ``--no-native-fs``
-    (OS X only)
+``--native-fs=<yes|no>``
+    (macOS only)
     Uses the native fullscreen mechanism of the OS (default: yes).
+
+``--show-in-taskbar=<yes|no>``
+    (Windows and X11 only)
+    Show mpv in the taskbar (default: yes). If set to no, mpv will no longer
+    appear in taskbars and tasklists in supported window managers, and may be
+    excluded from Alt+Tab window switching.
 
 ``--monitorpixelaspect=<ratio>``
     Set the aspect of a single pixel of your monitor or TV screen (default:
     1). A value of 1 means square pixels (correct for (almost?) all LCDs). See
     also ``--monitoraspect`` and ``--video-aspect-override``.
 
-``--stop-screensaver``, ``--no-stop-screensaver``
+``--stop-screensaver=<yes|no|always>``
     Turns off the screensaver (or screen blanker and similar mechanisms) at
-    startup and turns it on again on exit (default: yes). The screensaver is
-    always re-enabled when the player is paused.
+    startup and turns it on again on exit (default: yes). When using ``yes``,
+    the screensaver will re-enable when playback is not active. ``always`` will
+    always disable the screensaver. Note that stopping the screensaver is only
+    possible if a video output is available (i.e. there is an open mpv window).
+    This is not supported on all video outputs, platforms, or desktop environments.
 
-    This is not supported on all video outputs or platforms. Sometimes it is
-    implemented, but does not work (especially with Linux "desktops").
+    Before mpv 0.33.0, the X11 backend ran ``xdg-screensaver reset`` in 10 second
+    intervals when not paused in order to support screensaver inhibition in some
+    environments. This functionality was removed in 0.33.0, but it is possible to
+    call the ``xdg-screensaver`` command line program from a user script instead.
 
 ``--wid=<ID>``
     This tells mpv to attach to an existing window. If a VO is selected that
@@ -2979,24 +3659,25 @@ Window
     draw directly on the root window.
 
     On win32, the ID is interpreted as ``HWND``. Pass it as value cast to
-    ``intptr_t``. mpv will create its own window, and set the wid window as
-    parent, like with X11.
+    ``uint32_t`` (all Windows handles are 32-bit), this is important as mpv will
+    not accept negative values. mpv will create its own window and set the
+    wid window as parent, like with X11.
 
-    On OSX/Cocoa, the ID is interpreted as ``NSView*``. Pass it as value cast
-    to ``intptr_t``. mpv will create its own sub-view. Because OSX does not
+    On macOS/Cocoa, the ID is interpreted as ``NSView*``. Pass it as value cast
+    to ``intptr_t``. mpv will create its own sub-view. Because macOS does not
     support window embedding of foreign processes, this works only with libmpv,
     and will crash when used from the command line.
 
     On Android, the ID is interpreted as ``android.view.Surface``. Pass it as a
     value cast to ``intptr_t``. Use with ``--vo=mediacodec_embed`` and
     ``--hwdec=mediacodec`` for direct rendering using MediaCodec, or with
-    ``--vo=gpu --gpu-context=android`` (with or without ``--hwdec=mediacodec-copy``).
+    ``--vo=gpu --gpu-context=android`` (with or without ``--hwdec=mediacodec``).
 
-``--no-window-dragging``
-    Don't move the window when clicking on it and moving the mouse pointer.
+``--window-dragging=<yes|no>``
+    Move the window when clicking on it and moving the mouse pointer (default: yes).
 
-``--x11-name``
-    Set the window class name for X11-based video output methods.
+``--x11-name=<string>``
+    Set the window instance name for X11-based video output methods.
 
 ``--x11-netwm=<yes|no|auto>``
     (X11 only)
@@ -3031,12 +3712,33 @@ Window
 
     ``never`` asks the window manager to never disable the compositor.
 
+``--x11-present=<no|auto|yes>``
+    Whether or not to use presentation statistics from X11's presentation
+    extension (default: ``auto``).
+
+    mpv asks X11 for present events which it then may use for more accurate
+    frame presentation. This only has an effect if ``--video-sync=display-...``
+    is being used.
+
+    The auto option enumerates XRandr providers for autodetection. If amd, radeon,
+    intel, or nouveau (the standard x86 Mesa drivers) is found presentation
+    feedback is enabled. Other drivers are not assumed to work, so they are not
+    enabled automatically.
+
+    ``yes`` or ``no`` can still be passed regardless to enable/disable this
+    mechanism in case there is good/bad behavior with whatever your combination
+    of hardware/drivers/etc. happens to be.
+
+``--x11-wid-title=<yes|no>``
+    Whether or not to set the window title when mpv is embedded on X11 (default:
+    ``no``).
+
 
 Disc Devices
 ------------
 
-``--cdrom-device=<path>``
-    Specify the CD-ROM device (default: ``/dev/cdrom``).
+``--cdda-device=<path>``
+    Specify the CD device for CDDA playback (default: ``/dev/cdrom``).
 
 ``--dvd-device=<path>``
     Specify the DVD device or .iso filename (default: ``/dev/dvd``). You can
@@ -3075,11 +3777,6 @@ Disc Devices
 
 ``--cdda-overlap=<value>``
     Force minimum overlap search during verification to <value> sectors.
-
-``--cdda-toc-bias``
-    Assume that the beginning offset of track 1 as reported in the TOC
-    will be addressed as LBA 0. Some discs need this for getting track
-    boundaries correctly.
 
 ``--cdda-toc-offset=<value>``
     Add ``<value>`` sectors to the values reported when addressing tracks.
@@ -3234,7 +3931,7 @@ Demuxer
     If this option is deemed unnecessary at some point in the future, it will
     be removed without notice.
 
-``--demuxer-mkv-subtitle-preroll=<yes|index|no>``, ``--mkv-subtitle-preroll``
+``--demuxer-mkv-subtitle-preroll=<yes|index|no>``
     Try harder to show embedded soft subtitles when seeking somewhere. Normally,
     it can happen that the subtitle at the seek target is not shown due to how
     some container file formats are designed. The subtitles appear only if
@@ -3277,13 +3974,17 @@ Demuxer
     but makes seeking much slower, as it has to decode audio and video data
     instead of just skipping over it.
 
-    ``--mkv-subtitle-preroll`` is a deprecated alias.
-
 ``--demuxer-mkv-subtitle-preroll-secs=<value>``
     See ``--demuxer-mkv-subtitle-preroll``.
 
 ``--demuxer-mkv-subtitle-preroll-secs-index=<value>``
     See ``--demuxer-mkv-subtitle-preroll``.
+
+``--demuxer-mkv-probe-start-time=<yes|no>``
+    Check the start time of Matroska files (default: yes). This simply reads the
+    first cluster timestamps and assumes it is the start time. Technically, this
+    also reads the first timestamp, which may increase latency by one frame
+    (which may be relevant for live streams).
 
 ``--demuxer-mkv-probe-video-duration=<yes|no|full>``
     When opening the file, seek to the end of it, and check what timestamp the
@@ -3337,9 +4038,6 @@ Demuxer
 ``--demuxer-rawvideo-size=<value>``
     Frame size in bytes when using ``--demuxer=rawvideo``.
 
-``--demuxer-cue-codepage=<codepage>``
-    Specify the CUE sheet codepage. (See ``--sub-codepage`` for details.)
-
 ``--demuxer-max-bytes=<bytesize>``
     This controls how much the demuxer is allowed to buffer ahead. The demuxer
     will normally try to read ahead as much as necessary, or as much is
@@ -3357,7 +4055,8 @@ Demuxer
 
 ``--demuxer-max-back-bytes=<bytesize>``
     This controls how much past data the demuxer is allowed to preserve. This
-    is useful only if the ``--demuxer-seekable-cache`` option is enabled.
+    is useful only if the cache is enabled.
+
     Unlike the forward cache, there is no control how many seconds are actually
     cached - it will simply use as much memory this option allows. Setting this
     option to 0 will strictly disable any back buffer, but this will lead to
@@ -3365,7 +4064,8 @@ Demuxer
     position (as it removes past packets that are seek points).
 
     If the end of the file is reached, the remaining unused forward buffer space
-    is "donated" to the backbuffer (unless the backbuffer size is set to 0).
+    is "donated" to the backbuffer (unless the backbuffer size is set to 0, or
+    ``--demuxer-donate-buffer`` is set to ``no``).
     This still limits the total cache usage to the sum of the forward and
     backward cache, and effectively makes better use of the total allowed memory
     budget. (The opposite does not happen: free backward buffer is never
@@ -3377,18 +4077,30 @@ Demuxer
 
     See ``--list-options`` for defaults and value range.
 
+``--demuxer-donate-buffer=<yes|no>``
+    Whether to let the back buffer use part of the forward buffer (default: yes).
+    If set to ``yes``, the "donation" behavior described in the option
+    description for ``--demuxer-max-back-bytes`` is enabled. This means the
+    back buffer may use up memory up to the sum of the forward and back buffer
+    options, minus the active size of the forward buffer. If set to ``no``, the
+    options strictly limit the forward and back buffer sizes separately.
+
+    Note that if the end of the file is reached, the buffered data stays the
+    same, even if you seek back within the cache. This is because the back
+    buffer is only reduced when new data is read.
+
 ``--demuxer-seekable-cache=<yes|no|auto>``
-    This controls whether seeking can use the demuxer cache (default: auto). If
-    enabled, short seek offsets will not trigger a low level demuxer seek
+    Debugging option to control whether seeking can use the demuxer cache
+    (default: auto). Normally you don't ever need to set this; the default
+    ``auto`` does the right thing and enables cache seeking it if ``--cache``
+    is set to ``yes`` (or is implied ``yes`` if ``--cache=auto``).
+
+    If enabled, short seek offsets will not trigger a low level demuxer seek
     (which means for example that slow network round trips or FFmpeg seek bugs
     can be avoided). If a seek cannot happen within the cached range, a low
     level seek will be triggered. Seeking outside of the cache will start a new
     cached range, but can discard the old cache range if the demuxer exhibits
     certain unsupported behavior.
-
-    Keep in mind that some events can flush the cache or force a low level
-    seek anyway, such as switching tracks, or attempting to seek before the
-    start or after the end of the file.
 
     The special value ``auto`` means ``yes`` in the same situation as
     ``--cache-secs`` is used (i.e. when the stream appears to be a network
@@ -3422,22 +4134,54 @@ Demuxer
     a timestamp difference higher than the readahead amount relative to the
     last packet returned to the decoder, the demuxer keeps reading.
 
-    Note that the ``--cache-secs`` option will override this value if a cache
-    is enabled, and the value is larger.
+    Note that enabling the cache (such as ``--cache=yes``, or if the input
+    is considered a network stream, and ``--cache=auto`` is used), this option
+    is mostly ignored. (``--cache-secs`` will override this. Technically, the
+    maximum of both options is used.)
+
+    The main purpose of this option is to limit the readhead for local playback,
+    since a large readahead value is not overly useful in this case.
 
     (This value tends to be fuzzy, because many file formats don't store linear
     timestamps.)
 
+``--demuxer-hysteresis-secs=<seconds>``
+    Once the demuxer limit is reached (``--demuxer-max-bytes``,
+    ``--demuxer-readahead-secs`` or ``--cache-secs``), this value can be used
+    to specify a hysteresis before the demuxer will buffer ahead again. This
+    specifies the maximum number of seconds from the current playback position
+    that needs to be remaining in the cache before the demuxer will continue
+    buffering ahead.
+
+    For example, with a value of 10 seconds specified, the demuxer will buffer
+    ahead up to the demuxer limit and won't start buffering ahead again until
+    there is only 10 seconds of content left in the cache.
+
+    This can provide significant power savings and reduce load by making the
+    demuxer only buffer ahead in chunks at a time rather than buffering ahead
+    nonstop to keep the cache filled.
+
+    If you want to save power and reduce load, configure this to a small number
+    that's much lower than ``--cache-secs`` or ``--demuxer-readahead-secs``.
+    If it takes a long time to buffer anything at all for a given stream (like
+    when reading from a very slow disk is involved), then the hysteresis value
+    should be larger to compensate.
+
+    The default value is 0 seconds, which disables the caching hysteresis. A
+    value of 10 seconds probably works well for most usecases.
+
 ``--prefetch-playlist=<yes|no>``
     Prefetch next playlist entry while playback of the current entry is ending
-    (default: no). This merely opens the URL of the next playlist entry as soon
-    as the current URL is fully read.
+    (default: no).
+
+    This does not prefill the cache with the video data of the next URL.
+    Prefetching video data is supported only for the current playlist entry,
+    and depends on the demuxer cache settings (on by default). This merely
+    opens the URL of the next playlist entry as soon the current URL is fully
+    read.
 
     This does **not** work with URLs resolved by the ``youtube-dl`` wrapper,
     and it won't.
-
-    This does not affect HLS (``.m3u8`` URLs) - HLS prefetching depends on the
-    demuxer cache settings and is on by default.
 
     This can give subtly wrong results if per-file options are used, or if
     options are changed in the time window between prefetching start and next
@@ -3475,30 +4219,97 @@ Demuxer
     libarchive opens all volumes anyway when playing the main file, even though
     mpv iterated no archive entries yet.
 
+``--directory-mode=<auto|lazy|recursive|ignore>``
+    When opening a directory, open subdirectories lazily, recursively or not at
+    all. The default is ``auto``, which behaves like ``recursive`` with
+    ``--shuffle``, and like ``lazy`` otherwise.
+
+``--directory-filter-types=<video,audio,image,archive,playlist>``
+    Media file types to filter when opening directory. If the list is empty,
+    all files are added to the playlist. (Default:
+    ``video,audio,image,archive,playlist``)
+
+    This is a string list option. See `List Options`_ for details.
+
+``--autocreate-playlist=<no|filter|same>``
+    When opening a local file, act as if the parent directory is opened and
+    create a playlist automatically.
+
+    :no:     Load a single file (default).
+    :filter: Create a playlist from the parent directory with files matching
+             ``--directory-filter-types``.
+    :same:   Create a playlist from the parent directory with files matching the
+             same category as the currently loaded file. One of the
+             ``*-exts`` is selected based on the input file
+             and only files with matching extensions are added to the playlist.
+             If the input file itself is not matched to any extension list,
+             the playlist is not autogenerated.
+
 Input
 -----
 
-``--native-keyrepeat``
+``--native-keyrepeat=<yes|no>``
     Use system settings for keyrepeat delay and rate, instead of
-    ``--input-ar-delay`` and ``--input-ar-rate``. (Whether this applies
-    depends on the VO backend and how it handles keyboard input. Does not
-    apply to terminal input.)
+    ``--input-ar-delay`` and ``--input-ar-rate`` (default: no).
+    Whether this applies depends on the VO backend and how it handles
+    keyboard input. Does not apply to terminal input.
+
+``--native-touch=<yes|no>``
+    (Windows only)
+    For platforms which send emulated mouse inputs for touch-unaware clients,
+    such as Windows, use system native touch events, instead of receiving them
+    as emulated mouse events (default: no). This is required for multi-touch
+    support for these platforms.
+
+    Note that this option has no effect on other platforms: either native touch
+    is not supported by mpv, or the platform does not give an option to receive
+    emulated mouse inputs (so native touch is always enabled, e.g. Wayland).
 
 ``--input-ar-delay``
-    Delay in milliseconds before we start to autorepeat a key (0 to disable).
+    Delay in milliseconds before we start to autorepeat a key (default: 200).
+    Set it to 0 to disable.
 
 ``--input-ar-rate``
-    Number of key presses to generate per second on autorepeat.
+    Number of key presses to generate per second on autorepeat (default: 40).
 
 ``--input-conf=<filename>``
     Specify input configuration file other than the default location in the mpv
     configuration directory (usually ``~/.config/mpv/input.conf``).
 
-``--no-input-default-bindings``
-    Disable mpv default (built-in) key bindings.
+``--input-default-bindings=<yes|no>``
+    Enable default-level ("weak") key bindings (default: yes). These are bindings
+    which config files like ``input.conf`` can override. It currently affects the
+    builtin key bindings, and keys which scripts bind using ``mp.add_key_binding``
+    (but not ``mp.add_forced_key_binding`` because this overrides ``input.conf``).
+
+``--input-builtin-bindings=<yes|no>``
+    Enable loading of built-in key bindings during start-up (default: yes). This
+    option is applied only during (lib)mpv initialization, and if disabled then it
+    will not be not possible to enable them later. May be useful to libmpv clients.
+
+``--input-builtin-dragging=<yes|no>``
+    Enable the built-in window-dragging behavior (default: yes). Setting it to no
+    disables the built-in dragging behavior. Note that unlike the ``window-dragging``
+    option, this option only affects VOs which support the ``begin-vo-dragging``
+    command, and does not disable window dragging initialized with the command.
 
 ``--input-cmdlist``
     Prints all commands that can be bound to keys.
+
+``--input-commands=<cmd1,cmd2,...>``
+    Define a list of commands for mpv to run. The syntax is the same as format
+    as ``input.conf`` but without the key binding argument at the beginning.
+    When this option is set at startup, the commands will run after audio and
+    video playback are about to begin if applicable (in idle mode with no file,
+    it will run immediately). When changing values at runtime, the commands will
+    also run as soon as possible.
+
+    This is a string list option. See `List Options`_ for details.
+
+    .. admonition:: Example
+
+        ``--input-commands="playlist-play-index 1,set ao-volume 40"``
+            sets the playlist index to 1 and the ao-volume to 40
 
 ``--input-doubleclick-time=<milliseconds>``
     Time in milliseconds to recognize two consecutive button presses as a
@@ -3521,24 +4332,8 @@ Input
     work (key bindings that normally quit will be shown on OSD only, just
     like any other binding). See `INPUT.CONF`_.
 
-``--input-file=<filename>``
-    Deprecated. Use ``--input-ipc-server``.
-
-    Read commands from the given file. Mostly useful with a FIFO. Since
-    mpv 0.7.0 also understands JSON commands (see `JSON IPC`_), but you can't
-    get replies or events. Use ``--input-ipc-server`` for something
-    bi-directional. On MS Windows, JSON commands are not available.
-
-    This can also specify a direct file descriptor with ``fd://N`` (UNIX only).
-    In this case, JSON replies will be written if the FD is writable.
-
-    .. note::
-
-        When the given file is a FIFO mpv opens both ends, so you can do several
-        `echo "seek 10" > mp_pipe` and the pipe will stay valid.
-
-``--input-terminal``, ``--no-input-terminal``
-    ``--no-input-terminal`` prevents the player from reading key events from
+``--input-terminal=<yes|no>``
+    ``--input-terminal=no`` prevents the player from reading key events from
     standard input. Useful when reading data from standard input. This is
     automatically enabled when ``-`` is found on the command line. There are
     situations where you have to set it manually, e.g. if you open
@@ -3559,20 +4354,80 @@ Input
 
     See `JSON IPC`_ for details.
 
+``--input-ipc-client=fd://<N>``
+    Connect a single IPC client to the given FD. This is somewhat similar to
+    ``--input-ipc-server``, except no socket is created, and instead the passed
+    FD is treated like a socket connection received from ``accept()``. In
+    practice, you could pass either a FD created by ``socketpair()``, or a pipe.
+    In both cases, you must make sure that the FD is actually inherited by mpv
+    (do not set the POSIX ``CLOEXEC`` flag).
+
+    The player quits when the connection is closed.
+
+    This is somewhat similar to the removed ``--input-file`` option, except it
+    supports only integer FDs, and cannot open actual paths.
+
+    .. admonition:: Example
+
+        ``--input-ipc-client=fd://123``
+
+    .. note::
+
+        To use this option on Windows, the fd must refer to a wrapped
+        (created by ``_open_osfhandle``) named pipe server handle with a client
+        already connected. The named pipe must be created duplex with overlapped
+        IO and inheritable handles. The program communicates with mpv through
+        the client handle.
+
+    .. warning::
+
+        Writing to the ``input-ipc-server`` option at runtime will start another
+        instance of an IPC client handler for the ``input-ipc-client`` option,
+        because initialization is bundled, and this thing is stupid. This is a
+        bug. Writing to ``input-ipc-client`` at runtime will start another IPC
+        client handler for the new value, without stopping the old one, even if
+        the FD value is the same (but the string is different e.g. due to
+        whitespace). This is not a bug.
+
 ``--input-gamepad=<yes|no>``
     Enable/disable SDL2 Gamepad support. Disabled by default.
 
-``--input-cursor``, ``--no-input-cursor``
+``--input-cursor=<yes|no>``
     Permit mpv to receive pointer events reported by the video output
-    driver. Necessary to use the OSC, or to select the buttons in DVD menus.
-    Support depends on the VO in use.
+    driver. Necessary to use the OSC. Support depends on the VO in use.
+
+``--input-cursor-passthrough=<yes|no>``
+    Tell the backend windowing system to allow pointer events to passthrough
+    the mpv window. This allows windows under mpv to instead receive pointer
+    events as if the mpv window was never there.
 
 ``--input-media-keys=<yes|no>``
-    (OS X and Windows only)
-    Enable/disable media keys support. Enabled by default (except for libmpv).
+    On systems where mpv can choose between receiving media keys or letting
+    the system handle them - this option controls whether mpv should receive
+    them.
 
-``--input-right-alt-gr``, ``--no-input-right-alt-gr``
-    (Cocoa and Windows only)
+    Default: yes (except for libmpv). macOS and Windows only, because elsewhere
+    mpv doesn't have a choice - the system decides whether to send media keys
+    to mpv. For instance, on X11 or Wayland, system-wide media keys are not
+    implemented. Whether media keys work when the mpv window is focused is
+    implementation-defined.
+
+``--input-preprocess-wheel=<yes|no>``
+    Preprocess ``WHEEL_*`` events so that while scrolling on the horizontal
+    or vertical direction, the events aren't generated for another direction
+    even when the two directions are scrolled together (default: yes).
+
+    This preprocessing can be beneficial for preventing accidentally seeking
+    while changing the volume by scrolling on a touchpad with the default
+    keybind. Due to the deadzone mechanism used, disabling the preprocessing
+    allows for diagonal scrolling (such as panning) and potentially reduces
+    input latency.
+
+    Note that disabling the preprocessing does not affect any filtering done
+    by the OS/driver before these events are delivered to mpv, if any.
+
+``--input-right-alt-gr=<yes|no>``
+    (macOS and Windows only)
     Use the right Alt key as Alt Gr to produce special characters. If disabled,
     count the right Alt as an Alt modifier key. Enabled by default.
 
@@ -3599,16 +4454,26 @@ Input
     disabled by default in libmpv as well - it should be enabled if you want
     the mpv default key bindings.
 
-    (This option was renamed from ``--input-x11-keyboard``.)
+``--input-touch-emulate-mouse=<yes|no>``
+    When multi-touch support is enabled (either required by the platform,
+    or enabled by ``--native-touch``), emulate mouse move and button presses
+    for the touch events (default: yes). This is useful for compatibility
+    for mouse key bindings and scripts which read mouse positions for platforms
+    which do not support ``--native-touch=no`` (e.g. Wayland).
+
+``--input-dragging-deadzone=<N>``
+    Begin the built-in window dragging when the mouse moves outside a deadzone of
+    ``N`` pixels while the mouse button is being held down (default: 3). This only
+    affects VOs which support the ``begin-vo-dragging`` command.
 
 OSD
 ---
 
-``--osc``, ``--no-osc``
+``--osc=<yes|no>``
     Whether to load the on-screen-controller (default: yes).
 
-``--no-osd-bar``, ``--osd-bar``
-    Disable display of the OSD bar.
+``--osd-bar=<yes|no>``
+    Enable display of the OSD bar (default: yes).
 
     You can configure this on a per-command basis in input.conf using ``osd-``
     prefixes, see ``Input Command Prefixes``. If you want to disable the OSD
@@ -3634,7 +4499,7 @@ OSD
 ``--osd-font-size=<size>``
     Specify the OSD font size. See ``--sub-font-size`` for details.
 
-    Default: 55.
+    Default: 30
 
 ``--osd-msg1=<string>``
     Show this string as message on OSD with OSD level 1 (visible by default).
@@ -3675,6 +4540,16 @@ OSD
 
     See `Property Expansion`_.
 
+``--osd-playing-msg-duration=<time>``
+    Set the duration of ``osd-playing-msg`` in ms. If this is unset,
+    ``osd-playing-msg`` stays on screen for the duration of ``osd-duration``.
+
+``--osd-playlist-entry=<title|filename|both>``
+    Whether to display the media title, filename, or both. If the
+    ``media-title`` is not available, it will display only the ``filename``.
+
+    Default: ``title``.
+
 ``--osd-bar-align-x=<-1-1>``
     Position of the OSD bar. -1 is far left, 0 is centered, 1 is far right.
     Fractional values (like 0.5) are allowed.
@@ -3690,11 +4565,34 @@ OSD
 ``--osd-bar-h=<0.1-50>``
     Height of the OSD bar, in percentage of the screen height (default: 3.125).
 
-``--osd-back-color=<color>``
-    See ``--osd-color``. Color used for OSD text background.
+``--osd-bar-outline-size=<size>``
+    Size of the outline of the OSD bar in scaled pixels (see ``--sub-font-size``
+    for details).
+
+    ``--osd-bar-border-size`` is an alias for ``--osd-bar-outline-size``.
+
+    Default: 0.5.
+
+``--osd-bar-marker-scale=<0-100>``
+    Factor for the OSD bar marker size relative to the OSD bar outline size.
+
+    Default: 1.3.
+
+``--osd-bar-marker-min-size=<size>``
+    Minimum OSD bar marker size.
+
+    Default: 1.6.
+
+``--osd-bar-marker-style=<none|triangle|line>``
+    Set the OSD bar marker style.
+
+    :none:     Don't draw markers.
+    :triangle: Draw markers as triangles (default).
+    :line:     Draw markers as lines.
 
 ``--osd-blur=<0..20.0>``
-    Gaussian blur factor. 0 means no blur applied (default).
+    Gaussian blur factor applied to the OSD font border.
+    0 means no blur applied (default).
 
 ``--osd-bold=<yes|no>``
     Format text on bold.
@@ -3702,23 +4600,37 @@ OSD
 ``--osd-italic=<yes|no>``
     Format text on italic.
 
-``--osd-border-color=<color>``
-    See ``--osd-color``. Color used for the OSD font border.
+``--osd-outline-color=<color>``
+    See ``--sub-color``. Color used for the OSD font outline.
 
-    .. note::
+    ``--osd-border-color`` is an alias for ``--osd-outline-color``.
 
-        ignored when ``--osd-back-color`` is
-        specified (or more exactly: when that option is not set to completely
-        transparent).
+``--osd-back-color=<color>``
+    See ``--sub-color``. Color used for OSD text background.
 
-``--osd-border-size=<size>``
-    Size of the OSD font border in scaled pixels (see ``--sub-font-size``
-    for details). A value of 0 disables borders.
+    ``--osd-shadow-color`` is an alias for ``--osd-back-color``.
 
-    Default: 3.
+``--osd-outline-size=<size>``
+    Size of the OSD font outline in scaled pixels (see ``--sub-font-size``
+    for details). A value of 0 disables outlines.
+
+    ``--osd-border-size`` is an alias for ``--osd-outline-size``.
+
+    Default: 1.65
+
+``--osd-border-style=<outline-and-shadow|opaque-box|background-box>``
+    See ``--sub-border-style``. Style used for OSD text border.
 
 ``--osd-color=<color>``
     Specify the color used for OSD.
+    See ``--sub-color`` for details.
+
+``--osd-selected-color=<color>``
+    The color of the selected item in lists.
+    See ``--sub-color`` for details.
+
+``--osd-selected-outline-color=<color>``
+    The outline color of the selected item in lists.
     See ``--sub-color`` for details.
 
 ``--osd-fractions``
@@ -3740,7 +4652,7 @@ OSD
     This option specifies the distance of the OSD to the left, as well as at
     which distance from the right border long OSD text will be broken.
 
-    Default: 25.
+    Default: 16
 
 ``--osd-margin-y=<size>``
     Top and bottom screen margin for the OSD in scaled pixels (see
@@ -3748,7 +4660,7 @@ OSD
 
     This option specifies the vertical margins of the OSD.
 
-    Default: 22.
+    Default: 16
 
 ``--osd-align-x=<left|center|right>``
     Control to which corner of the screen OSD should be
@@ -3767,8 +4679,11 @@ OSD
     are always in actual pixels. The effect is that changing the window size
     won't change the OSD font size.
 
-``--osd-shadow-color=<color>``
-    See ``--sub-color``. Color used for OSD shadow.
+    .. note::
+
+        For scripts which draw user interface elements, it is recommended to
+        respect the value of this option when deciding whether the elements
+        are scaled with window size or not.
 
 ``--osd-shadow-offset=<size>``
     Displacement of the OSD shadow in scaled pixels (see
@@ -3789,7 +4704,7 @@ OSD
     all OSD rendering, use ``--osd-level=0``.
 
     It does not affect subtitles or overlays created by scripts (in particular,
-    the OSC needs to be disabled with ``--no-osc``).
+    the OSC needs to be disabled with ``--osc=no``).
 
     This option is somewhat experimental and could be replaced by another
     mechanism in the future.
@@ -3797,6 +4712,9 @@ OSD
 ``--osd-font-provider=<...>``
     See ``--sub-font-provider`` for details and accepted values. Note that
     unlike subtitles, OSD never uses embedded fonts from media files.
+
+``--osd-fonts-dir=<path>``
+    See ``--sub-fonts-dir`` for details.  Defaults to ``~~/fonts``.
 
 Screenshot
 ----------
@@ -3810,13 +4728,15 @@ Screenshot
     :jpg:       JPEG (default)
     :jpeg:      JPEG (alias for jpg)
     :webp:      WebP
+    :jxl:       JPEG XL
+    :avif:      AVIF
 
 ``--screenshot-tag-colorspace=<yes|no>``
-    Tag screenshots with the appropriate colorspace.
+    Tag screenshots with the appropriate colorspace (default: yes).
 
-    Note that not all formats are supported.
-
-    Default: ``no``.
+    Note that not all formats support this. When it is unsupported, or when
+    this option is disabled, screenshots will be converted to sRGB before
+    being written.
 
 ``--screenshot-high-bit-depth=<yes|no>``
     If possible, write screenshots with a bit depth similar to the source
@@ -3911,10 +4831,12 @@ Screenshot
     ``%%``
         Replaced with the ``%`` character itself.
 
-``--screenshot-directory=<path>``
+``--screenshot-dir=<path>``
     Store screenshots in this directory. This path is joined with the filename
     generated by ``--screenshot-template``. If the template filename is already
     absolute, the directory is ignored.
+
+    ``--screenshot-directory`` is an alias for ``--screenshot-dir``.
 
     If the directory does not exist, it is created on the first screenshot. If
     it is not a directory, an error is generated when trying to write a
@@ -3954,6 +4876,58 @@ Screenshot
     Set the WebP compression level. Higher means better compression, but takes
     more CPU time. Note that this also affects the screenshot quality when used
     with lossy WebP files. The default is 4.
+
+``--screenshot-jxl-distance=<0-15>``
+    Set the JPEG XL Butteraugli distance. Lower means better quality. Lossless
+    is 0.0, and 1.0 is approximately equivalent to JPEG quality 90 for
+    photographic content. Use 0.1 for "visually lossless" screenshots. The
+    default is 1.0.
+
+``--screenshot-jxl-effort=<1-9>``
+    Set the JPEG XL compression effort. Higher effort (usually) means better
+    compression, but takes more CPU time. The default is 4.
+
+``--screenshot-avif-encoder=<encoder>``
+    Specify the AV1 encoder to be used by libavcodec for encoding avif
+    screenshots.
+
+    Default: ``libaom-av1``
+
+``--screenshot-avif-pixfmt=<format>``
+    Specify the pixel format for the libavcodec encoder. Defaults to empty,
+    which lets mpv pick one close to the source format.
+
+``--screenshot-avif-opts=key1=value1,key2=value2,...``
+    Specifies libavcodec options for selected encoder. For more information,
+    consult the FFmpeg documentation.
+
+    Default: ``usage=allintra,crf=0,cpu-used=8``
+
+    Note: the default is only guaranteed to work with the libaom-av1 encoder.
+    Above options may not be valid and or optimal for other encoders.
+
+    This is a key/value list option. See `List Options`_ for details.
+
+    .. admonition:: Example
+
+        "``--screenshot-avif-opts=crf=23,aq-mode=complexity``"
+            sets the crf to 23 and quantization (aq-mode) to complexity based.
+
+``--screenshot-sw=<yes|no>``
+    Whether to use software rendering for screenshots (default: no).
+
+    If set to no, the screenshot will be rendered by the current VO (only vo_gpu
+    or vo_gpu_next currently). The advantage is that this will (probably) always
+    show up as in the video window, because the same code is used for rendering.
+    But since the renderer needs to be reinitialized, this can be slow and
+    interrupt playback.
+
+    If set to yes, the software scaler is used to convert the video to RGB (or
+    whatever the target screenshot requires). In this case, conversion will
+    run in a separate thread and will probably not interrupt playback. The
+    software renderer may lack some capabilities, such as HDR rendering.
+    If ``window`` mode is used, the image will also be scaled in software
+    which may not accurately reflect the actual visible result.
 
 Software Scaler
 ---------------
@@ -3998,13 +4972,14 @@ Software Scaler
     VOs like ``drm`` and ``x11`` will benefit a lot from using ``--sws-fast``.
     You may need to set other options, like ``--sws-scaler``. The builtin
     ``sws-fast`` profile sets this option and some others to gain performance
-    for reduced quality.
+    for reduced quality. Also see ``--sws-allow-zimg``.
 
 ``--sws-allow-zimg=<yes|no>``
     Allow using zimg (if the component using the internal swscale wrapper
-    explicitly allows so). In this case, zimg *may* be used, if the internal
-    zimg wrapper supports the input and output formats. It will silently
-    fall back to libswscale if one of these conditions does not apply.
+    explicitly allows so) (default: yes). In this case, zimg *may* be used, if
+    the internal zimg wrapper supports the input and output formats. It will
+    silently or noisily fall back to libswscale if one of these conditions does
+    not apply.
 
     If zimg is used, the other ``--sws-`` options are ignored, and the
     ``--zimg-`` options are used instead.
@@ -4014,6 +4989,13 @@ Software Scaler
     being used.
 
     Most things which need software conversion can make use of this.
+
+    .. note::
+
+        Do note that zimg *may* be slower than libswscale. Usually,
+        it's faster on x86 platforms, but slower on ARM (due to lack of ARM
+        specific optimizations). The mpv zimg wrapper uses unoptimized repacking
+        for some formats, for which zimg cannot be blamed.
 
 ``--zimg-scaler=<point|bilinear|bicubic|spline16|spline36|lanczos>``
     Zimg luma scaler to use (default: lanczos).
@@ -4038,6 +5020,17 @@ Software Scaler
 ``--zimg-dither=<no|ordered|random|error-diffusion>``
     Dithering (default: random).
 
+``--zimg-threads=<auto|integer>``
+    Set the maximum number of threads to use for scaling (default: auto).
+    ``auto`` uses the number of logical cores on the current machine. Note that
+    the scaler may use less threads (or even just 1 thread) depending on stuff.
+    Passing a value of 1 disables threading and always scales the image in a
+    single operation. Higher thread counts waste resources, but make it
+    typically faster.
+
+    Note that some zimg git versions had bugs that will corrupt the output if
+    threads are used.
+
 ``--zimg-fast=<yes|no>``
     Allow optimizations that help with performance, but reduce quality (default:
     yes). Currently, this may simplify gamma conversion operations.
@@ -4048,8 +5041,6 @@ Audio Resampler
 
 This controls the default options of any resampling done by mpv (but not within
 libavfilter, within the system audio API resampler, or any other places).
-
-It also sets the defaults for the ``lavrresample`` audio filter.
 
 ``--audio-resample-filter-size=<length>``
     Length of the filter with respect to the lower sampling rate. (default:
@@ -4071,9 +5062,6 @@ It also sets the defaults for the ``lavrresample`` audio filter.
     (default: no). If this is disabled, downmix can cause clipping. If it's
     enabled, the output might be too quiet. It depends on the source audio.
 
-    Technically, this changes the ``normalize`` suboption of the
-    ``lavrresample`` audio filter, which performs the downmixing.
-
     If downmix happens outside of mpv for some reason, or in the decoder
     (decoder downmixing), or in the audio output (system mixer), this has no
     effect.
@@ -4089,7 +5077,7 @@ It also sets the defaults for the ``lavrresample`` audio filter.
 
 ``--audio-swresample-o=<string>``
     Set AVOptions on the SwrContext or AVAudioResampleContext. These should
-    be documented by FFmpeg or Libav.
+    be documented by FFmpeg.
 
     This is a key/value list option. See `List Options`_ for details.
 
@@ -4107,15 +5095,15 @@ Terminal
 ``--really-quiet``
     Display even less output and status messages than with ``--quiet``.
 
-``--no-terminal``, ``--terminal``
-    Disable any use of the terminal and stdin/stdout/stderr. This completely
-    silences any message output.
+``--terminal=<yes|no>``
+    ``--terminal=no`` disables any use of the terminal and stdin/stdout/stderr.
+    This completely silences any message output.
 
     Unlike ``--really-quiet``, this disables input and terminal initialization
     as well.
 
-``--no-msg-color``
-    Disable colorful console output on terminals.
+``--msg-color=<yes|no>``
+    Enable colorful console output on terminals (default: yes).
 
 ``--msg-level=<module1=level1,module2=level2,...>``
     Control verbosity directly for each module. The ``all`` module changes the
@@ -4174,7 +5162,7 @@ Terminal
 
     The ``auto`` mode also enables terminal OSD if ``--video-osd=no`` was set.
 
-``--term-osd-bar``, ``--no-term-osd-bar``
+``--term-osd-bar=<yes|no>``
     Enable printing a progress bar under the status line on the terminal.
     (Disabled by default.)
 
@@ -4197,11 +5185,23 @@ Terminal
     Print out a custom string during playback instead of the standard status
     line. Expands properties. See `Property Expansion`_.
 
+``--term-title=<string>``
+    Set the terminal title. Currently, this simply concatenates the escape
+    sequence setting the window title with the provided (property expanded)
+    string. This will mess up if the expanded string contain bytes that end the
+    escape sequence, or if the terminal does not understand the sequence. The
+    latter probably includes the regrettable win32.
+
+    Expands properties. See `Property Expansion`_.
+
 ``--msg-module``
     Prepend module name to each console message.
 
 ``--msg-time``
-    Prepend timing information to each console message.
+    Prepend timing information to each console message. The time is in
+    seconds since the player process was started (technically, slightly
+    later actually), using a monotonic time source depending on the OS. This
+    is ``CLOCK_MONOTONIC`` on sane UNIX variants.
 
 Cache
 -----
@@ -4210,9 +5210,8 @@ Cache
     Decide whether to use network cache settings (default: auto).
 
     If enabled, use up to ``--cache-secs`` for the cache size (but still limited
-    to ``--demuxer-max-bytes``). ``--demuxer-seekable-cache=auto`` behaves as if
-    it was set to ``yes``. If disabled, ``--cache-pause`` and related are
-    implicitly disabled.
+    to ``--demuxer-max-bytes``), and make the cached data seekable (if possible).
+    If disabled, ``--cache-pause`` and related are implicitly disabled.
 
     The ``auto`` choice enables this depending on whether the stream is thought
     to involve network accesses or other slow media (this is an imperfect
@@ -4221,9 +5220,6 @@ Cache
     Before mpv 0.30.0, this used to accept a number, which specified the size
     of the cache in kilobytes. Use e.g. ``--cache --demuxer-max-bytes=123k``
     instead.
-
-``--no-cache``
-    Turn off input stream caching. See ``--cache``.
 
 ``--cache-secs=<seconds>``
     How many seconds of audio/video to prefetch if the cache is active. This
@@ -4237,8 +5233,6 @@ Cache
     Write packet data to a temporary file, instead of keeping them in memory.
     This makes sense only with ``--cache``. If the normal cache is disabled,
     this option is ignored.
-
-    You need to set ``--cache-dir`` to use this.
 
     The cache file is append-only. Even if the player appears to prune data, the
     file space freed by it is not reused. The cache file is deleted when
@@ -4261,8 +5255,9 @@ Cache
     media is closed. If the option is disabled and enabled again, it will
     continue to use the cache file that was opened first.
 
-``--cache-dir=<path>``
-    Directory where to create temporary files (default: none).
+``--demuxer-cache-dir=<path>``
+    Directory where to create temporary files. Cache is stored in the system's
+    cache directory (usually ``~/.cache/mpv``) if this is unset.
 
     Currently, this is used for ``--cache-on-disk`` only.
 
@@ -4294,7 +5289,7 @@ Cache
 
     This option also triggers when playback is restarted after seeking.
 
-``--cache-unlink-files=<immediate|whendone|no>``
+``--demuxer-cache-unlink-files=<immediate|whendone|no>``
     Whether or when to unlink cache files (default: immediate). This affects
     cache files which are inherently temporary, and which make no sense to
     remain on disk after the player terminates. This is a debugging option.
@@ -4340,13 +5335,61 @@ Cache
     See ``--list-options`` for defaults and value range. ``<bytesize>`` options
     accept suffixes such as ``KiB`` and ``MiB``.
 
+``--vd-queue-enable=<yes|no>, --ad-queue-enable``
+    Enable running the video/audio decoder on a separate thread (default: no).
+    If enabled, the decoder is run on a separate thread, and a frame queue is
+    put between decoder and higher level playback logic. The size of the frame
+    queue is defined by the other options below.
+
+    This is probably quite pointless. libavcodec already has multithreaded
+    decoding (enabled by default), which makes this largely unnecessary. It
+    might help in some corner cases with high bandwidth video that is slow to
+    decode (in these cases libavcodec would block the playback logic, while
+    using a decoding thread would distribute the decoding time evenly without
+    affecting the playback logic). In other situations, it will simply make
+    seeking slower and use significantly more memory.
+
+    The queue size is restricted by the other ``--vd-queue-...`` options. The
+    final queue size is the minimum as indicated by the option with the lowest
+    limit. Each decoder/track has its own queue that may use the full configured
+    queue size.
+
+    Most queue options can be changed at runtime. ``--vd-queue-enable`` itself
+    (and the audio equivalent) update only if decoding is completely
+    reinitialized. However, setting ``--vd-queue-max-samples=1`` should almost
+    lead to the same behavior as ``--vd-queue-enable=no``, so that value can
+    be used for effectively runtime enabling/disabling the queue.
+
+    This should not be used with hardware decoding. It is possible to enable
+    this for audio, but it makes even less sense.
+
+``--vd-queue-max-bytes=<bytesize>``, ``--ad-queue-max-bytes``
+    Maximum approximate allowed size of the queue. If exceeded, decoding will
+    be stopped. The maximum size can be exceeded by about 1 frame.
+
+    See ``--list-options`` for defaults and value range. ``<bytesize>`` options
+    accept suffixes such as ``KiB`` and ``MiB``.
+
+``--vd-queue-max-samples=<int>``, ``--ad-queue-max-samples``
+    Maximum number of frames (video) or samples (audio) of the queue. The audio
+    size may be exceeded by about 1 frame.
+
+    See ``--list-options`` for defaults and value range.
+
+``--vd-queue-max-secs=<seconds>``, ``--ad-queue-max-secs``
+    Maximum number of seconds of media in the queue. The special value 0 means
+    no limit is set. The queue size may be exceeded by about 2 frames. Timestamp
+    resets may lead to random queue size usage.
+
+    See ``--list-options`` for defaults and value range.
+
 Network
 -------
 
 ``--user-agent=<string>``
     Use ``<string>`` as user agent for HTTP streaming.
 
-``--cookies``, ``--no-cookies``
+``--cookies=<yes|no>``
     Support cookies when making HTTP requests. Disabled by default.
 
 ``--cookies-file=<filename>``
@@ -4384,11 +5427,11 @@ Network
 
 ``--tls-ca-file=<filename>``
     Certificate authority database file for use with TLS. (Silently fails with
-    older FFmpeg or Libav versions.)
+    older FFmpeg versions.)
 
 ``--tls-verify``
     Verify peer certificates when using TLS (e.g. with ``https://...``).
-    (Silently fails with older FFmpeg or Libav versions.)
+    (Silently fails with older FFmpeg versions.)
 
 ``--tls-cert-file``
     A file containing a certificate to use in the handshake with the
@@ -4402,7 +5445,7 @@ Network
 
 ``--network-timeout=<seconds>``
     Specify the network timeout in seconds (default: 60 seconds). This affects
-    at least HTTP. The special value 0 uses the FFmpeg/Libav defaults. If a
+    at least HTTP. The special value 0 uses the FFmpeg defaults. If a
     protocol is used which does not support timeouts, this option is silently
     ignored.
 
@@ -4418,7 +5461,7 @@ Network
         option is ignored (or should be ignored) on RTSP URLs. You can still
         set the timeout option directly with ``--demuxer-lavf-o``.
 
-``--rtsp-transport=<lavf|udp|tcp|http>``
+``--rtsp-transport=<lavf|udp|udp_multicast|tcp|http>``
     Select RTSP transport method (default: tcp). This selects the underlying
     network transport when playing ``rtsp://...`` URLs. The value ``lavf``
     leaves the decision to libavformat.
@@ -4454,8 +5497,11 @@ DVB
 ``--dvbin-file=<filename>``
     Instructs mpv to read the channels list from ``<filename>``. The default is
     in the mpv configuration directory (usually ``~/.config/mpv``) with the
-    filename ``channels.conf.{sat,ter,cbl,atsc}`` (based on your card type) or
-    ``channels.conf`` as a last resort.
+    filename ``channels.conf.{sat,ter,cbl,atsc,isdbt}`` (based on your card
+    type) or ``channels.conf`` as a last resort.
+    Please note that using specific file name with card type is recommended,
+    since the legacy channel format is not fully standardized
+    so autodetection of the delivery system may fail otherwise.
     For DVB-S/2 cards, a VDR 1.7.x format channel list is recommended
     as it allows tuning to DVB-S2 channels, enabling subtitles and
     decoding the PMT (which largely improves the demuxing).
@@ -4493,79 +5539,25 @@ DVB
     An example ``input.conf`` could contain:
     ``H cycle dvbin-channel-switch-offset up``, ``K cycle dvbin-channel-switch-offset down``
 
-ALSA audio output options
--------------------------
-
-
-``--alsa-device=<device>``
-    Deprecated, use ``--audio-device`` (requires ``alsa/`` prefix).
-
-``--alsa-resample=yes``
-    Enable ALSA resampling plugin. (This is disabled by default, because
-    some drivers report incorrect audio delay in some cases.)
-
-``--alsa-mixer-device=<device>``
-    Set the mixer device used with ``ao-volume`` (default: ``default``).
-
-``--alsa-mixer-name=<name>``
-    Set the name of the mixer element (default: ``Master``). This is for
-    example ``PCM`` or ``Master``.
-
-``--alsa-mixer-index=<number>``
-    Set the index of the mixer channel (default: 0). Consider the output of
-    "``amixer scontrols``", then the index is the number that follows the
-    name of the element.
-
-``--alsa-non-interleaved``
-    Allow output of non-interleaved formats (if the audio decoder uses
-    this format). Currently disabled by default, because some popular
-    ALSA plugins are utterly broken with non-interleaved formats.
-
-``--alsa-ignore-chmap``
-    Don't read or set the channel map of the ALSA device - only request the
-    required number of channels, and then pass the audio as-is to it. This
-    option most likely should not be used. It can be useful for debugging,
-    or for static setups with a specially engineered ALSA configuration (in
-    this case you should always force the same layout with ``--audio-channels``,
-    or it will work only for files which use the layout implicit to your
-    ALSA device).
-
-``--alsa-buffer-time=<microseconds>``
-    Set the requested buffer time in microseconds. A value of 0 skips requesting
-    anything from the ALSA API. This and the ``--alsa-periods`` option uses the
-    ALSA ``near`` functions to set the requested parameters. If doing so results
-    in an empty configuration set, setting these parameters is skipped.
-
-    Both options control the buffer size. A low buffer size can lead to higher
-    CPU usage and audio dropouts, while a high buffer size can lead to higher
-    latency in volume changes and other filtering.
-
-``--alsa-periods=<number>``
-    Number of periods requested from the ALSA API. See ``--alsa-buffer-time``
-    for further remarks.
-
 
 GPU renderer options
 -----------------------
 
-The following video options are currently all specific to ``--vo=gpu`` and
-``--vo=libmpv`` only, which are the only VOs that implement them.
+The following video options are currently all specific to ``--vo=gpu``,
+``--vo=libmpv`` and ``--vo=gpu-next``, which are the only VOs that implement
+them.
 
 ``--scale=<filter>``
     The filter function to use when upscaling video.
 
     ``bilinear``
-        Bilinear hardware texture filtering (fastest, very low quality). This
-        is the default for compatibility reasons.
-
-    ``spline36``
-        Mid quality and speed. This is the default when using ``gpu-hq``.
+        Bilinear hardware texture filtering (fastest, very low quality). This is
+        the default when using the ``fast`` profile.
 
     ``lanczos``
-        Lanczos scaling. Provides mid quality and speed. Generally worse than
-        ``spline36``, but it results in a slightly sharper image which is good
-        for some content types. The number of taps can be controlled with
-        ``scale-radius``, but is best left unchanged.
+        Lanczos scaling. Provides good balance between quality and performance.
+        This is the default for ``scale``. The number of taps can be controlled
+        with ``scale-radius``, but is best left unchanged.
 
         (This filter is an alias for ``sinc``-windowed ``sinc``)
 
@@ -4578,22 +5570,44 @@ The following video options are currently all specific to ``--vo=gpu`` and
         (This filter is an alias for ``jinc``-windowed ``jinc``)
 
     ``ewa_lanczossharp``
-        A slightly sharpened version of ewa_lanczos, preconfigured to use an
-        ideal radius and parameter. If your hardware can run it, this is
-        probably what you should use by default.
+        A slightly sharpened version of ``ewa_lanczos``. This is the default
+        when using the ``high-quality`` profile. Blur value determined by method
+        originally developed by Nicolas Robidoux for Image Magick, see:
+        https://www.imagemagick.org/discourse-server/viewtopic.php?p=89068#p89068
+
+    ``ewa_lanczos4sharpest``
+        Very sharp scaler, but also slightly slower than ``ewa_lanczossharp``.
+        Prone to ringing, so it's recommended to combine this with an
+        anti-ringing shader. On ``--vo=gpu-next``, setting this filter enables
+        built-in anti-ringing, so no extra action needs to be taken.
+
+        For more details, see:
+        https://www.imagemagick.org/discourse-server/viewtopic.php?p=128587#p128587
 
     ``mitchell``
-        Mitchell-Netravali. The ``B`` and ``C`` parameters can be set with
-        ``--scale-param1`` and ``--scale-param2``. This filter is very good at
-        downscaling (see ``--dscale``).
+        Mitchell-Netravali. Piecewise cubic filter with a support of radius 2.0.
+        Provides a balanced compromise of all scaling artifacts. This filter has
+        both ``B`` and ``C`` set to ``1/3``. The ``B`` and ``C`` parameters can
+        be controlled with ``--scale-param1`` and ``--scale-param2``.
+
+    ``hermite``
+        Hermite spline. Similar to ``bicubic`` but with ``B`` set to ``0.0``.
+        This filter has the special property of having a support of radius 1.0,
+        making it very fast in comparison, but prone to blocking. This is the
+        default for ``--dscale``.
+
+    ``catmull_rom``
+        Catmull-Rom spline. Similar to ``mitchell``, but with ``B`` and ``C``
+        set to ``0.0`` and ``0.5`` respectively. This filter is sharper than
+        ``mitchell``, but prone to ringing.
 
     ``oversample``
         A version of nearest neighbour that (naively) oversamples pixels, so
         that pixels overlapping edges get linearly interpolated instead of
         rounded. This essentially removes the small imperfections and judder
         artifacts caused by nearest-neighbour interpolation, in exchange for
-        adding some blur. This filter is good at temporal interpolation, and
-        also known as "smoothmotion" (see ``--tscale``).
+        adding some blur. This can also be used for frame mixing, where it
+        is commonly known as "smoothmotion" (see ``--tscale``).
 
     ``linear``
         A ``--tscale`` filter.
@@ -4605,17 +5619,17 @@ The following video options are currently all specific to ``--vo=gpu`` and
 
 ``--cscale=<filter>``
     As ``--scale``, but for interpolating chroma information. If the image is
-    not subsampled, this option is ignored entirely.
+    not subsampled, this option is ignored entirely. If this option is unset,
+    the filter implied by ``--scale`` will be applied.
 
 ``--dscale=<filter>``
-    Like ``--scale``, but apply these filters on downscaling instead. If this
-    option is unset, the filter implied by ``--scale`` will be applied.
+    Like ``--scale``, but apply these filters on downscaling instead.
 
 ``--tscale=<filter>``
     The filter used for interpolating the temporal axis (frames). This is only
     used if ``--interpolation`` is enabled. The only valid choices for
     ``--tscale`` are separable convolution filters (use ``--tscale=help`` to
-    get a list). The default is ``mitchell``.
+    get a list). The default is ``oversample``.
 
     Common ``--tscale`` choices include ``oversample``, ``linear``,
     ``catmull_rom``, ``mitchell``, ``gaussian``, or ``bicubic``. These are
@@ -4629,8 +5643,8 @@ The following video options are currently all specific to ``--vo=gpu`` and
     filter is not tunable. Currently, this affects the following filter
     parameters:
 
-    bcspline
-        Spline parameters (``B`` and ``C``). Defaults to 0.5 for both.
+    bicubic
+        Spline parameters (``B`` and ``C``). Defaults to B=1 and C=0.
 
     gaussian
         Scale parameter (``t``). Increasing this makes the result blurrier.
@@ -4642,12 +5656,12 @@ The following video options are currently all specific to ``--vo=gpu`` and
         never interpolate, thus behaving as if the regular nearest neighbour
         algorithm was used. Defaults to 0.0.
 
-``--scale-blur=<value>``, ``--scale-wblur=<value>``, ``--cscale-blur=<value>``, ``--cscale-wblur=<value>``, ``--dscale-blur=<value>``, ``--dscale-wblur=<value>``, ``--tscale-blur=<value>``, ``--tscale-wblur=<value>``
-    Kernel/window scaling factor (also known as a blur factor). Decreasing this
-    makes the result sharper, increasing it makes it blurrier (default 0). If
-    set to 0, the kernel's preferred blur factor is used. Note that setting
-    this too low (eg. 0.5) leads to bad results. It's generally recommended to
-    stick to values between 0.8 and 1.2.
+``--scale-blur=<value>``, ``--cscale-blur=<value>``, ``--dscale-blur=<value>``, ``--tscale-blur=<value>``
+    Kernel scaling factor (also known as a blur factor). Decreasing this makes
+    the result sharper, increasing it makes it blurrier (default 0). If set to
+    0, the kernel's preferred blur factor is used. Note that setting this too
+    low (eg. 0.5) leads to bad results. It's generally recommended to stick to
+    values between 0.8 and 1.2.
 
 ``--scale-clamp=<0.0-1.0>``, ``--cscale-clamp``, ``--dscale-clamp``, ``--tscale-clamp``
     Specifies a weight bias to multiply into negative coefficients. Specifying
@@ -4659,14 +5673,6 @@ The following video options are currently all specific to ``--vo=gpu`` and
     manifest themselves as short flashes or fringes of black, mostly around
     moving edges) in exchange for potentially adding more blur. The default for
     ``--tscale-clamp`` is 1.0, the others default to 0.0.
-
-``--scale-cutoff=<value>``, ``--cscale-cutoff=<value>``, ``--dscale-cutoff=<value>``
-    Cut off the filter kernel prematurely once the value range drops below
-    this threshold. Doing so allows more aggressive pruning of skippable
-    coefficients by disregarding parts of the LUT which are effectively zeroed
-    out by the window function. Only affects polar (EWA) filters. The default
-    is 0.001 for each, which is perceptually transparent but provides a 10%-20%
-    speedup, depending on the exact radius and filter kernel chosen.
 
 ``--scale-taper=<value>``, ``--scale-wtaper=<value>``, ``--dscale-taper=<value>``, ``--dscale-wtaper=<value>``, ``--cscale-taper=<value>``, ``--cscale-wtaper=<value>``, ``--tscale-taper=<value>``, ``--tscale-wtaper=<value>``
     Kernel/window taper factor. Increasing this flattens the filter function.
@@ -4692,6 +5698,17 @@ The following video options are currently all specific to ``--vo=gpu`` and
     Note that this doesn't affect the special filters ``bilinear`` and
     ``bicubic_fast``, nor does it affect any polar (EWA) scalers.
 
+    On ``--vo=gpu-next``, this also affects polar (EWA) scalers. Certain
+    filter aliases may also implicitly enable antiringing, regardless of this
+    setting (see ``--scale``).
+
+    .. note::
+
+        When downscaling with separable (orthogonal) filters, setting
+        ``--dscale-antiring`` to a value other than 0.0 (default) will reduce
+        scaler quality and produce aliasing artifacts. On ``--vo=gpu-next``,
+        ``--dscale-antiring`` is disabled for separable (orthogonal) filters.
+
 ``--scale-window=<window>``, ``--cscale-window=<window>``, ``--dscale-window=<window>``, ``--tscale-window=<window>``
     (Advanced users only) Choose a custom windowing function for the kernel.
     Defaults to the filter's preferred window if unset. Use
@@ -4712,14 +5729,6 @@ The following video options are currently all specific to ``--vo=gpu`` and
         Scale parameter (t). Increasing this makes the window wider. Defaults
         to 1.
 
-``--scaler-lut-size=<4..10>``
-    Set the size of the lookup texture for scaler kernels (default: 6). The
-    actual size of the texture is ``2^N`` for an option value of ``N``. So the
-    lookup texture with the default setting uses 64 samples.
-
-    All weights are linearly interpolated from those samples, so increasing
-    the size of lookup table might improve the accuracy of scaler.
-
 ``--scaler-resizes-only``
     Disable the scaler if the video image is not resized. In that case,
     ``bilinear`` is used instead of whatever is set with ``--scale``. Bilinear
@@ -4729,15 +5738,18 @@ The following video options are currently all specific to ``--vo=gpu`` and
 ``--correct-downscaling``
     When using convolution based filters, extend the filter size when
     downscaling. Increases quality, but reduces performance while downscaling.
+    Enabled by default.
 
     This will perform slightly sub-optimally for anamorphic video (but still
     better than without it) since it will extend the size to match only the
     milder of the scale factors between the axes.
 
+    Note: this option is ignored when using bilinear downscaling with ``--vo=gpu``.
+
 ``--linear-downscaling``
     Scale in linear light when downscaling. It should only be used with a
     ``--fbo-format`` that has at least 16 bit precision. This option
-    has no effect on HDR content.
+    has no effect on HDR content. Enabled by default.
 
 ``--linear-upscaling``
     Scale in linear light when upscaling. Like ``--linear-downscaling``, it
@@ -4748,9 +5760,12 @@ The following video options are currently all specific to ``--vo=gpu`` and
 
 ``--sigmoid-upscaling``
     When upscaling, use a sigmoidal color transform to avoid emphasizing
-    ringing artifacts. This is incompatible with and replaces
+    ringing artifacts. Enabled by default. This is incompatible with and replaces
     ``--linear-upscaling``. (Note that sigmoidization also requires
     linearization, so the ``LINEAR`` rendering step fires in both cases)
+
+    For more information about sigmoidization, see:
+    https://imagemagick.org/Usage/resize/#resize_sigmoidal
 
 ``--sigmoid-center``
     The center of the sigmoid curve used for ``--sigmoid-upscaling``, must be a
@@ -4774,20 +5789,40 @@ The following video options are currently all specific to ``--vo=gpu`` and
 
 ``--interpolation-threshold=<0..1,-1>``
     Threshold below which frame ratio interpolation gets disabled (default:
-    ``0.0001``). This is calculated as ``abs(disphz/vfps - 1) < threshold``,
+    ``0.01``). This is calculated as ``abs(disphz/vfps - 1) < threshold``,
     where ``vfps`` is the speed-adjusted video FPS, and ``disphz`` the
     display refresh rate. (The speed-adjusted video FPS is roughly equal to
     the normal video FPS, but with slowdown and speedup applied. This matters
     if you use ``--video-sync=display-resample`` to make video run synchronously
     to the display FPS, or if you change the ``speed`` property.)
 
-    The default is intended to almost always enable interpolation if the
-    playback rate is even slightly different from the display refresh rate. But
-    note that if you use e.g. ``--video-sync=display-vdrop``, small deviations
-    in the rate can disable interpolation and introduce a discontinuity every
-    other minute.
+    The default is intended to enable interpolation in scenarios where
+    retiming with the ``--video-sync=display-*`` cannot adjust the speed of
+    the video sufficiently for smooth playback. For example if a video is
+    60.00 FPS and your display refresh rate is 59.94 Hz, interpolation will
+    never be activated, since the mismatch is within 1% of the refresh
+    rate. The default also handles the scenario when mpv cannot determine the
+    container FPS, such as during certain live streams, and may dynamically
+    toggle interpolation on and off. In this scenario, the default would be to
+    not use interpolation but rather to allow ``--video-sync=display-*`` to
+    retime the video to match display refresh rate. See
+    ``--video-sync-max-video-change`` for more information about how mpv
+    will retime video.
+
+    Also note that if you use e.g. ``--video-sync=display-vdrop``, small
+    deviations in the rate can disable interpolation and introduce a
+    discontinuity every other minute.
 
     Set this to ``-1`` to disable this logic.
+
+``--interpolation-preserve``
+    Preserve the previous frames' interpolated results even when renderer
+    parameters are changed - with the exception of options related to
+    cropping and video placement, which always invalidate the cache. Enabling
+    this option makes dynamic updates of renderer settings slightly smoother at
+    the cost of slightly higher latency in response to such changes. Defaults
+    to on. (Only affects ``--vo=gpu-next``, note that ``--vo=gpu`` always
+    invalidates interpolated frames)
 
 ``--opengl-pbo``
     Enable use of PBOs. On some drivers this can be faster, especially if the
@@ -4795,19 +5830,21 @@ The following video options are currently all specific to ``--vo=gpu`` and
     might be slower or cause latency issues.
 
 ``--dither-depth=<N|no|auto>``
-    Set dither target depth to N. Default: no.
+    Set dither target depth to N. Default: auto.
 
     no
         Disable any dithering done by mpv.
     auto
-        Automatic selection. If output bit depth cannot be detected, 8 bits per
-        component are assumed.
+        Automatic selection.
+        On ``--vo=gpu``: detected depth or 8 bpc otherwise
+        On ``--vo=gpu-next``: detected depth or 8 bpc (for SDR target)
     8
         Dither to 8 bit output.
 
-    Note that the depth of the connected video display device cannot be
-    detected. Often, LCD panels will do dithering on their own, which conflicts
-    with this option and leads to ugly output.
+    Note that the on-the-wire bit depth cannot be detected except when using
+    ``gpu-api=d3d11``. Explicitly setting the value to your display's bit depth
+    is recommended, as dithering performed by some LCD panels can be of low
+    quality.
 
 ``--dither-size-fruit=<2-8>``
     Set the size of the dither matrix (default: 6). The actual size of the
@@ -4876,7 +5913,40 @@ The following video options are currently all specific to ``--vo=gpu`` and
     require driver-specific hacks if using multiple monitors, to ensure mpv
     syncs to the right one. Compositing window managers can also lead to bad
     results, as can missing or incorrect display FPS information (see
-    ``--override-display-fps``).
+    ``--display-fps-override``).
+
+``--egl-config-id=<ID>``
+    (EGL only)
+    Select EGLConfig with specific EGL_CONFIG_ID.
+    Rendering surfaces and contexts will be created using this EGLConfig.
+    You can use ``--msg-level=vo=trace`` to obtain a list of available configs.
+
+``--egl-output-format=<auto|rgb8|rgba8|rgb10|rgb10_a2|rgb16|rgba16|rgb16f|rgba16f|rgb32f|rgba32f>``
+    (EGL only)
+    Select a specific EGL output format to utilize for OpenGL rendering.
+    This option is mutually exclusive with ``--egl-config-id``.
+    "auto" is the default, which will pick the first usable config
+    based on the order given by the driver.
+
+    All formats are not available.
+    A fatal error is caused if an unavailable format is selected.
+
+    .. note::
+
+        There is no reliable API to query desktop bit depth in EGL.
+        You can manually set this option
+        according to the bit depth of your display.
+        This option also affects the auto-detection of ``--dither-depth``.
+
+    .. note::
+
+        Unlike  ``--d3d11-output-format``, this option also takes effect with ``--vo=gpu-next``.
+
+``--vulkan-device=<device name|UUID>``
+    The name or UUID of the Vulkan device to use for rendering and presentation. Use
+    ``--vulkan-device=help`` to see the list of available devices and their
+    names and UUIDs. If left unspecified, the first enumerated hardware Vulkan
+    device will be used.
 
 ``--vulkan-swap-mode=<mode>``
     Controls the presentation mode of the vulkan swapchain. This is similar
@@ -4916,6 +5986,31 @@ The following video options are currently all specific to ``--vo=gpu`` and
     set by ``--vulkan-queue-count``), mpv will internally try and prefer the
     use of compute shaders over fragment shaders wherever possible. Enabled by
     default, although Nvidia users may want to disable it.
+
+``--vulkan-display-display=<n>``
+    The index of the display, on the selected Vulkan device, to present on when
+    using the ``displayvk`` GPU context. Use ``--vulkan-display-display=help``
+    to see the list of available displays. If left unspecified, the first
+    enumerated display will be used.
+
+
+``--vulkan-display-mode=<n>``
+    The index of the display mode, of the selected Vulkan display, to use when
+    using the ``displayvk`` GPU context. Use ``--vulkan-display-mode=help``
+    to see the list of available modes. If left unspecified, the first
+    enumerated mode will be used.
+
+``--vulkan-display-plane=<n>``
+    The index of the plane, on the selected Vulkan device, to present on when
+    using the ``displayvk`` GPU context. Use ``--vulkan-display-plane=help``
+    to see the list of available planes. If left unspecified, the first
+    enumerated plane will be used.
+
+``--d3d11-exclusive-fs=<yes|no>``
+    Switches the D3D11 swap chain fullscreen state to 'fullscreen' when
+    fullscreen video is requested. Also known as "exclusive fullscreen" or
+    "D3D fullscreen" in other applications. Gives mpv full control of
+    rendering on the swap chain's screen. Off by default.
 
 ``--d3d11-warp=<yes|no|auto>``
     Use WARP (Windows Advanced Rasterization Platform) with the D3D11 GPU
@@ -4966,6 +6061,11 @@ The following video options are currently all specific to ``--vo=gpu`` and
         from Windows 10. Thus on older systems it will only automatically
         utilize the rgba8 output format.
 
+    .. note::
+
+        For ``--vo=gpu-next``, this is used as a best-effort hint and
+        libplacebo has the last say on which format is utilized.
+
 ``--d3d11-output-csp=<auto|srgb|linear|pq|bt.2020>``
     Select a specific D3D11 output color space to utilize for D3D11 rendering.
     "auto" is the default, which will select the color space of the desktop
@@ -4991,16 +6091,46 @@ The following video options are currently all specific to ``--vo=gpu`` and
 
     Currently only relevant for ``--gpu-api=d3d11``.
 
+``--wayland-app-id=<string>``
+    Set the client app id for Wayland-based video output methods (default: ``mpv``).
+
+``--wayland-configure-bounds=<auto|yes|no>``
+    Controls whether or not mpv opts into the configure bounds event if sent by the
+    compositor (default: auto). This restricts the initial size of the mpv window to
+    a certain maximum size intended by the compositor. In most cases, this simply
+    just prevents the mpv window from being larger than the size of the monitor when
+    it first renders. With the default value of ``auto``, configure-bounds will
+    silently be ignored if any ``autofit`` or ``geometry`` type option is also set.
+
+``--wayland-content-type=<auto|none|photo|video|game>``
+    If supported by the compositor, mpv will send a hint using the content-type
+    protocol telling the compositor what type of content is being displayed. ``auto``
+    (default) will automatically switch between telling the compositor the content
+    is a photo, video or possibly none depending on internal heuristics.
+
 ``--wayland-disable-vsync=<yes|no>``
-    Disable vsync for the wayland contexts (default: no). Useful for benchmarking
-    the wayland context when combined with ``video-sync=display-desync``,
-    ``--no-audio``, and ``--untimed=yes``. Only works with ``--gpu-context=wayland``
-    and ``--gpu-context=waylandvk``.
+    Disable mpv's internal vsync for Wayland-based video output (default: no).
+    This is mainly useful for benchmarking wayland VOs when combined with
+    ``video-sync=display-desync``, ``--audio=no``, and ``--untimed=yes``.
+
+``--wayland-edge-pixels-pointer=<value>``
+    Defines the size of an edge border (default: 16) to initiate client side
+    resize events in the wayland contexts with the mouse. This is only active if
+    there are no server side decorations from the compositor.
+
+``--wayland-edge-pixels-touch=<value>``
+    Defines the size of an edge border (default: 32) to initiate client side
+    resizes events in the wayland contexts with touch events.
+
+``--wayland-present=<yes|no>``
+    Enable the use of wayland's presentation time protocol for more accurate
+    frame presentation if it is supported by the compositor (default: ``yes``).
+    This only has an effect if ``--video-sync=display-...`` is being used.
 
 ``--spirv-compiler=<compiler>``
     Controls which compiler is used to translate GLSL to SPIR-V. This is
-    (currently) only relevant for ``--gpu-api=vulkan`` and `--gpu-api=d3d11`.
-    The possible choices are currently only:
+    only relevant for ``--gpu-api=d3d11`` with ``--vo=gpu``.
+    The possible choices are currently:
 
     auto
         Use the first available compiler. (Default)
@@ -5010,7 +6140,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
 
     .. note::
 
-        This option is deprecated, since there is only one reasonable value.
+        This option is deprecated, since there is only one usable value.
         It may be removed in the future.
 
 ``--glsl-shader=<file>``, ``--glsl-shaders=<file-list>``
@@ -5023,7 +6153,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
     and overwrites the internal list with it. The latter is a path list option
     (see `List Options`_ for details).
 
-    .. admonition:: Warning
+    .. warning::
 
         The syntax is not stable yet and may change any time.
 
@@ -5142,7 +6272,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
         Specifies that this shader should be treated as a compute shader, with
         the block size bw and bh. The compute shader will be dispatched with
         however many blocks are necessary to completely tile over the output.
-        Within each block, there will bw tw*th threads, forming a single work
+        Within each block, there will be tw*th threads, forming a single work
         group. In other words: tw and th specify the work group size, which can
         be different from the block size. So for example, a compute shader with
         bw, bh = 32 and tw, th = 8 running on a 500x500 texture would dispatch
@@ -5259,6 +6389,55 @@ The following video options are currently all specific to ``--vo=gpu`` and
 ``--glsl-shader=<file>``
     CLI/config file only alias for ``--glsl-shaders-append``.
 
+``--glsl-shader-opts=param1=value1,param2=value2,...``
+    Specifies the options to use for tunable shader parameters. You can target
+    specific named shaders by prefixing the shader name with a ``/``, e.g.
+    ``shader/param=value``. Without a prefix, parameters affect all shaders.
+    The shader name is the base part of the shader filename, without the
+    extension. (``--vo=gpu-next`` only)
+
+    Some parameters are filled automatically if the shader requests them.
+    Currently following parameters are available:
+
+    ``PTS``
+        PTS of the current frame in seconds.
+
+    ``chroma_offset_x``
+        chroma offset to the reference plane in x direction.
+
+    ``chroma_offset_y``
+        chroma offset to the reference plane in y direction.
+
+    ``min_luma``
+        Minimum luminance value (in cd/m²).
+
+    ``max_luma``
+        Maximum luminance value (in cd/m²).
+
+    ``max_cll``
+        Maximum Content Light Level (in cd/m²).
+
+    ``max_fall``
+        Maximum Frame Average Light Level (in cd/m²).
+
+    ``scene_max_r``
+        Maximum scene light level of the red channel (in cd/m²).
+
+    ``scene_max_g``
+        Maximum scene light level of the green channel (in cd/m²).
+
+    ``scene_max_b``
+        Maximum scene light level of the blue channel (in cd/m²).
+
+    ``scene_avg``
+        Average scene light level (in cd/m²).
+
+    ``max_pq_y``
+        Maximum PQ luminance (in PQ, 0-1).
+
+    ``avg_pq_y``
+        Average PQ luminance (in PQ, 0-1).
+
 ``--deband``
     Enable the debanding algorithm. This greatly reduces the amount of visible
     banding, blocking and other quantization artifacts, at the expense of
@@ -5266,7 +6445,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
     virtually always an improvement - the only reason to disable it would be
     for performance.
 
-``--deband-iterations=<1..16>``
+``--deband-iterations=<0..16>``
     The number of debanding steps to perform per sample. Each step reduces a
     bit more banding, but takes time to compute. Note that the strength of each
     step falls off very quickly, so high numbers (>4) are practically useless.
@@ -5275,7 +6454,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
 ``--deband-threshold=<0..4096>``
     The debanding filter's cut-off threshold. Higher numbers increase the
     debanding strength dramatically but progressively diminish image details.
-    (Default 64)
+    (Default 48)
 
 ``--deband-range=<1..64>``
     The debanding filter's initial radius. The radius increases linearly for
@@ -5288,14 +6467,20 @@ The following video options are currently all specific to ``--vo=gpu`` and
 ``--deband-grain=<0..4096>``
     Add some extra noise to the image. This significantly helps cover up
     remaining quantization artifacts. Higher numbers add more noise. (Default
-    48)
+    32)
+
+``--corner-rounding=<0..1>``
+    If set to a value above 0.0, the output will be rendered with rounded
+    corners, as if an alpha transparency mask had been applied. The value
+    indicates the relative fraction of the side length to round - a value of
+    1.0 rounds the corners as much as possible. (``--vo=gpu-next`` only)
 
 ``--sharpen=<value>``
     If set to a value other than 0, enable an unsharp masking filter. Positive
     values will sharpen the image (but add more ringing and aliasing). Negative
     values will blur the image. If your GPU is powerful enough, consider
     alternatives like the ``ewa_lanczossharp`` scale filter, or the
-    ``--scale-blur`` option.
+    ``--scale-blur`` option. (Only for ``--vo=gpu``)
 
 ``--opengl-glfinish``
     Call ``glFinish()`` before swapping buffers (default: disabled). Slower,
@@ -5310,6 +6495,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
     X11/GLX only.
 
 ``--opengl-dwmflush=<no|windowed|yes|auto>``
+    (Windows only)
     Calls ``DwmFlush`` after swapping buffers on Windows (default: auto). It
     also sets ``SwapInterval(0)`` to ignore the OpenGL timing. Values are: no
     (disabled), windowed (only in windowed mode), yes (also in full screen).
@@ -5320,8 +6506,6 @@ The following video options are currently all specific to ``--vo=gpu`` and
     This may help to get more consistent frame intervals, especially with
     high-fps clips - which might also reduce dropped frames. Typically, a value
     of ``windowed`` should be enough, since full screen may bypass the DWM.
-
-    Windows only.
 
 ``--angle-d3d11-feature-level=<11_0|10_1|10_0|9_3>``
     Selects a specific feature level when using the ANGLE backend with D3D11.
@@ -5351,9 +6535,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
     chain will be used for D3D9. This option is mainly for debugging purposes,
     in case the custom swap chain has poor performance or does not work.
 
-    If set to ``yes``, the ``--angle-max-frame-latency``,
-    ``--angle-swapchain-length`` and ``--angle-flip`` options will have no
-    effect.
+    If set to ``yes``, the ``--angle-flip`` option will have no effect.
 
     Windows with ANGLE only.
 
@@ -5385,7 +6567,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
     Deactivates the automatic graphics switching and forces the dedicated GPU.
     (default: no)
 
-    OS X only.
+    macOS only.
 
 ``--cocoa-cb-sw-renderer=<yes|no|auto>``
     Use the Apple Software Renderer when using cocoa-cb (default: auto). If set
@@ -5394,21 +6576,52 @@ The following video options are currently all specific to ``--vo=gpu`` and
     software renderer, and ``auto`` only falls back to the software renderer
     when the usual pixel format couldn't be created.
 
-    OS X only.
+    macOS and cocoa-cb only.
 
 ``--cocoa-cb-10bit-context=<yes|no>``
     Creates a 10bit capable pixel format for the context creation (default: yes).
     Instead of 8bit integer framebuffer a 16bit half-float framebuffer is
     requested.
 
-    OS X only.
+    macOS and cocoa-cb only.
+
+``--cocoa-cb-output-csp=<csp>``
+    This sets the color space of the layer to activate the macOS color
+    transformation. Depending on the color space used the system's EDR (HDR)
+    support will be activated. To get correct results, this needs to be set to
+    the color primaries/transfer characteristics of the VO target. It is recommended
+    to use this switch together with ``--target-trc`` and ``--target-prim``.
+
+    ``<csp>`` can be one of the following:
+
+    :auto:               Sets the color space to the icc profile of the
+                         screen (default).
+    :display-p3:         DCI P3 primaries, a D65 white point and the sRGB
+                         transfer function.
+    :display-p3-hlg:     DCI P3 primaries, a D65 white point and the Hybrid
+                         Log-Gamma (HLG) transfer function.
+    :display-p3-pq:      DCI P3 primaries, a D65 white point and the Perceptual
+                         Quantizer (PQ) transfer function.
+    :display-p3-linear:  DCI P3 primaries, a D65 white point and linear transfer function.
+    :dci-p3:             DCI P3 color space.
+    :bt.2020:            ITU BT.2020 color space.
+    :bt.2020-linear:     ITU BT.2020 color space and linear transfer function.
+    :bt.2100-hlg:        ITU BT.2100 and the Hybrid Log-Gamma (HLG) transfer function.
+    :bt.2100-pq:         ITU BT.2100 and the Perceptual Quantizer (PQ) transfer function.
+    :bt.709:             ITU BT.709 color space.
+    :srgb:               sRGB colorimetry and non-linear transfer function.
+    :srgb-linear:        Same as sRGB but linear transfer function.
+    :rgb-linear:         RGB and linear transfer function.
+    :adobe:              Adobe RGB (1998) color space.
+
+    macOS and cocoa-cb only.
 
 ``--macos-title-bar-appearance=<appearance>``
     Sets the appearance of the title bar (default: auto). Not all combinations
     of appearances and ``--macos-title-bar-material`` materials make sense or
     are unique. Appearances that are not supported by you current macOS version
     fall back to the default value.
-    macOS and cocoa-cb only
+    macOS only
 
     ``<appearance>`` can be one of the following:
 
@@ -5433,11 +6646,11 @@ The following video options are currently all specific to ``--vo=gpu`` and
     ``--macos-title-bar-appearance`` appearances make sense or are unique.
     Materials that are not supported by you current macOS version fall back to
     the default value.
-    macOS and cocoa-cb only
+    macOS only
 
     ``<material>`` can be one of the following:
 
-    :titlebar:              The standard macOS titel bar material.
+    :titlebar:              The standard macOS title bar material.
     :selection:             The standard macOS selection material.
     :menu:                  The standard macOS menu material. (macOS 10.11+)
     :popover:               The standard macOS popover material. (macOS 10.11+)
@@ -5482,7 +6695,57 @@ The following video options are currently all specific to ``--vo=gpu`` and
     1000ms since it's possible that Apple or the user changes the system
     defaults. Anything higher than 1000ms though seems too long and shouldn't be
     set anyway.
-    OS X and cocoa-cb only
+    (macOS)
+
+
+``--macos-app-activation-policy=<regular|accessory|prohibited>``
+    Changes the App activation policy. With accessory the mpv icon in the Dock
+    can be hidden. (default: regular)
+
+    macOS only.
+
+``--macos-geometry-calculation=<visible|whole>``
+    This changes the rectangle which is used to calculate the screen position
+    and size of the window (default: visible). ``visible`` takes the the menu
+    bar and Dock into account and the window is only positioned/sized within the
+    visible screen frame rectangle, ``whole`` takes the whole screen frame
+    rectangle and ignores the menu bar and Dock. Other previous restrictions
+    still apply, like the window can't be placed on top of the menu bar etc.
+
+    macOS only.
+
+``--macos-render-timer=<timer>``
+    Sets the mode (default: callback) for syncing the rendering of frames to the display's
+    vertical refresh rate.
+    macOS and Vulkan (macvk) only.
+
+    ``<timer>`` can be one of the following:
+
+    :callback: Syncs to the CVDisplayLink callback
+    :precise:  Syncs to the time of the next vertical display refresh reported by the
+               CVDisplayLink callback provided information
+    :system:   No manual syncing, depend on the layer mechanic and the next drawable
+    :feedback: Same as precise but uses the presentation feedback core mechanism
+
+``--macos-menu-shortcuts=<yes|no>``
+    Enables the default menu bar shortcuts (default: yes). The menu bar shortcuts always take
+    precedence over any other shortcuts, they are not propagated to the mpv core and they can't be
+    used in config files like ``input.conf`` or script bindings.
+
+``--macos-bundle-path=path1,path2,...``
+    App Bundles operate in their own shell environment that is different from the one in the
+    terminal. The default PATH variable for all Bundles is ``/usr/bin:/bin:/usr/sbin:/sbin``.
+    Because of that mpv can not find binaries installed by package manager that might be used in
+    scripts for example. This option prepends all given paths to the default Bundle PATH.
+
+    Default value in following order:
+
+    :/usr/local/bin:     homebrew (Intel) install path
+    :/usr/local/sbin:    homebrew (Intel) install path
+    :/opt/local/bin:     MacPorts install path
+    :/opt/local/sbin:    MacPorts install path
+    :/opt/homebrew/bin:  homebrew (ARM) install path
+    :/opt/homebrew/sbin: homebrew (ARM) install path
 
 ``--android-surface-size=<WxH>``
     Set dimensions of the rendering surface used by the Android gpu context.
@@ -5492,17 +6755,21 @@ The following video options are currently all specific to ``--vo=gpu`` and
     Android with ``--gpu-context=android`` only.
 
 ``--gpu-sw``
-    Continue even if a software renderer is detected.
+    Continue even if a software renderer is detected. This only works with
+    OpenGL/Vulkan backends. For d3d11, see ``--d3d11-warp``.
 
-``--gpu-context=<sys>``
-    The value ``auto`` (the default) selects the GPU context. You can also pass
-    ``help`` to get a complete list of compiled in backends (sorted by
-    autoprobe order).
+``--gpu-context=<context1,context2,...[,]>``
+    Specify a priority list of the GPU contexts to be used.
+    The value ``auto`` (the default) selects the GPU context with the default autoprobe
+    order. You can also pass ``help`` to get a complete list of compiled in backends
+    (sorted by the default autoprobe order).
+
+    Note that the default GPU context is subject to change, and must not be relied upon.
+    If a certain GPU context needs to be used, it must be explicitly specified.
 
     auto
-        auto-select (default)
-    cocoa
-        Cocoa/OS X (deprecated, use --vo=libmpv instead)
+        auto-select (default). Note that this context must be used alone and
+        does not participate in the priority list.
     win
         Win32/WGL
     winvk
@@ -5518,7 +6785,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
     d3d11
         Win32, with native Direct3D 11 rendering.
     x11
-        X11/GLX
+        X11/GLX (deprecated/legacy, EGL is preferred these days)
     x11vk
         VK_KHR_xlib_surface
     wayland
@@ -5527,16 +6794,24 @@ The following video options are currently all specific to ``--vo=gpu`` and
         VK_KHR_wayland_surface
     drm
         DRM/EGL
+    displayvk
+        VK_KHR_display. This backend is roughly the Vulkan equivalent of
+        DRM/EGL, allowing for direct rendering via Vulkan without a display
+        manager.
     x11egl
         X11/EGL
     android
         Android/EGL. Requires ``--wid`` be set to an ``android.view.Surface``.
+    macvk
+        Vulkan on macOS with a metal surface through a translation layer (experimental)
 
-``--gpu-api=<type>``
-    Controls which type of graphics APIs will be accepted:
+``--gpu-api=<type1,type2,...[,]>``
+    Specify a priority list of accepted graphics APIs.
 
     auto
-        Use any available API (default)
+        Use any available API (default). Note that the default GPU API used for this
+        value is subject to change, and must not be relied upon. If a certain GPU API
+        needs to be used, it must be explicitly specified.
     opengl
         Allow only OpenGL (requires OpenGL 2.1+ or GLES 2.0+)
     vulkan
@@ -5554,13 +6829,6 @@ The following video options are currently all specific to ``--vo=gpu`` and
     no
         Only allow desktop/core GL
 
-``--opengl-restrict=<version>``
-    Restricts all OpenGL versions above a certain version. Versions are encoded
-    in hundreds, i.e. OpenGL 4.5 -> 450. As an example, --opengl-restrict=300
-    would restrict OpenGL 3.0 and higher, effectively only allowing 2.x
-    contexts. Note that this only imposes a limit on context creation APIs, the
-    actual OpenGL context may still have a higher OpenGL version. (Default: 0)
-
 ``--fbo-format=<fmt>``
     Selects the internal format of textures used for FBOs. The format can
     influence performance and quality of the video output. ``fmt`` can be one
@@ -5577,27 +6845,43 @@ The following video options are currently all specific to ``--vo=gpu`` and
     other ways (like with the ``--gamma`` option or key bindings and the
     ``gamma`` property), the value is multiplied with the other gamma value.
 
-    Recommended values based on the environmental brightness:
-
-    1.0
-        Pitch black or dimly lit room (default)
-    1.1
-        Moderately lit room, home
-    1.2
-        Brightly illuminated room, office
-
-    NOTE: This is based around the assumptions of typical movie content, which
-    contains an implicit end-to-end of about 0.8 from scene to display. For
-    bright environments it can be useful to cancel that out.
-
 ``--gamma-auto``
     Automatically corrects the gamma value depending on ambient lighting
     conditions (adding a gamma boost for bright rooms).
 
-    With ambient illuminance of 16 lux, mpv will pick the 1.0 gamma value (no
-    boost), and slightly increase the boost up until 1.2 for 256 lux.
+    This option is deprecated and may be removed in the future.
 
-    NOTE: Only implemented on OS X.
+    NOTE: Only implemented on macOS and ``--vo=gpu``.
+
+``--image-lut=<file>``
+    Specifies a custom LUT file (in Adobe .cube format) to apply to the colors
+    during image decoding. The exact interpretation of the LUT depends on
+    the value of ``--image-lut-type``. (Only for ``--vo=gpu-next``)
+
+``--image-lut-type=<value>``
+    Controls the interpretation of color values fed to and from the LUT
+    specified as ``--image-lut``. Valid values are:
+
+    auto
+        Chooses the interpretation of the LUT automatically from tagged
+        metadata, and otherwise falls back to ``native``. (Default)
+    native
+        Applied to the raw image contents in its native colorspace, before
+        decoding to RGB. For example, for a HDR10 image, this would be fed
+        PQ-encoded YCbCr values in the range 0.0 - 1.0.
+    normalized
+        Applied to the normalized RGB image contents, after decoding from
+        its native color encoding, but before linearization.
+    conversion
+        Fully replaces the color decoding. A LUT of this type should ingest the
+        image's native colorspace and output normalized non-linear RGB.
+
+``--target-colorspace-hint=<auto|yes|no>``
+    Automatically configure the output colorspace of the display to pass
+    through the input values of the stream (e.g. for HDR passthrough), if
+    possible. In ``auto`` mode (the default), the target colorspace is only set,
+    if the display signals support for HDR colorspace.
+    Requires a supporting driver and ``--vo=gpu-next``. (Default: ``auto``)
 
 ``--target-prim=<value>``
     Specifies the primaries of the display. Video colors will be adapted to
@@ -5690,12 +6974,13 @@ The following video options are currently all specific to ``--vo=gpu`` and
     additional effect of parametrizing the inverse OOTF, in order to get
     colorimetrically consistent results with the mastering display. For SDR, or
     when using an ICC (profile (``--icc-profile``), setting this to a value
-    above 100 essentially causes the display to be treated as if it were an HDR
+    above 203 essentially causes the display to be treated as if it were an HDR
     display in disguise. (See the note below)
 
     In ``auto`` mode (the default), the chosen peak is an appropriate value
-    based on the TRC in use. For SDR curves, it uses 100. For HDR curves, it
-    uses 100 * the transfer function's nominal peak.
+    based on the TRC in use. For SDR curves, it uses 203. For HDR curves, it
+    uses 203 * the transfer function's nominal peak. If available, it will use
+    the target display's peak brightness as reported by the display.
 
     .. note::
 
@@ -5714,12 +6999,37 @@ The following video options are currently all specific to ``--vo=gpu`` and
         In such a configuration, we highly recommend setting ``--tone-mapping``
         to ``mobius`` or even ``clip``.
 
+``--target-contrast=<auto|10-1000000|inf>``
+    Specifies the measured contrast of the output display. ``--target-contrast``
+    in conjunction with ``--target-peak`` value is used to calculate display
+    black point. Used in black point compensation during HDR tone-mapping.
+    ``auto`` is the default and assumes 1000:1 contrast as a typical SDR display
+    would have or an infinite contrast when HDR ``--target-trc`` is used.
+    If supported by the API, display contrast will be used as reported.
+    ``inf`` contrast specifies display with perfect black level, in practice OLED.
+    (Only for ``--vo=gpu-next``)
+
+``--target-gamut=<value>``
+    Constrains the gamut of the display. You can use this option to output e.g.
+    DCIP3-in-BT.2020. Set ``--target-prim`` to the primaries of the containing
+    colorspace (into which values will be encoded), and ``--target-gamut`` to
+    the gamut you want to limit colors to. Takes the same values as
+    ``--target-prim``. (Only for ``--vo=gpu-next``)
+
+``--target-lut=<file>``
+    Specifies a custom LUT file (in Adobe .cube format) to apply to the colors
+    before display on-screen. This LUT is fed values in normalized RGB, after
+    encoding into the target colorspace, so after the application of
+    ``--target-trc``. (Only for ``--vo=gpu-next``)
+
 ``--tone-mapping=<value>``
     Specifies the algorithm used for tone-mapping images onto the target
     display. This is relevant for both HDR->SDR conversion as well as gamut
     reduction (e.g. playing back BT.2020 content on a standard gamut display).
     Valid values are:
 
+    auto
+        Choose the best curve according to internal heuristics. (Default)
     clip
         Hard-clip any out-of-range values. Use this when you care about
         perfect color accuracy for in-range values at the cost of completely
@@ -5743,12 +7053,28 @@ The following video options are currently all specific to ``--vo=gpu`` and
         color/brightness accuracy. This is roughly equivalent to
         ``--tone-mapping=reinhard --tone-mapping-param=0.24``. If possible,
         you should also enable ``--hdr-compute-peak`` for the best results.
-        (Default)
+    bt.2390
+        Perceptual tone mapping curve (EETF) specified in ITU-R Report BT.2390.
     gamma
         Fits a logarithmic transfer between the tone curves.
     linear
         Linearly stretches the entire reference gamut to (a linear multiple of)
         the display.
+    spline
+        Perceptually linear single-pivot polynomial. (``--vo=gpu-next`` only)
+    bt.2446a
+        HDR<->SDR mapping specified in ITU-R Report BT.2446, method A. This is
+        the recommended curve for well-mastered content. (``--vo=gpu-next``
+        only)
+    st2094-40
+        Dynamic HDR10+ tone-mapping method specified in SMPTE ST2094-40 Annex
+        B. In the absence of metadata, falls back to a fixed spline matched to
+        the input/output average brightness characteristics. (``--vo=gpu-next``
+        only)
+    st2094-10
+        Dynamic tone-mapping method specified in SMPTE ST2094-10 Annex B.2.
+        Conceptually simpler than ST2094-40, and generally produces worse
+        results.
 
 ``--tone-mapping-param=<value>``
     Set tone mapping parameters. By default, this is set to the special string
@@ -5769,10 +7095,22 @@ The following video options are currently all specific to ``--vo=gpu`` and
         Specifies the local contrast coefficient at the display peak. Defaults
         to 0.5, which means that in-gamut values will be about half as bright
         as when clipping.
+    bt.2390
+        Specifies the offset for the knee point. Defaults to 1.0, which is
+        higher than the value from the original ITU-R specification (0.5).
+        (``--vo=gpu-next`` only)
     gamma
         Specifies the exponent of the function. Defaults to 1.8.
     linear
         Specifies the scale factor to use while stretching. Defaults to 1.0.
+    spline
+        Specifies the knee point (in PQ space). Defaults to 0.30.
+    st2094-10
+        Specifies the contrast (slope) at the knee point. Defaults to 1.0.
+
+``--inverse-tone-mapping``
+    If set, allows inverse tone mapping (expanding SDR to HDR). Not supported
+    by all tone mapping curves. Use with caution. (``--vo=gpu-next`` only)
 
 ``--tone-mapping-max-boost=<1.0..10.0>``
     Upper limit for how much the tone mapping algorithm is allowed to boost
@@ -5780,7 +7118,56 @@ The following video options are currently all specific to ``--vo=gpu`` and
     allows no additional brightness boost. A value of 2.0 would allow
     over-exposing by a factor of 2, and so on. Raising this setting can help
     reveal details that would otherwise be hidden in dark scenes, but raising
-    it too high will make dark scenes appear unnaturally bright.
+    it too high will make dark scenes appear unnaturally bright. (``--vo=gpu``
+    only)
+
+``--tone-mapping-visualize``
+    Display a (PQ-PQ) graph of the active tone-mapping LUT. Intended only for
+    debugging purposes. The X axis shows PQ input values, the Y axis shows PQ
+    output values. The tone-mapping curve is shown in green/yellow. Yellow
+    means the brightness has been boosted from the source, dark blue regions
+    show where the brightness has been reduced. The extra colored regions and
+    lines indicate various monitor limits, as well a reference diagonal
+    (neutral tone-mapping) and source scene average brightness information (if
+    available). (``--vo=gpu-next`` only)
+
+``--gamut-mapping-mode``
+    Specifies the algorithm used for reducing the gamut of images for the
+    target display, after any tone mapping is done.
+
+    auto
+        Choose the best mode automatically. (Default)
+    clip
+        Hard-clip to the gamut (per-channel). Very low quality, but free.
+    perceptual
+        Performs a perceptually balanced gamut mapping using a soft knee
+        function to roll-off clipped regions, and a hue shifting function to
+        preserve saturation. (``--vo=gpu-next`` only)
+    relative
+        Performs relative colorimetric clipping, while maintaining an
+        exponential relationship between brightness and chromaticity.
+        (``--vo=gpu-next`` only)
+    saturation
+        Performs simple RGB->RGB saturation mapping. The input R/G/B channels
+        are mapped directly onto the output R/G/B channels. Will never clip,
+        but will distort all hues and/or result in a faded look.
+        (``--vo=gpu-next`` only)
+    absolute
+        Performs absolute colorimetric clipping. Like ``relative``, but does
+        not adapt the white point. (``--vo=gpu-next`` only)
+    desaturate
+        Performs constant-luminance colorimetric clipping, desaturing colors
+        towards white until they're in-range.
+    darken
+        Uniformly darkens the input slightly to prevent clipping on blown-out
+        highlights, then clamps colorimetrically to the input gamut boundary,
+        biased slightly to preserve chromaticity over luminance.
+        (``--vo=gpu-next`` only)
+    warn
+        Performs no gamut mapping, but simply highlights out-of-gamut pixels.
+    linear
+        Linearly/uniformly desaturates the image in order to bring the entire
+        image into the target gamut. (``--vo=gpu-next`` only)
 
 ``--hdr-compute-peak=<auto|yes|no>``
     Compute the HDR peak and frame average brightness per-frame instead of
@@ -5792,12 +7179,29 @@ The following video options are currently all specific to ``--vo=gpu`` and
     The special value ``auto`` (default) will enable HDR peak computation
     automatically if compute shaders and SSBOs are supported.
 
-``--hdr-peak-decay-rate=<1.0..1000.0>``
-    The decay rate used for the HDR peak detection algorithm (default: 100.0).
+``--allow-delayed-peak-detect``
+    When using ``--hdr-compute-peak``, allow delaying the detected peak by a
+    frame when beneficial for performance. In particular, this is required to
+    avoid an unnecessary FBO indirection when no advanced rendering is required
+    otherwise. Has no effect if there already is an indirect pass, such as when
+    advanced scaling is enabled. Defaults to no. (Only affects
+    ``--vo=gpu-next``, note that ``--vo=gpu`` always delays the peak.)
+
+``--hdr-peak-percentile=<0.0..100.0>``
+    Which percentile of the input image brightness histogram to consider as the
+    true peak of the scene. If this is set to 100 (default), the
+    brightest pixel is measured. Otherwise, the top of the frequency
+    distribution is progressively cut off. Setting this too low will cause
+    clipping of very bright details, but can improve the dynamic brightness
+    range of scenes with very bright isolated highlights. Values other than 100
+    come with a small performance penalty. (Only for ``--vo=gpu-next``)
+
+``--hdr-peak-decay-rate=<0.0..1000.0>``
+    The decay rate used for the HDR peak detection algorithm (default: 20.0).
     This is only relevant when ``--hdr-compute-peak`` is enabled. Higher values
     make the peak decay more slowly, leading to more stable values at the cost
     of more "eye adaptation"-like effects (although this is mitigated somewhat
-    by ``--hdr-scene-threshold``). A value of 1.0 (the lowest possible) disables
+    by ``--hdr-scene-threshold``). A value of 0.0 (the lowest possible) disables
     all averaging, meaning each frame's value is used directly as measured,
     but doing this is not recommended for "noisy" sources since it may lead
     to excessive flicker. (In signal theory terms, this controls the time
@@ -5805,7 +7209,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
 
 ``--hdr-scene-threshold-low=<0.0..100.0>``, ``--hdr-scene-threshold-high=<0.0..100.0>``
     The lower and upper thresholds (in dB) for a brightness difference
-    to be considered a scene change (default: 5.5 low, 10.0 high). This is only
+    to be considered a scene change (default: 1.0 low, 3.0 high). This is only
     relevant when ``--hdr-compute-peak`` is enabled. Normally, small
     fluctuations in the frame brightness are compensated for by the peak
     averaging mechanism, but for large jumps in the brightness this can result
@@ -5816,38 +7220,17 @@ The following video options are currently all specific to ``--vo=gpu`` and
     aggressive, up to the limit of the high threshold (at which point the
     filter becomes instant).
 
-``--tone-mapping-desaturate=<0.0..1.0>``
-    Apply desaturation for highlights (default: 0.75). The parameter controls
-    the strength of the desaturation curve. A value of 0.0 completely disables
-    it, while a value of 1.0 means that overly bright colors will tend towards
-    white. (This is not always the case, especially not for highlights that are
-    near primary colors)
-
-    Values in between apply progressively more/less aggressive desaturation.
-    This setting helps prevent unnaturally oversaturated colors for
-    super-highlights, by (smoothly) turning them into less saturated (per
-    channel tone mapped) colors instead. This makes images feel more natural,
-    at the cost of chromatic distortions for out-of-range colors. The default
-    value of 0.75 provides a good balance. Setting this to 0.0 preserves the
-    chromatic accuracy of the tone mapping process.
-
-``--tone-mapping-desaturate-exponent=<0.0..20.0>``
-    This setting controls the exponent of the desaturation curve, which
-    controls how bright a color needs to be in order to start being
-    desaturated. The default of 1.5 provides a reasonable balance.  Decreasing
-    this exponent makes the curve more aggressive.
-
-``--gamut-warning``
-    If enabled, mpv will mark all clipped/out-of-gamut pixels that exceed a
-    given threshold (currently hard-coded to 101%). The affected pixels will be
-    inverted to make them stand out. Note: This option applies after the
-    effects of all of mpv's color space transformation / tone mapping options,
-    so it's a good idea to combine this with ``--tone-mapping=clip`` and use
-    ``--target-prim`` to set the gamut to simulate. For example,
-    ``--target-prim=bt.709`` would make mpv highlight all pixels that exceed the
-    gamut of a standard gamut (sRGB) display. This option also does not work
-    well with ICC profiles, since the 3DLUTs are always generated against the
-    source color space and have chromatically-accurate clipping built in.
+``--hdr-contrast-recovery=<0.0..2.0>``, ``--hdr-contrast-smoothness=<1.0..100.0>``
+    Enables the HDR contrast recovery algorithm, which is to designed to
+    enhance contrast of HDR video after tone mapping. The strength (default:
+    0.0) indicates the degree of contrast recovery, with 0.0 being completely
+    disabled and 1.0 being 100% strength. Values higher than 1.0 are allowed,
+    but may result in excessive sharpening. The smoothness (default: 3.5)
+    indicates the degree to which the HDR source is low-passed in order to
+    obtain contrast information - a value of 2.0 corresponds to 2x downscaling.
+    Users on low DPI displays (<= 100) may want to lower this value, while
+    users on very high DPI displays ("retina") may want to increase it. (Only
+    for ``vo=gpu-next``)
 
 ``--use-embedded-icc-profile``
     Load the embedded ICC profile contained in media files such as PNG images.
@@ -5870,14 +7253,22 @@ The following video options are currently all specific to ``--vo=gpu`` and
     Applications using libmpv with the render API need to provide the ICC
     profile via ``MPV_RENDER_PARAM_ICC_PROFILE``.
 
-``--icc-cache-dir=<dirname>``
-    Store and load the 3D LUTs created from the ICC profile in this directory.
-    This can be used to speed up loading, since LittleCMS 2 can take a while to
-    create a 3D LUT. Note that these files contain uncompressed LUTs. Their
-    size depends on the ``--icc-3dlut-size``, and can be very big.
+``--icc-cache``
+    Store and load 3DLUTs created from the ICC profile on disk in the
+    cache directory (Default: ``yes``). This can be used to speed up loading,
+    since LittleCMS 2 can take a while to create a 3D LUT. Note that these
+    files contain uncompressed LUTs. Their size depends on the
+    ``--icc-3dlut-size``, and can be very big.
 
-    NOTE: This is not cleaned automatically, so old, unused cache files may
-    stick around indefinitely.
+    On `--vo=gpu-next`, files that have not been accessed in the last 24 hours
+    may be cleared if the cache limit (1.5 GiB) is exceeded.
+
+    On ``--vo=gpu``, this is not cleaned automatically, so old, unused cache
+    files may stick around indefinitely.
+
+``--icc-cache-dir``
+    The directory where icc cache is stored. Cache is stored in the system's
+    cache directory (usually ``~/.cache/mpv``) if this is unset.
 
 ``--icc-intent=<value>``
     Specifies the ICC intent used for the color transformation (when using
@@ -5892,18 +7283,50 @@ The following video options are currently all specific to ``--vo=gpu`` and
     3
         absolute colorimetric
 
-``--icc-3dlut-size=<r>x<g>x<b>``
-    Size of the 3D LUT generated from the ICC profile in each dimension.
-    Default is 64x64x64. Sizes may range from 2 to 512.
+``--icc-3dlut-size=<auto|RxGxB>``
+    Size of the 3D LUT generated from the ICC profile in each dimension. The
+    default of ``auto`` means to pick the size automatically based on the
+    profile characteristics. Sizes may range from 2 to 512.
 
-``--icc-contrast=<0-1000000|inf>``
-    Specifies an upper limit on the target device's contrast ratio. This is
-    detected automatically from the profile if possible, but for some profiles
-    it might be missing, causing the contrast to be assumed as infinite. As a
-    result, video may appear darker than intended. This only affects BT.1886
-    content. The default of 0 means no limit if the detected contrast is less
-    than 100000, and limits to 1000 otherwise. Use ``--icc-contrast=inf`` to
-    preserve the infinite contrast (most likely when using OLED displays).
+    NOTE: Setting this option to anything other than ``auto`` is **strongly**
+    discouraged, except for testing.
+
+``--icc-force-contrast=<no|0-1000000|inf>``
+    Override the target device's detected contrast ratio by a specific value.
+    This is detected automatically from the profile if possible, but for some
+    profiles it might be missing, causing the contrast to be assumed as
+    infinite. As a result, video may appear darker than intended. If this is
+    the case, setting this option might help. This only affects BT.1886
+    content. The default of ``no`` means to use the profile values. The special
+    value ``inf`` causes the BT.1886 curve to be treated as a pure power gamma
+    2.4 function.
+
+``--icc-use-luma``
+    Use ICC profile luminance value. (Only for ``--vo=gpu-next``)
+
+``--lut=<file>``
+    Specifies a custom LUT (in Adobe .cube format) to apply to the colors
+    as part of color conversion. The exact interpretation depends on the value
+    of ``--lut-type``. (Only for ``--vo=gpu-next``)
+
+``--lut-type=<value>``
+    Controls the interpretation of color values fed to and from the LUT
+    specified as ``--lut``. Valid values are:
+
+    auto
+        Chooses the interpretation of the LUT automatically from tagged
+        metadata, and otherwise falls back to ``native``. (Default)
+    native
+        Applied to raw image contents in its native RGB colorspace (non-linear
+        light), before conversion to the output color space.
+    normalized
+        Applied to the normalized RGB image contents, in linear light, before
+        conversion to the output color space.
+    conversion
+        Fully replaces the conversion from the image color space to the output
+        color space. If such a LUT is present, it has the highest priority, and
+        overrides any ICC profiles, as well as options related to tone mapping
+        and output colorimetry (``--target-prim``, ``--target-trc`` etc.).
 
 ``--blend-subtitles=<yes|video|no>``
     Blend subtitles directly onto upscaled video frames, before interpolation
@@ -5926,33 +7349,34 @@ The following video options are currently all specific to ``--vo=gpu`` and
                  softsubbed ASS signs to match the video colors, but may cause
                  SRT subtitles or similar to look slightly off.
 
-``--alpha=<blend-tiles|blend|yes|no>``
-    Decides what to do if the input has an alpha component.
+``--background=<none|color|tiles>``
+    If the frame has an alpha component, decide what kind of background, if any,
+    to blend it with. This does nothing if there is no alpha component.
 
-    blend-tiles
+    color
+        Blend the frame against the background color (``--background-color``,
+        normally black).
+    tiles
         Blend the frame against a 16x16 gray/white tiles background (default).
-    blend
-        Blend the frame against the background color (``--background``, normally
-        black).
-    yes
-        Try to create a framebuffer with alpha component. This only makes sense
-        if the video contains alpha information (which is extremely rare). May
-        not be supported on all platforms. If alpha framebuffers are
-        unavailable, it silently falls back on a normal framebuffer. Note that
-        if you set the ``--fbo-format`` option to a non-default value, a
-        format with alpha must be specified, or this won't work.
-        This does not work on X11 with EGL and Mesa (freedesktop bug 67676).
-    no
-        Ignore alpha component.
+    none
+        Do not blend the frame and leave the alpha as is.
+
+    Before mpv 0.38.0, this option used to accept a color value specifying the
+    background color. This is now done by the ``--background-color`` option.
+    Use that instead.
+
+``--background-color=<color>``
+    Color used to draw parts of the mpv window not covered by video. See the
+    ``--sub-color`` option for how colors are defined.
+
+``--border-background=<none|color|tiles>``
+    Same as ``--background`` but only applies to the black bar/border area of
+    the window. ``vo=gpu-next`` only. Defaults to ``color``.
 
 ``--opengl-rectangle-textures``
     Force use of rectangle textures (default: no). Normally this shouldn't have
     any advantages over normal textures. Note that hardware decoding overrides
     this flag. Could be removed any time.
-
-``--background=<color>``
-    Color used to draw parts of the mpv window not covered by video. See
-    ``--osd-color`` option how colors are defined.
 
 ``--gpu-tex-pad-x``, ``--gpu-tex-pad-y``
     Enlarge the video source textures by this many pixels. For debugging only
@@ -5968,7 +7392,7 @@ The following video options are currently all specific to ``--vo=gpu`` and
     flipping GL front and backbuffers immediately (i.e. it doesn't call it
     in display-sync mode).
 
-    On OSX this is always deactivated because it only causes performance
+    On macOS this is always deactivated because it only causes performance
     problems and other regressions.
 
 ``--gpu-dumb-mode=<yes|no|auto>``
@@ -5985,29 +7409,34 @@ The following video options are currently all specific to ``--vo=gpu`` and
 
     This option might be silently removed in the future.
 
-``--gpu-shader-cache-dir=<dirname>``
-    Store and load compiled GLSL shaders in this directory. Normally, shader
-    compilation is very fast, so this is usually not needed. It mostly matters
-    for GPU APIs that require internally recompiling shaders to other languages,
-    for example anything based on ANGLE or Vulkan. Enabling this can improve
-    startup performance on these platforms.
+``--gpu-shader-cache``
+    Store and load compiled GLSL shaders in the cache directory (Default:
+    ``yes``). Normally, shader compilation is very fast, so this is not usually
+    needed. It mostly matters for anything involving GLSL to SPIR-V conversion,
+    that is: D3D11, ANGLE or Vulkan, as well as on some other proprietary
+    drivers. Enabling this can improve startup performance on these platforms.
 
-    NOTE: This is not cleaned automatically, so old, unused cache files may
-    stick around indefinitely.
+    On `--vo=gpu-next`, files that have not been accessed in the last 24 hours
+    may be cleared if the cache limit (128 MiB) is exceeded.
 
-Miscellaneous
--------------
+    On ``--vo=gpu``, this is not cleaned automatically, so old, unused cache
+    files may stick around indefinitely.
 
-``--display-tags=tag1,tags2,...``
-    Set the list of tags that should be displayed on the terminal. Tags that
-    are in the list, but are not present in the played file, will not be shown.
-    If a value ends with ``*``, all tags are matched by prefix (though there
-    is no general globbing). Just passing ``*`` essentially filtering.
+``--gpu-shader-cache-dir``
+    The directory where gpu shader cache is stored. Cache is stored in the system's
+    cache directory (usually ``~/.cache/mpv``) if this is unset.
 
-    The default includes a common list of tags, call mpv with ``--list-options``
-    to see it.
+``--libplacebo-opts=<key>=<value>[,<key>=<value>[,...]]``
+    Passes extra raw option to the libplacebo rendering backend (used by
+    ``--vo=gpu-next``). May override the effects of any other options set using
+    the normal options system. Requires libplacebo v6.309 or higher. Included
+    for debugging purposes only. For more information, see:
 
-    This is a string list option. See `List Options`_ for details.
+    https://libplacebo.org/options/
+
+
+Video Sync
+----------
 
 ``--mc=<seconds/frame>``
     Maximum A-V sync correction per frame (in seconds)
@@ -6017,9 +7446,9 @@ Miscellaneous
     Specifying ``--autosync=0``, the default, will cause frame timing to be
     based entirely on audio delay measurements. Specifying ``--autosync=1``
     will do the same, but will subtly change the A/V correction algorithm. An
-    uneven video framerate in a video which plays fine with ``--no-audio`` can
+    uneven video framerate in a video which plays fine with ``--audio=no`` can
     often be helped by setting this to an integer value greater than 1. The
-    higher the value, the closer the timing will be to ``--no-audio``. Try
+    higher the value, the closer the timing will be to ``--audio=no``. Try
     ``--autosync=30`` to smooth out problems with sound drivers which do not
     implement a perfect audio delay measurement. With this value, if large A/V
     sync offsets occur, they will only take about 1 or 2 seconds to settle
@@ -6038,9 +7467,9 @@ Miscellaneous
     other hand, setting a too high value can reduce responsiveness with low
     FPS value.
 
-    For client API users using the render API (or the deprecated ``opengl-cb``
-    API), this option is interesting, because you can stop the render API
-    from limiting your FPS (see ``mpv_render_context_render()`` documentation).
+    This option is interesting for client API users using the render API
+    because you can stop it from limiting your FPS
+    (see ``mpv_render_context_render()`` documentation).
 
     This applies only to audio timing modes (e.g. ``--video-sync=audio``). In
     other modes (``--video-sync=display-...``), video timing relies on vsync
@@ -6099,17 +7528,37 @@ Miscellaneous
     :display-resample-vdrop:  Resample audio to match the video. Drop video
                         frames to compensate for drift.
     :display-resample-desync: Like the previous mode, but no A/V compensation.
+    :display-tempo:     Same as ``display-resample``, but apply audio speed
+                        changes to audio filters instead of resampling to avoid
+                        the change in pitch. Beware that some audio filters
+                        don't do well with a speed close to 1. It is recommend
+                        to use a conditional profile to automatically switch to
+                        ``display-resample`` when speed gets too close to 1 for
+                        your filter setup. Use (speed * video_speed_correction)
+                        to get the actual playback speed in the condition.
+                        See `Conditional auto profiles`_ for details.
     :display-vdrop:     Drop or repeat video frames to compensate desyncing
                         video. (Although it should have the same effects as
                         ``audio``, the implementation is very different.)
     :display-adrop:     Drop or repeat audio data to compensate desyncing
-                        video. See ``--video-sync-adrop-size``. This mode will
-                        cause severe audio artifacts if the real monitor
-                        refresh rate is too different from the reported or
-                        forced rate.
+                        video. This mode will cause severe audio artifacts if
+                        the real monitor refresh rate is too different from
+                        the reported or forced rate. Since mpv 0.33.0, this
+                        acts on entire audio frames, instead of single samples.
     :display-desync:    Sync video to display, and let audio play on its own.
     :desync:            Sync video according to system clock, and let audio play
                         on its own.
+
+``--video-sync-max-factor=<value>``
+    Maximum multiple for which to try to fit the video's FPS to the display's
+    FPS (default: 5).
+
+    For example, if this is set to 1, the video FPS is forced to an integer
+    multiple of the display FPS, as long as the speed change does not exceed
+    the value set by ``--video-sync-max-video-change``.
+
+    See ``--interpolation-threshold`` for how this option affects
+    interpolation.
 
 ``--video-sync-max-video-change=<value>``
     Maximum speed difference in percent that is applied to video with
@@ -6123,8 +7572,11 @@ Miscellaneous
     25 fps. We consider the pitch change too extreme to allow this behavior
     by default. Set this option to a value of ``5`` to enable it.
 
-    Note that in the ``--video-sync=display-resample`` mode, audio speed will
-    additionally be changed by a small amount if necessary for A/V sync. See
+    Note that ``--video-sync=display-tempo`` avoids this pitch change.
+
+    Also note that in the ``--video-sync=display-resample`` or
+    ``--video-sync=display-tempo`` mode, audio speed will additionally be
+    changed by a small amount if necessary for A/V sync. See
     ``--video-sync-max-audio-change``.
 
 ``--video-sync-max-audio-change=<value>``
@@ -6138,12 +7590,19 @@ Miscellaneous
     frame dropping due to the audio "overshooting" and skipping multiple video
     frames before the sync logic can react.
 
-``--video-sync-adrop-size=<value>``
-    For the ``--video-sync=display-adrop`` mode. This mode duplicates/drops
-    audio data to keep audio in sync with video. To avoid audio artifacts on
-    jitter (which would add/remove samples all the time), this is done in
-    relatively large, fixed units, controlled by this option. The unit is
-    seconds.
+Miscellaneous
+-------------
+
+``--display-tags=tag1,tags2,...``
+    Set the list of tags that should be displayed on the terminal and stats.
+    Tags that are in the list, but are not present in the played file, will not
+    be shown. If a value ends with ``*``, all tags are matched by prefix (though
+    there is no general globbing). Just passing ``*`` essentially filtering.
+
+    The default includes a common list of tags, call mpv with ``--list-options``
+    to see it.
+
+    This is a string list option. See `List Options`_ for details.
 
 ``--mf-fps=<value>``
     Framerate used when decoding from multiple PNG or JPEG files with ``mf://``
@@ -6167,12 +7626,30 @@ Miscellaneous
 
     This is a key/value list option. See `List Options`_ for details.
 
+``--backdrop-type=<auto|none|mica|acrylic|mica-alt>``
+    (Windows only)
+    Controls the backdrop/border style.
+
+    :auto: Default Windows behavior
+    :none: The backdrop will be black or white depending on the system's theme settings.
+    :mica: Enables the Mica style, which is the default on Windows 11.
+    :acrylic: Enables the Acrylic style (frosted glass look).
+    :mica-alt: Same as Mica, except reversed.
+
+``--window-affinity=<default|excludefromcmcapture|monitor>``
+    (Windows only)
+    Controls the window affinity behavior of mpv.
+
+    :default: Default Windows behavior
+    :excludefromcapture: mpv's window will be completely excluded from capture by external applications or screen recording software.
+    :monitor: Blacks out the mpv window
+
 ``--vo-mmcss-profile=<name>``
-    (Windows only.)
+    (Windows only)
     Set the MMCSS profile for the video renderer thread (default: ``Playback``).
 
 ``--priority=<prio>``
-    (Windows only.)
+    (Windows only)
     Set process priority for mpv according to the predefined priorities
     available under Windows.
 
@@ -6180,6 +7657,11 @@ Miscellaneous
     idle|belownormal|normal|abovenormal|high|realtime
 
     .. warning:: Using realtime priority can cause system lockup.
+
+``--media-controls=<yes|no>``
+    (Windows only)
+    Enable integration of media control interface SystemMediaTransportControls.
+    Default: yes (except for libmpv)
 
 ``--force-media-title=<string>``
     Force the contents of the ``media-title`` property to this value. Useful
@@ -6201,27 +7683,89 @@ Miscellaneous
 
 ``--external-file=<file>``
     CLI/config file only alias for ``--external-files-append``. Each use of this
-    option will add a new external files.
+    option will add a new external file.
+
+``--cover-art-files=<file-list>``
+    Use an external file as cover art while playing audio. This makes it appear
+    on the track list and subject to automatic track selection. Options like
+    ``--audio-display`` control whether such tracks are supposed to be selected.
+
+    (The difference to loading a file with ``--external-files`` is that video
+    tracks will be marked as being pictures, which affects the auto-selection
+    method. If the passed file is a video, only the first frame will be decoded
+    and displayed. Enabling the cover art track during playback may show a
+    random frame if the source file is a video. Normally you're not supposed to
+    pass videos to this option, so this paragraph describes the behavior
+    coincidentally resulting from implementation details.)
+
+    This is a path list option. See `List Options`_ for details.
+
+``--cover-art-file=<file>``
+    CLI/config file only alias for ``--cover-art-files-append``. Each use of this
+    option will add a new external file.
+
+``--cover-art-auto=<no|exact|fuzzy|all>``
+    Whether to load _external_ cover art automatically. Similar to
+    ``--sub-auto`` and ``--audio-file-auto``. If a video already has tracks
+    (which are not marked as cover art), external cover art will not be loaded.
+
+    :no:    Don't automatically load cover art.
+    :exact: Load the media filename with an image file extension (default).
+    :fuzzy: Load all cover art containing the media filename.
+    :all:   Load all images in the current directory.
+
+    See ``--cover-art-files`` for details about what constitutes cover art.
+
+    See ``--audio-display`` how to control display of cover art (this can be
+    used to disable cover art that is part of the file).
+
+``--image-exts=ext1,ext2,...``
+    Image file extensions to try to match when using ``--cover-art-auto``,
+    ``--autocreate-playlist`` or ``--directory-filter-types``.
+
+    This is a string list option. See `List Options`_ for details.
+    Use ``--help=image-exts`` to see default extensions.
+
+``--cover-art-whitelist=filename1,filename2,...``
+    Filenames to load as cover art, sorted by descending priority. They are
+    combined with the extensions in ``--image-exts``. This has no
+    effect if ``cover-art-auto`` is ``no``.
+
+    Default: ``AlbumArt,Album,cover,front,AlbumArtSmall,Folder,.folder,thumb``
+
+    This is a string list option. See `List Options`_ for details.
+
+``--video-exts=ext1,ext2,...``
+    Video file extensions to try to match when using ``--autocreate-playlist`` or
+    ``--directory-filter-types``.
+
+    This is a string list option. See `List Options`_ for details.
+    Use ``--help=video-exts`` to see default extensions.
+
+``--archive-exts=ext1,ext2,...``
+    Archive file extensions to try to match when using ``--autocreate-playlist``
+    or ``--directory-filter-types``.
+
+    This is a string list option. See `List Options`_ for details. Use
+    ``--help=archive-exts`` to see the default extensions.
+
+``--playlist-exts=ext1,ext2,...``
+    Playlist file extensions to try to match when using
+    ``--autocreate-playlist`` or ``--directory-filter-types``.
+
+    This is a string list option. See `List Options`_ for details. Use
+    ``--help=playlist-exts`` to see the default extensions.
 
 ``--autoload-files=<yes|no>``
     Automatically load/select external files (default: yes).
 
     If set to ``no``, then do not automatically load external files as specified
-    by ``--sub-auto`` and ``--audio-file-auto``. If external files are forcibly
-    added (like with ``--sub-files``), they will not be auto-selected.
+    by ``--sub-auto``, ``--audio-file-auto`` and ``--cover-art-auto``. If
+    external files are forcibly added (like with ``--sub-files``), they will
+    not be auto-selected.
 
     This does not affect playlist expansion, redirection, or other loading of
     referenced files like with ordered chapters.
-
-``--record-file=<file>``
-    Deprecated, use ``--stream-record``, or the ``dump-cache`` command.
-
-    Record the current stream to the given target file. The target file will
-    always be overwritten without asking.
-
-    This was deprecated because it isn't very nice to use. For one, seeking
-    while this is enabled will be directly reflected in the output, which was
-    not useful and annoying.
 
 ``--stream-record=<file>``
     Write received/read data from the demuxer to the given output file. The
@@ -6252,10 +7796,6 @@ Miscellaneous
     it works with the ``ffmpeg`` tool. One reason for this is that ``ffmpeg``
     and its libraries contain certain hacks and workarounds for these issues,
     that are unavailable to outside users.
-
-    This replaces ``--record-file``. It is similar to the ancient/removed
-    ``--stream-capture``/``-capture`` options, and provides better behavior in
-    most cases (i.e. actually works).
 
 ``--lavfi-complex=<string>``
     Set a "complex" libavfilter filter, which means a single filter graph can
@@ -6299,20 +7839,19 @@ Miscellaneous
           to fix the size).
           To load a video track from another file, you can use
           ``--external-file=other.mkv``.
+        - ``--lavfi-complex='[vid1] [vid2] [vid3] hstack=inputs=3 [vo]'``
+          Use the inputs option to stack more than 2 tracks.
         - ``--lavfi-complex='[aid1] asplit [t1] [ao] ; [t1] showvolume [t2] ; [vid1] [t2] overlay [vo]'``
           Play audio track 1, and overlay the measured volume for each speaker
           over video track 1.
-        - ``null:// --lavfi-complex='life [vo]'``
-          A libavfilter source-only filter (Conways' Life Game).
 
     See the FFmpeg libavfilter documentation for details on the available
     filters.
 
 ``--metadata-codepage=<codepage>``
-    Codepage for various input metadata (default: ``utf-8``). This affects how
-    file tags, chapter titles, etc. are interpreted. You can for example set
-    this to ``auto`` to enable autodetection of the codepage. (This is not the
-    default because non-UTF-8 codepages are an obscure fringe use-case.)
+    Codepage for various input metadata (default: ``auto``). This affects how
+    file tags, chapter titles, etc. are interpreted. In most cases, this merely
+    evaluates to UTF-8 as non-UTF-8 codepages are obscure.
 
     See ``--sub-codepage`` option on how codepages are specified and further
     details regarding autodetection and codepage conversion. (The underlying
@@ -6320,20 +7859,17 @@ Miscellaneous
 
     Conversion is not applied to metadata that is updated at runtime.
 
+``--clipboard-enable=<yes|no>``
+    (Windows, Wayland and macOS only)
 
-Debugging
----------
+    Enable native clipboard support (default: yes). This allows reading and
+    writing to the ``clipboard`` property to get and set clipboard contents.
 
-``--unittest=<name>``
-    Run an internal unit test. There are multiple, and the name specifies which.
+``--clipboard-monitor=<yes|no>``
+    (Windows and macOS only)
 
-    The special value ``all-simple`` runs all tests which do not need further
-    setup (other arguments and such). Some tests may need additional arguments
-    to do anything useful.
-
-    On success, the player binary exits with exit status 0, otherwise it returns
-    with an undefined non-0 exit status (it may crash or abort itself on test
-    failures).
-
-    This is only enabled if built with ``--enable-tests``, and should normally
-    be enabled and used by developers only.
+    Enable clipboard monitoring so that the ``clipboard`` property can be
+    observed for content changes (default: no). This only affects clipboard
+    implementations which use polling to monitor clipboard updates.
+    Other platforms currently ignore this option and always/never notify
+    changes.

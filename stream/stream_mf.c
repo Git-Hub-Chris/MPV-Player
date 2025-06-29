@@ -20,8 +20,6 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "config.h"
-
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,13 +28,14 @@
 static int
 mf_stream_open (stream_t *stream)
 {
-  stream->demuxer = "mf";
+    stream->demuxer = "mf";
 
-  return STREAM_OK;
+    return STREAM_OK;
 }
 
 const stream_info_t stream_info_mf = {
     .name = "mf",
     .open = mf_stream_open,
     .protocols = (const char*const[]){ "mf", NULL },
+    .stream_origin = STREAM_ORIGIN_FS,
 };

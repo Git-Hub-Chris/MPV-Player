@@ -1,6 +1,5 @@
 #pragma once
 
-#include "common/global.h"
 #include "video/out/gpu/context.h"
 #include "common.h"
 
@@ -21,6 +20,10 @@ enum gles_mode ra_gl_ctx_get_glesmode(struct ra_ctx *ctx);
 // clean them up)
 
 struct ra_gl_ctx_params {
+    // For special contexts (i.e. wayland) that want to check visibility
+    // before drawing a frame.
+    bool (*check_visible)(struct ra_ctx *ctx);
+
     // Set to the platform-specific function to swap buffers, like
     // glXSwapBuffers, eglSwapBuffers etc. This will be called by
     // ra_gl_ctx_swap_buffers. Required unless you either never call that
@@ -29,11 +32,6 @@ struct ra_gl_ctx_params {
 
     // See ra_swapchain_fns.get_vsync.
     void (*get_vsync)(struct ra_ctx *ctx, struct vo_vsync_info *info);
-
-    // Set to false if the implementation follows normal GL semantics, which is
-    // upside down. Set to true if it does *not*, i.e. if rendering is right
-    // side up
-    bool flipped;
 
     // If this is set to non-NULL, then the ra_gl_ctx will consider the GL
     // implementation to be using an external swapchain, which disables the

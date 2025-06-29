@@ -17,11 +17,8 @@
 
 #include <assert.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
-#include <dirent.h>
 #include <math.h>
 #include <stdint.h>
 
@@ -51,7 +48,7 @@
 // All these are generated from player/javascript/*.js
 static const char *const builtin_files[][3] = {
     {"@/defaults.js",
-#   include "generated/player/javascript/defaults.js.inc"
+#   include "player/javascript/defaults.js.inc"
     },
     {0}
 };
@@ -354,30 +351,20 @@ static void af_push_file(js_State *J, const char *fname, int limit, void *af)
         return;
     }
 
-    FILE *f = fopen(filename, "rb");
-    if (!f)
+    // mp.utils.read_file allows partial read up to limit which results in
+    // error for stream_read_file if the file is larger than limit, so use
+    // STREAM_ALLOW_PARTIAL_READ to allow reading returning partial results.
+    // Additionally, disable error logging by stream since the exception
+    // can be caught and handled by a JS script.
+    int flags = STREAM_READ_FILE_FLAGS_DEFAULT | STREAM_ALLOW_PARTIAL_READ |
+                STREAM_SILENT;
+    bstr data = stream_read_file2(filename, af, flags,
+                                  jctx(J)->mpctx->global, limit);
+    if (data.start) {
+        js_pushlstring(J, data.start, data.len);
+    } else {
         js_error(J, "cannot open file: '%s'", filename);
-    add_af_file(af, f);
-
-    int len = MPMIN(limit, 32 * 1024);  // initial allocation, size*2 strategy
-    int got = 0;
-    char *s = NULL;
-    while ((s = talloc_realloc(af, s, char, len))) {
-        int want = len - got;
-        int r = fread(s + got, 1, want, f);
-
-        if (feof(f) || (len == limit && r == want)) {
-            js_pushlstring(J, s, got + r);
-            return;
-        }
-        if (r != want)
-            js_error(J, "cannot read data from file: '%s'", filename);
-
-        got = got + r;
-        len = MPMIN(limit, len * 2);
     }
-
-    js_error(J, "cannot allocate %d bytes for file: '%s'", len, filename);
 }
 
 // Safely run af_push_file.
@@ -535,8 +522,7 @@ static int s_load_javascript(struct mp_script_args *args)
     js_Alloc alloc_fn = NULL;
     void *actx = NULL;
 
-    char *mem_report = getenv("MPV_LEAK_REPORT");
-    if (mem_report && strcmp(mem_report, "1") == 0) {
+    if (args->mpctx->opts->js_memory_report) {
         alloc_fn = mp_js_alloc;
         actx = ctx;
     }
@@ -610,9 +596,10 @@ static void script__request_event(js_State *J)
     const char *event = js_tostring(J, 1);
     bool enable = js_toboolean(J, 2);
 
-    const char *name;
-    for (int n = 0; n < 256 && (name = mpv_event_name(n)); n++) {
-        if (strcmp(name, event) == 0) {
+    for (int n = 0; n < 256; n++) {
+        // some n's may be missing ("holes"), returning NULL
+        const char *name = mpv_event_name(n);
+        if (name && strcmp(name, event) == 0) {
             push_status(J, mpv_request_event(jclient(J), n, enable));
             return;
         }
@@ -695,6 +682,13 @@ static void script_get_property(js_State *J, void *af)
         add_af_mpv_alloc(af, res);
     if (!pushed_error(J, e, 2))
         js_pushstring(J, res);
+}
+
+// args: name
+static void script_del_property(js_State *J)
+{
+    int e = mpv_del_property(jclient(J), js_tostring(J, 1));
+    push_status(J, e);
 }
 
 // args: name [,def]
@@ -943,12 +937,6 @@ static void script_join_path(js_State *J, void *af)
     js_pushstring(J, mp_path_join(af, js_tostring(J, 1), js_tostring(J, 2)));
 }
 
-static void script_get_user_path(js_State *J, void *af)
-{
-    const char *path = js_tostring(J, 1);
-    js_pushstring(J, mp_get_user_path(af, jctx(J)->mpctx->global, path));
-}
-
 // args: is_append, prefixed file name, data (c-str)
 static void script__write_file(js_State *J, void *af)
 {
@@ -1069,7 +1057,7 @@ static int get_obj_properties(void *ta_ctx, char ***keys, js_State *J, int idx)
 static bool same_as_int64(double d)
 {
     // The range checks also validly filter inf and nan, so behavior is defined
-    return d >= INT64_MIN && d <= INT64_MAX && d == (int64_t)d;
+    return d >= INT64_MIN && d <= (double) INT64_MAX && d == (int64_t)d;
 }
 
 static int jsL_checkint(js_State *J, int idx)
@@ -1083,7 +1071,7 @@ static int jsL_checkint(js_State *J, int idx)
 static uint64_t jsL_checkuint64(js_State *J, int idx)
 {
     double d = js_tonumber(J, idx);
-    if (!(d >= 0 && d <= UINT64_MAX))
+    if (!(d >= 0 && d <= (double) UINT64_MAX))
         js_error(J, "uint64 out of range at index %d", idx);
     return d;
 }
@@ -1176,6 +1164,7 @@ static const struct fn_entry main_fns[] = {
     AF_ENTRY(command_native, 2),
     AF_ENTRY(_command_native_async, 2),
     FN_ENTRY(_abort_async_command, 1),
+    FN_ENTRY(del_property, 1),
     FN_ENTRY(get_property_bool, 2),
     FN_ENTRY(get_property_number, 2),
     AF_ENTRY(get_property_native, 2),
@@ -1204,7 +1193,6 @@ static const struct fn_entry utils_fns[] = {
     FN_ENTRY(file_info, 1),
     FN_ENTRY(split_path, 1),
     AF_ENTRY(join_path, 2),
-    AF_ENTRY(get_user_path, 1),
     FN_ENTRY(get_env_list, 0),
 
     FN_ENTRY(read_file, 2),
@@ -1255,7 +1243,7 @@ static void add_functions(js_State *J, struct script_ctx *ctx)
 
 // main export of this file, used by cplayer to load js scripts
 const struct mp_scripting mp_scripting_js = {
-    .name = "javascript",
+    .name = "js",
     .file_ext = "js",
     .load = s_load_javascript,
 };

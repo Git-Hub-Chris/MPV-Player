@@ -23,12 +23,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 
-#include <pthread.h>
 
-#ifndef __MINGW32__
 #include <poll.h>
 #endif
 
@@ -53,8 +50,36 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winioctl.h>
 #include <winternl.h>
 #include <io.h>
+
+#ifdef _MSC_VER
+// Those are defined only in Windows DDK
+typedef struct _FILE_FS_DEVICE_INFORMATION {
+    DEVICE_TYPE DeviceType;
+    ULONG Characteristics;
+} FILE_FS_DEVICE_INFORMATION, *PFILE_FS_DEVICE_INFORMATION;
+
+typedef enum _FSINFOCLASS {
+    FileFsVolumeInformation          = 1,
+    FileFsLabelInformation,         // 2
+    FileFsSizeInformation,          // 3
+    FileFsDeviceInformation,        // 4
+    FileFsAttributeInformation,     // 5
+    FileFsControlInformation,       // 6
+    FileFsFullSizeInformation,      // 7
+    FileFsObjectIdInformation,      // 8
+    FileFsDriverPathInformation,    // 9
+    FileFsVolumeFlagsInformation,   // 10
+    FileFsSectorSizeInformation,    // 11
+    FileFsDataCopyInformation,      // 12
+    FileFsMetadataSizeInformation,  // 13
+    FileFsFullSizeInformationEx,    // 14
+    FileFsGuidInformation,          // 15
+    FileFsMaximumInformation
+} FS_INFORMATION_CLASS, *PFS_INFORMATION_CLASS;
+#endif
 
 #ifndef FILE_REMOTE_DEVICE
 #define FILE_REMOTE_DEVICE (0x10)
@@ -95,41 +120,14 @@ static void stop_io(stream_t *s)
 static int64_t get_size(stream_t *s)
 {
     struct priv *p = s->priv;
-    if (!p->size) {
-        stop_io(s);
-        off_t size = lseek(p->fd, 0, SEEK_END);
-        lseek(p->fd, s->pos, SEEK_SET);
-        p->size = size == (off_t)-1 ? -1 : size;
-    }
-    return p->size;
+
 }
 
 static int fill_buffer(stream_t *s, void *buffer, int max_len)
 {
     struct priv *p = s->priv;
 
-    int res = 0;
-    pthread_mutex_lock(&p->lock);
-    while (1) {
-        int r = mp_ring_buffered(p->ring);
-        if (r || p->eof) {
-            res = mp_ring_read(p->ring, buffer, max_len);
-            break;
-        }
-        p->read_ok = true;
-        pthread_cond_broadcast(&p->wakeup);
-        pthread_cond_wait(&p->wakeup, &p->lock);
-    }
-    pthread_mutex_unlock(&p->lock);
 
-    return res;
-}
-
-static int real_fill_buffer(stream_t *s, void *buffer, int max_len)
-{
-    struct priv *p = s->priv;
-
-#ifndef __MINGW32__
     if (p->use_poll) {
         int c = mp_cancel_get_fd(p->cancel);
         struct pollfd fds[2] = {
@@ -256,7 +254,7 @@ static bool check_stream_network(int fd)
 {
     struct statfs fs;
     const char *stypes[] = { "afpfs", "nfs", "smbfs", "webdav", "osxfusefs",
-                             "fuse", "fusefs.sshfs", NULL };
+                             "fuse", "fusefs.sshfs", "macfuse", NULL };
     if (fstatfs(fd, &fs) == 0)
         for (int i=0; stypes[i]; i++)
             if (strcmp(stypes[i], fs.f_fstypename) == 0)
@@ -326,36 +324,51 @@ static bool check_stream_network(int fd)
 }
 #endif
 
-static int open_f(stream_t *stream)
+static int open_f(stream_t *stream, const struct stream_open_args *args)
 {
     struct priv *p = talloc_ptrtype(stream, p);
     *p = (struct priv) {
-        .fd = -1
+        .fd = -1,
     };
     stream->priv = p;
-    stream->is_local_file = true;
+    stream->is_local_fs = true;
 
+    bool strict_fs = args->flags & STREAM_LOCAL_FS_ONLY;
     bool write = stream->mode == STREAM_WRITE;
     int m = O_CLOEXEC | (write ? O_RDWR | O_CREAT | O_TRUNC : O_RDONLY);
 
-    char *filename = mp_file_url_to_filename(stream, bstr0(stream->url));
-    if (filename) {
-        stream->path = filename;
-    } else {
-        filename = stream->path;
+    char *filename = stream->path;
+    char *url = "";
+    if (!strict_fs) {
+        char *fn = mp_file_url_to_filename(stream, bstr0(stream->url));
+        if (fn)
+            filename = stream->path = fn;
+        url = stream->url;
     }
 
-    bool is_fdclose = strncmp(stream->url, "fdclose://", 10) == 0;
-    if (strncmp(stream->url, "fd://", 5) == 0 || is_fdclose) {
+    bool is_fdclose = strncmp(url, "fdclose://", 10) == 0;
+    if (strncmp(url, "fd://", 5) == 0 || is_fdclose) {
+        stream->is_local_fs = false;
         char *begin = strstr(stream->url, "://") + 3, *end = NULL;
         p->fd = strtol(begin, &end, 0);
-        if (!end || end == begin || end[0]) {
-            MP_ERR(stream, "Invalid FD: %s\n", stream->url);
+        if (!end || end == begin || end[0] || p->fd < 0) {
+            MP_ERR(stream, "Invalid FD number: %s\n", stream->url);
             return STREAM_ERROR;
         }
+#ifdef F_SETFD
+        if (fcntl(p->fd, F_GETFD) == -1) {
+            MP_ERR(stream, "Invalid FD: %d\n", p->fd);
+            return STREAM_ERROR;
+        }
+#endif
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+        if (p->fd == STDIN_FILENO || p->fd == STDOUT_FILENO || p->fd == STDERR_FILENO)
+            return STREAM_ERROR;
+#endif
         if (is_fdclose)
             p->close = true;
-    } else if (!strcmp(filename, "-")) {
+    } else if (!strict_fs && !strcmp(filename, "-")) {
+        stream->is_local_fs = false;
         if (!write) {
             MP_INFO(stream, "Reading from stdin...\n");
             p->fd = 0;
@@ -383,23 +396,26 @@ static int open_f(stream_t *stream)
     }
 
     struct stat st;
+    bool is_sock_or_fifo = false;
     if (fstat(p->fd, &st) == 0) {
         if (S_ISDIR(st.st_mode)) {
             stream->is_directory = true;
-            MP_INFO(stream, "This is a directory - adding to playlist.\n");
         } else if (S_ISREG(st.st_mode)) {
             p->regular_file = true;
-#ifndef __MINGW32__
+#ifndef _WIN32
             // O_NONBLOCK has weird semantics on file locks; remove it.
             int val = fcntl(p->fd, F_GETFL) & ~(unsigned)O_NONBLOCK;
             fcntl(p->fd, F_SETFL, val);
 #endif
         } else {
+#ifndef __MINGW32__
+            is_sock_or_fifo = S_ISSOCK(st.st_mode) || S_ISFIFO(st.st_mode);
+#endif
             p->use_poll = true;
         }
     }
 
-#ifdef __MINGW32__
+#ifdef _WIN32
     setmode(p->fd, O_BINARY);
 #endif
 
@@ -416,8 +432,15 @@ static int open_f(stream_t *stream)
     stream->get_size = get_size;
     stream->close = s_close;
 
-    if (check_stream_network(p->fd))
+    if (is_sock_or_fifo || check_stream_network(p->fd)) {
         stream->streaming = true;
+#if HAVE_COCOA
+        if (fcntl(p->fd, F_RDAHEAD, 0) < 0) {
+            MP_VERBOSE(stream, "Cannot disable read ahead on file '%s': %s\n",
+                       filename, mp_strerror(errno));
+        }
+#endif
+    }
 
     p->orig_size = get_size(stream);
 
@@ -437,9 +460,17 @@ static int open_f(stream_t *stream)
 
 const stream_info_t stream_info_file = {
     .name = "file",
-    .open = open_f,
-    .protocols = (const char*const[]){ "file", "", "fd", "fdclose",
-                                       "appending", NULL },
+    .open2 = open_f,
+    .protocols = (const char*const[]){ "file", "", "appending", NULL },
     .can_write = true,
+    .local_fs = true,
     .stream_origin = STREAM_ORIGIN_FS,
+};
+
+const stream_info_t stream_info_fd = {
+    .name = "fd",
+    .open2 = open_f,
+    .protocols = (const char*const[]){ "fd", "fdclose", NULL },
+    .can_write = true,
+    .stream_origin = STREAM_ORIGIN_UNSAFE,
 };

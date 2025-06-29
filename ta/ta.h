@@ -50,9 +50,9 @@ void *ta_realloc_size(void *ta_parent, void *ptr, size_t size);
 size_t ta_get_size(void *ptr);
 void ta_free(void *ptr);
 void ta_free_children(void *ptr);
-bool ta_set_destructor(void *ptr, void (*destructor)(void *));
-bool ta_set_parent(void *ptr, void *ta_parent);
-void *ta_find_parent(void *ptr);
+void ta_set_destructor(void *ptr, void (*destructor)(void *));
+void ta_set_parent(void *ptr, void *ta_parent);
+void *ta_get_parent(void *ptr);
 
 // Utility functions
 size_t ta_calc_array_size(size_t element_size, size_t count);
@@ -99,6 +99,16 @@ bool ta_vasprintf_append_buffer(char **str, const char *fmt, va_list ap) TA_PRF(
 #define ta_dup(ta_parent, ptr) \
     (TA_TYPEOF(ptr))ta_memdup(ta_parent, ptr, sizeof(*(ptr)))
 
+#define ta_replace(ta_parent, str, replace)             \
+    do {                                                \
+        if (!(str)) {                                   \
+            (str) = ta_xstrdup((ta_parent), (replace)); \
+        } else {                                        \
+            *(str) = '\0';                              \
+            ta_xstrdup_append(&(str), (replace));       \
+        }                                               \
+    } while (0)
+
 // Ugly macros that crash on OOM.
 // All of these mirror real functions (with a 'x' added after the 'ta_'
 // prefix), and the only difference is that they will call abort() on allocation
@@ -106,8 +116,6 @@ bool ta_vasprintf_append_buffer(char **str, const char *fmt, va_list ap) TA_PRF(
 // code.
 #define ta_xalloc_size(...)             ta_oom_p(ta_alloc_size(__VA_ARGS__))
 #define ta_xzalloc_size(...)            ta_oom_p(ta_zalloc_size(__VA_ARGS__))
-#define ta_xset_destructor(...)         ta_oom_b(ta_set_destructor(__VA_ARGS__))
-#define ta_xset_parent(...)             ta_oom_b(ta_set_parent(__VA_ARGS__))
 #define ta_xnew_context(...)            ta_oom_p(ta_new_context(__VA_ARGS__))
 #define ta_xstrdup_append(...)          ta_oom_b(ta_strdup_append(__VA_ARGS__))
 #define ta_xstrdup_append_buffer(...)   ta_oom_b(ta_strdup_append_buffer(__VA_ARGS__))
@@ -128,14 +136,12 @@ bool ta_vasprintf_append_buffer(char **str, const char *fmt, va_list ap) TA_PRF(
 #define ta_xnew_array_ptrtype(...)      ta_oom_g(ta_new_array_ptrtype(__VA_ARGS__))
 #define ta_xdup(...)                    ta_oom_g(ta_dup(__VA_ARGS__))
 
-#define ta_xsteal(ta_parent, ptr) (TA_TYPEOF(ptr))ta_xsteal_(ta_parent, ptr)
 #define ta_xrealloc(ta_parent, ptr, type, count) \
     (type *)ta_xrealloc_size(ta_parent, ptr, ta_calc_array_size(sizeof(type), count))
 
 // Can't be macros, because the OOM logic is slightly less trivial.
 char *ta_xstrdup(void *ta_parent, const char *str);
 char *ta_xstrndup(void *ta_parent, const char *str, size_t n);
-void *ta_xsteal_(void *ta_parent, void *ptr);
 void *ta_xmemdup(void *ta_parent, void *ptr, size_t size);
 void *ta_xrealloc_size(void *ta_parent, void *ptr, size_t size);
 
@@ -148,9 +154,26 @@ void *ta_xrealloc_size(void *ta_parent, void *ptr, size_t size);
 #define ta_xrealloc_size(...)   ta_dbg_set_loc(ta_xrealloc_size(__VA_ARGS__), TA_LOC)
 #endif
 
-void ta_oom_b(bool b);
-char *ta_oom_s(char *s);
-void *ta_oom_p(void *p);
+static inline void *ta_oom_p(void *p)
+{
+    if (!p)
+        abort();
+    return p;
+}
+
+static inline void ta_oom_b(bool b)
+{
+    if (!b)
+        abort();
+}
+
+static inline char *ta_oom_s(char *s)
+{
+    if (!s)
+        abort();
+    return s;
+}
+
 // Generic pointer
 #define ta_oom_g(ptr) (TA_TYPEOF(ptr))ta_oom_p(ptr)
 

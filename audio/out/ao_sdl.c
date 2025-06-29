@@ -18,7 +18,6 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "config.h"
 #include "audio/format.h"
 #include "mpv_talloc.h"
 #include "ao.h"
@@ -62,7 +61,7 @@ static void audio_callback(void *userdata, Uint8 *stream, int len)
     // fixed latency.
     double delay = 2 * len / (double)ao->bps;
 
-    ao_read_data(ao, data, len / ao->sstride, mp_time_us() + 1000000LL * delay);
+    ao_read_data(ao, data, len / ao->sstride, mp_time_ns() + MP_TIME_S_TO_NS(delay), NULL, true, true);
 }
 
 static void uninit(struct ao *ao)
@@ -188,7 +187,7 @@ static void reset(struct ao *ao)
     priv->paused = 1;
 }
 
-static void resume(struct ao *ao)
+static void start(struct ao *ao)
 {
     struct priv *priv = ao->priv;
     if (priv->paused)
@@ -204,14 +203,13 @@ const struct ao_driver audio_out_sdl = {
     .init      = init,
     .uninit    = uninit,
     .reset     = reset,
-    .resume    = resume,
-    .reports_underruns = true,
+    .start     = start,
     .priv_size = sizeof(struct priv),
     .priv_defaults = &(const struct priv) {
         .buflen = 0, // use SDL default
     },
     .options = (const struct m_option[]) {
-        OPT_FLOAT("buflen", buflen, 0),
+        {"buflen", OPT_FLOAT(buflen)},
         {0}
     },
     .options_prefix = "sdl",

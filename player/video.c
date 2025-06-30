@@ -820,8 +820,9 @@ static void handle_display_sync_frame(struct MPContext *mpctx,
 
     mpctx->display_sync_active = false;
 
-    if (!VS_IS_DISP(mode))
+    if (!VS_IS_DISP(mode) || !vo_is_visible(vo))
         return;
+
     bool resample = mode == VS_DISP_RESAMPLE || mode == VS_DISP_RESAMPLE_VDROP ||
                     mode == VS_DISP_RESAMPLE_NONE;
     bool drop = mode == VS_DISP_VDROP || mode == VS_DISP_RESAMPLE ||
@@ -1192,6 +1193,11 @@ void write_video(struct MPContext *mpctx)
             goto error;
         }
         mp_notify(mpctx, MPV_EVENT_VIDEO_RECONFIG, NULL);
+    } else {
+        // Update parameters that don't require reconfiguring the VO.
+        mp_mutex_lock(&vo->params_mutex);
+        mp_image_params_update_dynamic(vo->params, p, vo->has_peak_detect_values);
+        mp_mutex_unlock(&vo->params_mutex);
     }
 
     mpctx->time_frame -= get_relative_time(mpctx);

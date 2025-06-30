@@ -47,7 +47,8 @@ See `COMMAND INTERFACE`_ and `Key names`_ sections for more details on
 configuring keybindings.
 
 See also ``--input-test`` for interactive binding details by key, and the
-`stats`_ built-in script for key bindings list (including print to terminal).
+`stats`_ built-in script for key bindings list (including print to terminal). By
+default, the ? key toggles the display of this list.
 
 Keyboard Control
 ----------------
@@ -65,7 +66,7 @@ Ctrl+LEFT and Ctrl+RIGHT
     might not always work; see ``sub-seek`` command.
 
 Ctrl+Shift+LEFT and Ctrl+Shift+RIGHT
-    Adjust subtitle delay so that the next or previous subtitle is displayed
+    Adjust subtitle delay so that the previous or next subtitle is displayed
     now. This is especially useful to sync subtitles to audio.
 
 [ and ]
@@ -160,7 +161,7 @@ j and J
     Cycle through the available subtitles.
 
 z and Z
-    Adjust subtitle delay by +/- 0.1 seconds. The ``x`` key does the same as
+    Adjust subtitle delay by -/+ 0.1 seconds. The ``x`` key does the same as
     ``Z`` currently, but use is discouraged.
 
 l
@@ -172,7 +173,10 @@ L
 Ctrl++ and Ctrl+-
     Adjust audio delay (A/V sync) by +/- 0.1 seconds.
 
-Shift+g and Shift+f
+Ctrl+KP_ADD and Ctrl+KP_SUBTRACT
+    Adjust audio delay (A/V sync) by +/- 0.1 seconds.
+
+G and F
     Adjust subtitle font size by +/- 10%.
 
 u
@@ -226,6 +230,9 @@ Alt+LEFT, Alt+RIGHT, Alt+UP, Alt+DOWN
 Alt++ and Alt+-
     Change video zoom.
 
+Alt+KP_ADD and Alt+KP_SUBTRACT
+    Change video zoom.
+
 Alt+BACKSPACE
     Reset the pan/zoom settings.
 
@@ -235,10 +242,19 @@ F8
 F9
     Show the list of audio and subtitle streams.
 
+Ctrl+v
+    Append the file or URL in the clipboard to the playlist. If nothing is
+    currently playing, it is played immediately. Only works on platforms that
+    support the ``clipboard`` property.
+
 i and I
     Show/toggle an overlay displaying statistics about the currently playing
     file such as codec, framerate, number of dropped frames and so on. See
     `STATS`_ for more information.
+
+?
+    Toggle an overlay displaying the active key bindings. See `STATS`_ for more
+    information.
 
 DEL
     Cycle OSC visibility between never / auto (mouse-move) / always
@@ -274,10 +290,12 @@ Command + f (macOS only)
     Toggle fullscreen (see also ``--fs``).
 
 (The following keybindings open a selector in the console that lets you choose
-from a list of items by typing part of the desired item and/or by navigating
-them with keybindings: ``Down`` and ``Ctrl+n`` go down, ``Up`` and ``Ctrl+p`` go
-up, ``Page down`` and ``Ctrl+f`` scroll down one page, and ``Page up`` and
-``Ctrl+b`` scroll up one page.)
+from a list of items by typing part of the desired item, by clicking the desired
+item, or by navigating them with keybindings: ``Down`` and ``Ctrl+n`` go down,
+``Up`` and ``Ctrl+p`` go up, ``Page down`` and ``Ctrl+f`` scroll down one page,
+and ``Page up`` and ``Ctrl+b`` scroll up one page.)
+
+In track selectors, selecting the current tracks disables it.
 
 g-p
     Select a playlist entry.
@@ -300,12 +318,20 @@ g-t
 g-c
     Select a chapter.
 
+g-e
+    Select an MKV edition or DVD/Blu-ray title.
+
 g-l
     Select a subtitle line to seek to. This currently requires ``ffmpeg`` in
     ``PATH``, or in the same folder as mpv on Windows.
 
 g-d
     Select an audio device.
+
+g-w
+    Select a file from watch later config files (see `RESUMING PLAYBACK`_) to
+    resume playing. Requires ``--write-filename-in-watch-later-config``. This
+    doesn't work with ``--ignore-path-in-watch-later-config``.
 
 g-b
     Select a defined input binding.
@@ -494,41 +520,62 @@ console controls. (Which makes it suitable for playing data piped to stdin.)
 The special argument ``--`` can be used to stop mpv from interpreting the
 following arguments as options.
 
-When using the client API, you should strictly avoid using ``mpv_command_string``
+For paths passed to mpv suboptions (options that have multiple `:` and
+`,`-separated values), the situation is further complicated by the need to
+escape special characters. To work around this, the path can instead be wrapped
+in the "fixed-length" syntax, e.g. ``%n%string_of_length_n`` (see above).
+
+When using the libmpv API, you should strictly avoid using ``mpv_command_string``
 for invoking the ``loadfile`` command, and instead prefer e.g. ``mpv_command``
 to avoid the need for filename escaping.
 
-For paths passed to suboptions, the situation is further complicated by the
-need to escape special characters. To work this around, the path can be
-additionally wrapped in the fixed-length syntax, e.g. ``%n%string_of_length_n``
-(see above).
+The same applies when you're using the scripting API, where you should avoid using
+``mp.command``, and instead prefer using "separate parameter" APIs, such as
+``mp.commandv`` and ``mp.command_native``.
 
-Some mpv options interpret paths starting with ``~``.
-Currently, the prefix ``~~home/`` expands to the mpv configuration directory
-(usually ``~/.config/mpv/``).
-``~/`` expands to the user's home directory. (The trailing ``/`` is always
-required.) The following paths are currently recognized:
+Some mpv options will interpret special meanings for paths starting with ``~``,
+making it easy to dynamically find special directories, such as referring to the
+current user's home directory or the mpv configuration directory.
+
+When using the special ``~`` prefix, there must always be a trailing ``/`` after
+the special path prefix. In other words, ``~`` doesn't work, but ``~/`` will work.
+
+The following special paths/keywords are currently recognized:
+
+.. warning::
+
+    Beware that if ``--no-config`` is used, all of the "config directory"-based
+    paths (``~~/``, ``~~home/`` and ``~~global/``) will be empty strings.
+
+    This means that ``~~home/`` would expand to an empty string, and that
+    sub-paths such as ``~~home/foo/bar"`` would expand to a relative path
+    (``foo/bar``), which may not be what you expected.
+
+    Furthermore, any commands that search in config directories will fail
+    to find anything, since there won't be any directories to search in.
+
+    Be sure that your scripts can handle these "no config" scenarios.
 
 ================ ===============================================================
 Name             Meaning
 ================ ===============================================================
-``~~/``          If the subpath exists in any of the mpv's config directories
+``~/``           The current user's home directory (equivalent to ``~/`` and
+                 ``$HOME/`` in terminal environments).
+``~~/``          If the sub-path exists in any of mpv's config directories, then
                  the path of the existing file/dir is returned. Otherwise this
                  is equivalent to ``~~home/``.
-                 Note that if --no-config is used ``~~/foobar`` will resolve to
-                 ``foobar`` which can be unexpected.
-``~/``           user home directory root (similar to shell, ``$HOME``)
-``~~home/``      mpv config dir (for example ``~/.config/mpv/``)
-``~~global/``    the global config path, if available (not on win32)
-``~~osxbundle/`` the macOS bundle resource path (macOS only)
-``~~desktop/``   the path to the desktop (win32, macOS)
-``~~exe_dir/``   win32 only: the path to the directory containing the exe (for
-                 config file purposes; ``$MPV_HOME`` overrides it)
-``~~cache/``     the path to application cache data (``~/.cache/mpv/``)
+``~~home/``      mpv's config dir (for example ``~/.config/mpv/``).
+``~~global/``    The global config path (such as ``/etc/mpv``), if available
+                 (not on win32).
+``~~osxbundle/`` The macOS bundle resource path (macOS only).
+``~~desktop/``   The path to the desktop (win32, macOS).
+``~~exe_dir/``   The path to the directory containing ``mpv.exe`` (for config
+                 file purposes, ``$MPV_HOME`` will override this) (win32 only).
+``~~cache/``     The path to application cache data (``~/.cache/mpv/``).
                  On some platforms, this will be the same as ``~~home/``.
-``~~state/``     the path to application state data (``~/.local/state/mpv/``)
+``~~state/``     The path to application state data (``~/.local/state/mpv/``).
                  On some platforms, this will be the same as ``~~home/``.
-``~~old_home/``  do not use
+``~~old_home/``  Do not use.
 ================ ===============================================================
 
 
@@ -1598,6 +1645,8 @@ FILES
 
 Note that this section assumes Linux/BSD. On other platforms the paths may be different.
 For Windows-specifics, see `FILES ON WINDOWS`_ section.
+
+All configuration files should be encoded in UTF-8.
 
 ``/usr/local/etc/mpv/mpv.conf``
     mpv system-wide settings (depends on ``--prefix`` passed to configure - mpv

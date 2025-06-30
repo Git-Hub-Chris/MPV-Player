@@ -1,5 +1,7 @@
 #pragma once
 
+#include <libplacebo/colorspace.h>
+
 #include "video/out/vo.h"
 #include "video/csputils.h"
 
@@ -41,6 +43,10 @@ struct ra_ctx_fns {
     // display size etc. are determined by it.
     bool (*reconfig)(struct ra_ctx *ctx);
 
+    // Signal if the underlying context can use colorspace/hdr related functionality
+    // on its own.
+    bool (*pass_colorspace)(struct ra_ctx *ctx);
+
     // This behaves exactly like vo_driver.control().
     int (*control)(struct ra_ctx *ctx, int *events, int request, void *arg);
 
@@ -74,9 +80,14 @@ struct ra_fbo {
     struct pl_color_space color_space;
 };
 
+typedef struct pl_color_space pl_color_space_t;
+
 struct ra_swapchain_fns {
     // Gets the current framebuffer depth in bits (0 if unknown). Optional.
     int (*color_depth)(struct ra_swapchain *sw);
+
+    // Target device color space. Optional.
+    pl_color_space_t (*target_csp)(struct ra_swapchain *sw);
 
     // Called when rendering starts. Returns NULL on failure. This must be
     // followed by submit_frame, to submit the rendered frame. This function

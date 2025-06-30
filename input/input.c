@@ -672,8 +672,11 @@ static void interpret_key(struct input_ctx *ictx, int code, double scale,
         scale_units = MPMIN(scale_units, 20);
         for (int i = 0; i < scale_units - 1; i++)
             queue_cmd(ictx, mp_cmd_clone(cmd));
-        if (scale_units)
+        if (scale_units) {
             queue_cmd(ictx, cmd);
+        } else {
+            talloc_free(cmd);
+        }
     }
 }
 
@@ -774,7 +777,7 @@ static void feed_key(struct input_ctx *ictx, int code, double scale,
         return;
     }
     double now = mp_time_sec();
-    // ignore system doubleclick if we generate these events ourselves
+    // ignore system double-click if we generate these events ourselves
     if (!force_mouse && opts->doubleclick_time && MP_KEY_IS_MOUSE_BTN_DBL(unmod))
         return;
     int units = 1;
@@ -793,7 +796,7 @@ static void feed_key(struct input_ctx *ictx, int code, double scale,
         } else if (code == MP_MBTN_LEFT && ictx->opts->allow_win_drag &&
                    !test_mouse(ictx, ictx->mouse_vo_x, ictx->mouse_vo_y, MP_INPUT_ALLOW_VO_DRAGGING))
         {
-            // This is a mouse left button down event which isn't part of a doubleclick,
+            // This is a mouse left button down event which isn't part of a double-click,
             // and the mouse is on an input section which allows VO dragging.
             // Mark the dragging mouse button down in this case.
             ictx->dragging_button_down = true;
@@ -807,7 +810,7 @@ static void feed_key(struct input_ctx *ictx, int code, double scale,
     if (code & MP_KEY_STATE_UP) {
         code &= ~MP_KEY_STATE_UP;
         if (code == MP_MBTN_LEFT) {
-            // This is a mouse left botton up event. Mark the dragging mouse button up.
+            // This is a mouse left button up event. Mark the dragging mouse button up.
             ictx->dragging_button_down = false;
         }
     }
@@ -1427,8 +1430,7 @@ static int parse_config(struct input_ctx *ictx, bool builtin, bstr data,
         char *name = bstrdup0(NULL, keyname);
         int keys[MP_MAX_KEY_DOWN];
         int num_keys = 0;
-        if (!mp_input_get_keys_from_string(name, MP_MAX_KEY_DOWN, &num_keys, keys))
-        {
+        if (!mp_input_get_keys_from_string(name, MP_MAX_KEY_DOWN, &num_keys, keys)) {
             talloc_free(name);
             MP_ERR(ictx, "Unknown key '%.*s' at %s\n", BSTR_P(keyname), cur_loc);
             continue;
@@ -1469,19 +1471,14 @@ static bool parse_config_file(struct input_ctx *ictx, char *file)
 {
     bool r = false;
     void *tmp = talloc_new(NULL);
-    stream_t *s = NULL;
 
     file = mp_get_user_path(tmp, ictx->global, file);
 
-    s = stream_create(file, STREAM_ORIGIN_DIRECT | STREAM_READ, NULL, ictx->global);
-    if (!s || s->is_directory) {
-        MP_ERR(ictx, "Can't open input config file %s.\n", file);
-        goto done;
-    }
-    stream_skip_bom(s);
-    bstr data = stream_read_complete(s, tmp, 1000000);
+    bstr data = stream_read_file2(file, tmp, STREAM_ORIGIN_DIRECT | STREAM_READ,
+                                  ictx->global, 1000000);
     if (data.start) {
         MP_VERBOSE(ictx, "Parsing input config file %s\n", file);
+        bstr_eatstart0(&data, "\xEF\xBB\xBF"); // skip BOM
         int num = parse_config(ictx, false, data, file, (bstr){0});
         MP_VERBOSE(ictx, "Input config file %s parsed: %d binds\n", file, num);
         r = true;
@@ -1489,8 +1486,6 @@ static bool parse_config_file(struct input_ctx *ictx, char *file)
         MP_ERR(ictx, "Error reading input config file %s\n", file);
     }
 
-done:
-    free_stream(s);
     talloc_free(tmp);
     return r;
 }
@@ -1650,44 +1645,23 @@ void mp_input_run_cmd(struct input_ctx *ictx, const char **cmd)
     input_unlock(ictx);
 }
 
-void mp_input_bind_key(struct input_ctx *ictx, int key, bstr command)
+bool mp_input_bind_key(struct input_ctx *ictx, const char *key, bstr command,
+                       const char *desc)
 {
+    char *name = talloc_strdup(NULL, key);
+    int keys[MP_MAX_KEY_DOWN];
+    int num_keys = 0;
+    if (!mp_input_get_keys_from_string(name, MP_MAX_KEY_DOWN, &num_keys, keys)) {
+        talloc_free(name);
+        return false;
+    }
+    talloc_free(name);
+
     input_lock(ictx);
-    struct cmd_bind_section *bs = get_bind_section(ictx, (bstr){0});
-    struct cmd_bind *bind = NULL;
-
-    for (int n = 0; n < bs->num_binds; n++) {
-        struct cmd_bind *b = &bs->binds[n];
-        if (bind_matches_key(b, 1, &key) && b->is_builtin == false) {
-            bind = b;
-            break;
-        }
-    }
-
-    if (!bind) {
-        struct cmd_bind empty = {{0}};
-        MP_TARRAY_APPEND(bs, bs->binds, bs->num_binds, empty);
-        bind = &bs->binds[bs->num_binds - 1];
-    }
-
-    bind_dealloc(bind);
-
-    *bind = (struct cmd_bind) {
-        .cmd = bstrdup0(bs->binds, command),
-        .location = talloc_strdup(bs->binds, "keybind-command"),
-        .owner = bs,
-        .is_builtin = false,
-        .num_keys = 1,
-    };
-    memcpy(bind->keys, &key, 1 * sizeof(bind->keys[0]));
-    if (mp_msg_test(ictx->log, MSGL_DEBUG)) {
-        char *s = mp_input_get_key_combo_name(&key, 1);
-        MP_TRACE(ictx, "add:section='%.*s' key='%s'%s cmd='%s' location='%s'\n",
-                 BSTR_P(bind->owner->section), s, bind->is_builtin ? " builtin" : "",
-                 bind->cmd, bind->location);
-        talloc_free(s);
-    }
+    bind_keys(ictx, false, (bstr){0}, keys, num_keys, command,
+              "keybind-command", desc);
     input_unlock(ictx);
+    return true;
 }
 
 struct mpv_node mp_input_get_bindings(struct input_ctx *ictx)

@@ -1317,6 +1317,15 @@ static int str_list_add(char **add, int n, void *dst, int pre)
     for (ln = 0; lst && lst[ln]; ln++)
         /**/;
 
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (ln >= 100) {
+        while (n--)
+            talloc_free(add[n]);
+        talloc_free(add);
+        return 0;
+    }
+#endif
+
     lst = talloc_realloc(NULL, lst, char *, n + ln + 1);
 
     if (pre) {
@@ -1447,6 +1456,10 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
     n = 0;
 
     while (1) {
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+        if (n >= 100)
+            break;
+#endif
         struct bstr el = get_nextsep(&str, separator, 1);
         res[n] = bstrdup0(NULL, el);
         n++;
@@ -2204,7 +2217,7 @@ static char *print_geometry(const m_option_t *opt, const void *val)
 // scrw,scrh: width and height of the current screen
 // The input parameters should be set to a centered window (default fallbacks).
 void m_geometry_apply(int *xpos, int *ypos, int *widw, int *widh,
-                      int scrw, int scrh, struct m_geometry *gm)
+                      int scrw, int scrh, bool center, struct m_geometry *gm)
 {
     if (gm->wh_valid) {
         int prew = *widw, preh = *widh;
@@ -2219,10 +2232,10 @@ void m_geometry_apply(int *xpos, int *ypos, int *widw, int *widh,
         } else if (!(gm->w > 0) && gm->h > 0) {
             *widw = *widh * asp;
         }
-        // Center window after resize. If valid x:y values are passed to
-        // geometry, then those values will be overridden.
-        *xpos += prew / 2 - *widw / 2;
-        *ypos += preh / 2 - *widh / 2;
+        if (center) {
+            *xpos += prew / 2 - *widw / 2;
+            *ypos += preh / 2 - *widh / 2;
+        }
     }
 
     if (gm->xy_valid) {
@@ -2332,7 +2345,7 @@ void m_rect_apply(struct mp_rect *rc, int w, int h, struct m_geometry *gm)
     *rc = (struct mp_rect){0, 0, w, h};
     if (!w || !h)
         return;
-    m_geometry_apply(&rc->x0, &rc->y0, &rc->x1, &rc->y1, w, h, gm);
+    m_geometry_apply(&rc->x0, &rc->y0, &rc->x1, &rc->y1, w, h, true, gm);
     if (!gm->xy_valid && gm->wh_valid && rc->x1 == 0 && rc->y1 == 0)
         return;
     if (!gm->wh_valid || rc->x1 == 0 || rc->x1 == INT_MIN)
@@ -2573,6 +2586,7 @@ static int parse_channels(struct mp_log *log, const m_option_t *opt,
     }
 
     if (dst) {
+        opt->type->free(dst);
         *(struct m_channels *)dst = res;
     } else {
         talloc_free(res.chmaps);
@@ -2659,8 +2673,10 @@ static int parse_timestring(struct bstr str, double *time, char endchar)
     bool neg = bstr_eatstart0(&str, "-");
     if (!neg)
         bstr_eatstart0(&str, "+");
-    if (bstrchr(str, '-') >= 0 || bstrchr(str, '+') >= 0)
-        return 0; /* the timestamp shouldn't contain anymore +/- after this point */
+    bool sci = bstr_find0(str, "e-") >= 0 || bstr_find0(str, "e+") >= 0;
+    /* non-scientific notation timestamps shouldn't contain anymore +/- after this point */
+    if (!sci && (bstrchr(str, '-') >= 0 || bstrchr(str, '+') >= 0))
+        return 0;
     if (bstr_sscanf(str, "%u:%u:%lf%n", &h, &m, &s, &len) >= 3) {
         if (m >= 60 || s >= 60)
             return 0; /* minutes or seconds are out of range */

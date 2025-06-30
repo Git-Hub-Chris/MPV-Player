@@ -86,7 +86,8 @@ own event handlers which you have registered with ``mp.register_event``, or
 timers added with ``mp.add_timeout`` or similar. Note that since the
 script starts execution concurrently with player initialization, some properties
 may not be populated with meaningful values until the relevant subsystems have
-initialized.
+initialized. Rather than retrieving these properties at the top of scripts, you
+should use ``mp.observe_property`` or read them within event handlers.
 
 When the player quits, all scripts will be asked to terminate. This happens via
 a ``shutdown`` event, which by default will make the event loop return. If your
@@ -315,12 +316,19 @@ The ``mp`` module is preloaded, although it can be loaded manually with
     or pass the ``fn`` argument in place of the name. The latter is not
     recommended and is handled for compatibility only.)
 
-    The last argument is used for optional flags. This is a table, which can
-    have the following entries:
+    The ``flags`` argument is used for optional parameters. This is a table,
+    which can have the following entries:
 
         ``repeatable``
             If set to ``true``, enables key repeat for this specific binding.
             This option only makes sense when ``complex`` is not set to ``true``.
+
+        ``scalable``
+            If set to ``true``, enables key scaling for this specific binding.
+            This option only makes sense when ``complex`` is set to ``true``.
+            Note that this has no effect if the key binding is invoked by
+            ``script-binding`` command, where the scalability of the command
+            takes precedence.
 
         ``complex``
             If set to ``true``, then ``fn`` is called on key down, repeat and up
@@ -348,6 +356,15 @@ The ``mp`` module is preloaded, although it can be loaded manually with
                     Text if triggered by a text key, otherwise ``nil``. See
                     description of ``script-binding`` command for details (this
                     field is equivalent to the 5th argument).
+
+                ``scale``
+                    The scale of the key, such as the ones produced by ``WHEEL_*``
+                    keys. The scale is 1 if the key is nonscalable.
+
+                ``arg``
+                    User-provided string in the ``arg`` argument in the
+                    ``script-binding`` command if the key binding is invoked
+                    by that command.
 
     Internally, key bindings are dispatched via the ``script-message-to`` or
     ``script-binding`` input commands and ``mp.register_script_message``.
@@ -518,7 +535,7 @@ The ``mp`` module is preloaded, although it can be loaded manually with
         seconds = 0
         timer = mp.add_periodic_timer(1, function()
             print("called every second")
-            # stop it after 10 seconds
+            -- stop it after 10 seconds
             seconds = seconds + 1
             if seconds >= 10 then
                 timer:kill()
@@ -645,6 +662,20 @@ are useful only in special situations.
     be "scaled" pixels). The third is the display pixel aspect ratio.
 
     May return invalid/nonsense values if OSD is not initialized yet.
+
+``exit()`` (global)
+    Make the script exit at the end of the current event loop iteration. This
+    does not terminate mpv itself or other scripts.
+
+    This can be polyfilled to support mpv versions older than 0.40 with:
+
+    ::
+
+        if not _G.exit then
+            function exit()
+                mp.keep_running = false
+            end
+        end
 
 mp.msg functions
 ----------------

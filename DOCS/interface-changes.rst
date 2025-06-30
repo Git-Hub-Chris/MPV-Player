@@ -17,8 +17,9 @@ a large part of the user interface and APIs.
 
 Also see compatibility.rst.
 
-This document lists changes to them. New options/commands/etc. are not always
-listed.
+Prior to 0.40.0, only changes had to be listed here and not necessarily new
+additions. After 0.40.0, all changes and additions to options/commands/etc are
+listed here.
 
 **Never** write to this file directly except when making releases. New changes
 are added in the interface-changes directory instead. See contribute.md for more
@@ -313,12 +314,12 @@ Interface changes
     - `--save-position-on-quit` and its associated commands now store state files in
       the XDG_STATE_HOME directory by default. This only has an effect on linux/bsd
       systems.
-    - mpv now implictly saves cache files in XDG_CACHE_HOME by default. This only has
+    - mpv now implicitly saves cache files in XDG_CACHE_HOME by default. This only has
       an effect if the user enables options that would lead to cache being stored and
       only makes a difference on linux/bsd systems.
-    - `--cache-on-disk` no longer requires explictly setting the `--cache-dir` option
+    - `--cache-on-disk` no longer requires explicitly setting the `--cache-dir` option
     - add `--icc-cache` and `--gpu-shader-cache` options to control whether or not to
-      save cache files for these features; explictly setting `--icc-cache-dir` and
+      save cache files for these features; explicitly setting `--icc-cache-dir` and
       `--gpu-shader-cache` is no longer required
     - remove the `--tone-mapping-crosstalk` option
     - add `--gamut-mapping-mode=perceptual|relative|saturation|absolute|linear`
@@ -460,7 +461,7 @@ Interface changes
     - deprecate --input-file (there are no plans to remove this short-term,
       but it will probably eventually go away <- that was a lie)
     - deprecate --video-sync=display-adrop (might be removed if it's in the way;
-      undeprecated or readded if it's not too much of a problem)
+      undeprecated or re-added if it's not too much of a problem)
     - deprecate all input section commands (these will be changed/removed, as
       soon as mpv internals do not require them anymore)
     - remove deprecated --playlist-pos alias (use --playlist-start)
@@ -480,29 +481,7 @@ Interface changes
       setting the properties to non-existing tracks may report it as selected
       track for a small time window, until it's forced back to "no". The exact
       details how this is handled may change in the future.
-    - remove old Apple Remote support, including --input-appleremote
-    - add MediaPlayer support and remove the old Media Key event tap on macOS.
-      this possibly also re-adds the Apple Remote support
-    - the "edition" property now strictly returns the value of the option,
-      instead of the runtime value. The new "current-edition" property needs to
-      be queried to read the runtime-chosen edition. This is a breaking change
-      for any users which expected "edition" to return the runtime-chosen
-      edition at default settings (--edition=auto).
-    - the "window-scale" property now strictly returns the value of the option,
-      instead of the actual size of the window. The new "current-window-scale"
-      property needs to be queried to read the value as indicated by the current
-      window size. This is a breaking change.
-    - explicitly deprecate passing more than 1 item to "-add" suffix in key/value
-      options (for example --script-opts-add). This was actually always
-      deprecated, like with other list options, but the option parser did not
-      print a warning in this particular case.
-    - deprecate -del for list options (use -remove instead, which is by content
-      instead of by integer index)
-    - if `--fs` is used but `--fs-screen` is not set, mpv will now use `--screen`
-      instead.
-    - change the default of --hwdec to "no" on RPI. The default used to be "mmal"
-      specifically if 'Raspberry Pi support' was enabled at configure time
-      (equivalent to --enable-rpi). Use --hwdec=mmal to get the old behavior.
+
  --- mpv 0.30.0 ---
     - add `--d3d11-output-format` to enable explicit selection of a D3D11
       swap chain format.

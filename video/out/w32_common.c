@@ -26,6 +26,7 @@
 #include <dwmapi.h>
 #include <ole2.h>
 #include <process.h>
+#include <shellscalingapi.h>
 #include <shobjidl.h>
 #include <avrt.h>
 
@@ -55,10 +56,6 @@
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 #define HINST_THISCOMPONENT ((HINSTANCE)&__ImageBase)
 
-#ifndef WM_DPICHANGED
-#define WM_DPICHANGED (0x02E0)
-#endif
-
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
@@ -75,24 +72,12 @@ EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 #define DWMWA_SYSTEMBACKDROP_TYPE 38
 #endif
 
-#ifndef DPI_ENUMS_DECLARED
-typedef enum MONITOR_DPI_TYPE {
-    MDT_EFFECTIVE_DPI = 0,
-    MDT_ANGULAR_DPI = 1,
-    MDT_RAW_DPI = 2,
-    MDT_DEFAULT = MDT_EFFECTIVE_DPI
-} MONITOR_DPI_TYPE;
-#endif
-
 #define rect_w(r) ((r).right - (r).left)
 #define rect_h(r) ((r).bottom - (r).top)
 
 #define WM_SHOWMENU (WM_USER + 1)
 
 struct w32_api {
-    HRESULT (WINAPI *pGetDpiForMonitor)(HMONITOR, MONITOR_DPI_TYPE, UINT*, UINT*);
-    BOOL (WINAPI *pAdjustWindowRectExForDpi)(LPRECT lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle, UINT dpi);
-    int (WINAPI *pGetSystemMetricsForDpi)(int nIndex, UINT dpi);
     BOOLEAN (WINAPI *pShouldAppsUseDarkMode)(void);
     DWORD (WINAPI *pSetPreferredAppMode)(DWORD mode);
 };
@@ -207,9 +192,7 @@ struct vo_w32_state {
 
 static inline int get_system_metrics(struct vo_w32_state *w32, int metric)
 {
-    return w32->api.pGetSystemMetricsForDpi
-               ? w32->api.pGetSystemMetricsForDpi(metric, w32->dpi)
-               : GetSystemMetrics(metric);
+    return GetSystemMetricsForDpi(metric, w32->dpi);
 }
 
 static void adjust_window_rect(struct vo_w32_state *w32, HWND hwnd, RECT *rc)
@@ -217,13 +200,8 @@ static void adjust_window_rect(struct vo_w32_state *w32, HWND hwnd, RECT *rc)
     if (!w32->opts->border && !IsMaximized(w32->window))
         return;
 
-    if (w32->api.pAdjustWindowRectExForDpi) {
-        w32->api.pAdjustWindowRectExForDpi(rc,
-            GetWindowLongPtrW(hwnd, GWL_STYLE), 0,
-            GetWindowLongPtrW(hwnd, GWL_EXSTYLE), w32->dpi);
-    } else {
-        AdjustWindowRect(rc, GetWindowLongPtrW(hwnd, GWL_STYLE), 0);
-    }
+    AdjustWindowRectExForDpi(rc, GetWindowLongPtrW(hwnd, GWL_STYLE), 0,
+                             GetWindowLongPtrW(hwnd, GWL_EXSTYLE), w32->dpi);
 }
 
 static bool check_windows10_build(DWORD build)
@@ -560,7 +538,7 @@ static void begin_dragging(struct vo_w32_state *w32)
     // Unfortunately, the w32->current_fs value is stale because the
     // input is handled in a different thread, and we cannot wait for
     // an up-to-date value before entering the model loop if dragging
-    // needs to be kept resonsive.
+    // needs to be kept responsive.
     // Workaround this by intercepting the loop in the WM_MOVING message,
     // where the up-to-date value is available.
     SystemParametersInfoW(SPI_GETWINARRANGING, 0, &w32->win_arranging, 0);
@@ -689,8 +667,7 @@ static void update_dpi(struct vo_w32_state *w32)
     HDC hdc = NULL;
     int dpi = 0;
 
-    if (w32->api.pGetDpiForMonitor && w32->api.pGetDpiForMonitor(w32->monitor,
-                                     MDT_EFFECTIVE_DPI, &dpiX, &dpiY) == S_OK) {
+    if (GetDpiForMonitor(w32->monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) == S_OK) {
         dpi = (int)dpiX;
         MP_VERBOSE(w32, "DPI detected from the new API: %d\n", dpi);
     } else if ((hdc = GetDC(NULL))) {
@@ -1092,7 +1069,7 @@ static void update_fullscreen_state(struct vo_w32_state *w32)
     m_config_cache_write_opt(w32->opts_cache,
                              &w32->opts->fullscreen);
 
-    if (toggle_fs) {
+    if (toggle_fs && (!w32->opts->window_maximized || w32->unmaximize)) {
         if (w32->current_fs) {
             // Save window rect when switching to fullscreen.
             w32->prev_windowrc = w32->windowrc;
@@ -1127,16 +1104,21 @@ static void update_minimized_state(struct vo_w32_state *w32)
     }
 }
 
+static void update_window_state(struct vo_w32_state *w32);
+
 static void update_maximized_state(struct vo_w32_state *w32, bool leaving_fullscreen)
 {
     if (w32->parent)
         return;
 
-    update_window_style(w32);
-
     // Apply the maximized state on leaving fullscreen.
     if (w32->current_fs && !leaving_fullscreen)
         return;
+
+    bool toggle = w32->opts->window_maximized ^ IsMaximized(w32->window);
+
+    if (toggle && !w32->current_fs && w32->opts->window_maximized)
+        w32->prev_windowrc = w32->windowrc;
 
     WINDOWPLACEMENT wp = { .length = sizeof wp };
     GetWindowPlacement(w32->window, &wp);
@@ -1156,6 +1138,13 @@ static void update_maximized_state(struct vo_w32_state *w32, bool leaving_fullsc
         } else {
             ShowWindow(w32->window, SW_SHOWNOACTIVATE);
         }
+    }
+
+    update_window_style(w32);
+
+    if (toggle && !w32->current_fs && !w32->opts->window_maximized) {
+        w32->windowrc = w32->prev_windowrc;
+        update_window_state(w32);
     }
 }
 
@@ -1191,7 +1180,7 @@ static void update_window_state(struct vo_w32_state *w32)
     // doesn't change the window maximized state.
     // ShowWindow(SW_SHOWNOACTIVATE) can't be used here because it tries to
     // "restore" the window to its size before it's maximized.
-    if (w32->unmaximize) {
+    if (w32->unmaximize && !w32->current_fs) {
         WINDOWPLACEMENT wp = { .length = sizeof wp };
         GetWindowPlacement(w32->window, &wp);
         wp.showCmd = SW_SHOWNOACTIVATE;
@@ -1918,8 +1907,12 @@ static void run_message_loop(struct vo_w32_state *w32)
 
     // Even if the message loop somehow exits, we still have to respond to
     // external requests until termination is requested.
-    while (!w32->terminate)
+    while (!w32->terminate) {
+        assert(!w32->in_dispatch);
+        w32->in_dispatch = true;
         mp_dispatch_queue_process(w32->dispatch, 1000);
+        w32->in_dispatch = false;
+    }
 }
 
 static void window_reconfig(struct vo_w32_state *w32, bool force)
@@ -1943,7 +1936,8 @@ static void window_reconfig(struct vo_w32_state *w32, bool force)
     if (w32->dpi_scale == 0)
         force_update_display_info(w32);
 
-    vo_calc_window_geometry3(vo, &screen, &mon, w32->dpi_scale, &geo);
+    vo_calc_window_geometry(vo, &screen, &mon, w32->dpi_scale,
+                            !w32->window_bounds_initialized, &geo);
     vo_apply_window_geometry(vo, &geo);
 
     bool reset_size = ((w32->o_dwidth != vo->dwidth ||
@@ -1954,12 +1948,17 @@ static void window_reconfig(struct vo_w32_state *w32, bool force)
     w32->o_dheight = vo->dheight;
 
     if (!w32->parent && (!w32->window_bounds_initialized || force)) {
-        SetRect(&w32->windowrc, geo.win.x0, geo.win.y0,
-                geo.win.x0 + vo->dwidth, geo.win.y0 + vo->dheight);
+        int x0 = geo.win.x0;
+        int y0 = geo.win.y0;
+        if (!w32->opts->geometry.xy_valid && w32->window_bounds_initialized) {
+            x0 = w32->windowrc.left;
+            y0 = w32->windowrc.top;
+        }
+        SetRect(&w32->windowrc, x0, y0, x0 + vo->dwidth, y0 + vo->dheight);
         w32->prev_windowrc = w32->windowrc;
         w32->window_bounds_initialized = true;
         w32->win_force_pos = geo.flags & VO_WIN_FORCE_POS;
-        w32->fit_on_screen = !w32->win_force_pos;
+        w32->fit_on_screen = true;
         goto finish;
     }
 
@@ -1973,7 +1972,7 @@ static void window_reconfig(struct vo_w32_state *w32, bool force)
         vo->dwidth = r.right;
         vo->dheight = r.bottom;
     } else {
-        if (w32->current_fs)
+        if (w32->current_fs || w32->opts->window_maximized)
             rc = &w32->prev_windowrc;
         w32->fit_on_screen = true;
     }
@@ -1998,18 +1997,6 @@ void vo_w32_config(struct vo *vo)
 
 static void w32_api_load(struct vo_w32_state *w32)
 {
-    HMODULE shcore_dll = LoadLibraryW(L"shcore.dll");
-    // Available since Win8.1
-    w32->api.pGetDpiForMonitor = !shcore_dll ? NULL :
-                (void *)GetProcAddress(shcore_dll, "GetDpiForMonitor");
-
-    HMODULE user32_dll = LoadLibraryW(L"user32.dll");
-    // Available since Win10
-    w32->api.pAdjustWindowRectExForDpi = !user32_dll ? NULL :
-                (void *)GetProcAddress(user32_dll, "AdjustWindowRectExForDpi");
-    w32->api.pGetSystemMetricsForDpi = !user32_dll ? NULL :
-                (void *)GetProcAddress(user32_dll, "GetSystemMetricsForDpi");
-
     // Dark mode related functions, available since the 1809 Windows 10 update
     // Check the Windows build version as on previous versions used ordinals
     // may point to unexpected code/data. Alternatively could check uxtheme.dll
@@ -2303,7 +2290,8 @@ static int gui_thread_control(struct vo_w32_state *w32, int request, void *arg)
         if (!w32->window_bounds_initialized)
             return VO_FALSE;
 
-        RECT *rc = w32->current_fs ? &w32->prev_windowrc : &w32->windowrc;
+        RECT *rc = (w32->current_fs || w32->opts->window_maximized)
+                        ? &w32->prev_windowrc : &w32->windowrc;
         s[0] = rect_w(*rc);
         s[1] = rect_h(*rc);
         return VO_TRUE;
@@ -2317,7 +2305,7 @@ static int gui_thread_control(struct vo_w32_state *w32, int request, void *arg)
         RECT *rc = w32->current_fs ? &w32->prev_windowrc : &w32->windowrc;
         resize_and_move_rect(w32, rc, s[0], s[1]);
 
-        if (w32->opts->window_maximized) {
+        if (w32->opts->window_maximized && !w32->current_fs) {
             w32->unmaximize = true;
         }
         w32->fit_on_screen = true;

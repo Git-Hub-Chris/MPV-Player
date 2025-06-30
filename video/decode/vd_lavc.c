@@ -30,7 +30,6 @@
 #include <libavutil/pixdesc.h>
 
 #include "mpv_talloc.h"
-#include "common/global.h"
 #include "common/msg.h"
 #include "options/m_config.h"
 #include "options/options.h"
@@ -124,7 +123,7 @@ const struct m_sub_options vd_lavc_conf = {
         {"vd-apply-cropping", OPT_BOOL(apply_cropping)},
         {"hwdec", OPT_STRINGLIST(hwdec_api),
             .help = hwdec_opt_help,
-            .flags = M_OPT_OPTIONAL_PARAM | UPDATE_HWDEC},
+            .flags = M_OPT_OPTIONAL_PARAM | M_OPT_ALLOW_NO | UPDATE_HWDEC},
         {"hwdec-codecs", OPT_STRING(hwdec_codecs)},
         {"hwdec-image-format", OPT_IMAGEFORMAT(hwdec_image_format)},
         {"hwdec-extra-frames", OPT_INT(hwdec_extra_frames), M_RANGE(0, 256)},
@@ -481,7 +480,7 @@ static void select_and_set_hwdec(struct mp_filter *vd)
     add_all_hwdec_methods(&hwdecs, &num_hwdecs);
 
     char **hwdec_api = ctx->opts->hwdec_api;
-    for (int i = 0; hwdec_api[i]; i++) {
+    for (int i = 0; hwdec_api && hwdec_api[i]; i++) {
         bstr opt = bstr0(hwdec_api[i]);
 
         bool hwdec_requested = !bstr_equals0(opt, "no");

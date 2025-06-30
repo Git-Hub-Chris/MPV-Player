@@ -34,7 +34,6 @@
 #include "client.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
-#include "common/global.h"
 #include "options/path.h"
 #include "options/m_config.h"
 #include "options/parse_configfile.h"
@@ -235,18 +234,11 @@ static void uninit_demuxer(struct MPContext *mpctx)
     talloc_free(demuxers);
 }
 
-#define BLACK_CIRCLE "\xe2\x97\x8f"
-#define WHITE_CIRCLE "\xe2\x97\x8b"
 #define APPEND(s, ...) mp_snprintf_cat(s, sizeof(s), __VA_ARGS__)
 #define FILL(s, n) mp_snprintf_cat(s, sizeof(s), "%*s", n, "")
-#define ADD_FLAG(b, flag, first) do {           \
-    APPEND(b, " %s%s", first ? "[" : "", flag); \
-    first = false;                              \
-} while(0)
 
 static void print_stream(struct MPContext *mpctx, struct track *t, bool indent)
 {
-    struct sh_stream *s = t->stream;
     const char *tname = "?";
     const char *selopt = "?";
     const char *langopt = "?";
@@ -278,49 +270,10 @@ static void print_stream(struct MPContext *mpctx, struct track *t, bool indent)
     } else if (max_lang_length) {
         FILL(b, (int) strlen(" --alang= ") + max_lang_length);
     }
-    if (t->title)
-        APPEND(b, " '%s'", t->title);
 
-    const char *codec = s ? s->codec->codec : NULL;
-    APPEND(b, " (%s", codec ? codec : "<unknown>");
-    if (s && s->codec->codec_profile)
-        APPEND(b, " [%s]", s->codec->codec_profile);
-    if (t->type == STREAM_VIDEO) {
-        if (s && s->codec->disp_w)
-            APPEND(b, " %dx%d", s->codec->disp_w, s->codec->disp_h);
-        if (s && s->codec->fps && !t->image) {
-            char *fps = mp_format_double(NULL, s->codec->fps, 4, false, false, true);
-            APPEND(b, " %s fps", fps);
-            talloc_free(fps);
-        }
-    } else if (t->type == STREAM_AUDIO) {
-        if (s && s->codec->channels.num)
-            APPEND(b, " %dch", s->codec->channels.num);
-        if (s && s->codec->samplerate)
-            APPEND(b, " %d Hz", s->codec->samplerate);
-    }
-    if (s && s->codec->bitrate) {
-        APPEND(b, " %d kbps", (s->codec->bitrate + 500) / 1000);
-    } else if (s && s->hls_bitrate) {
-        APPEND(b, " %d kbps", (s->hls_bitrate + 500) / 1000);
-    }
-    APPEND(b, ")");
-
-    bool first = true;
-    if (t->default_track)
-        ADD_FLAG(b, "default", first);
-    if (t->forced_track)
-        ADD_FLAG(b, "forced", first);
-    if (t->dependent_track)
-        ADD_FLAG(b, "dependent", first);
-    if (t->visual_impaired_track)
-        ADD_FLAG(b, "visual-impaired", first);
-    if (t->hearing_impaired_track)
-        ADD_FLAG(b, "hearing-impaired", first);
-    if (t->is_external)
-        ADD_FLAG(b, "external", first);
-    if (!first)
-        APPEND(b, "]");
+    void *ctx = talloc_new(NULL);
+    APPEND(b, " %s", mp_format_track_metadata(ctx, t, false));
+    talloc_free(ctx);
 
     MP_INFO(mpctx, "%s\n", b);
 }
@@ -538,6 +491,10 @@ static bool compare_track(struct track *t1, struct track *t2, char **langs, bool
         return l1 > l2;
     if (t1->attached_picture != t2->attached_picture)
         return !t1->attached_picture;
+    if (t1->image != t2->image)
+        return !t1->image;
+    if (t1->dependent_track != t2->dependent_track)
+        return !t1->dependent_track;
     if (t1->stream && t2->stream && opts->hls_bitrate >= 0 &&
         t1->stream->hls_bitrate != t2->stream->hls_bitrate)
     {
@@ -1611,6 +1568,11 @@ static void play_current_file(struct MPContext *mpctx)
 
     reset_playback_state(mpctx);
 
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (mpctx->playlist->num_entries > 10)
+        goto terminate_playback;
+#endif
+
     mpctx->playing = mpctx->playlist->current;
     assert(mpctx->playing);
     assert(mpctx->playing->filename);
@@ -1803,6 +1765,9 @@ static void play_current_file(struct MPContext *mpctx)
     mp_notify(mpctx, MPV_EVENT_FILE_LOADED, NULL);
     update_screensaver_state(mpctx);
     clear_playlist_paths(mpctx);
+
+    // Clear out subs from the previous file if the video track is a still image.
+    redraw_subs(mpctx);
 
     if (watch_later)
         mp_delete_watch_later_conf(mpctx, mpctx->filename);

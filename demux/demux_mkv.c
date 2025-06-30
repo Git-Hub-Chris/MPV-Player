@@ -584,7 +584,7 @@ static void parse_trackcolour(struct demuxer *demuxer, struct mkv_track *track,
 {
     // Note: As per matroska spec, the order is consistent with ISO/IEC
     // 23001-8:2013/DCOR1, which is the same order used by libavutil/pixfmt.h,
-    // so we can just re-use our avcol_ conversion functions.
+    // so we can just reuse our avcol_ conversion functions.
     if (colour->n_matrix_coefficients) {
         track->repr.sys = pl_system_from_av(colour->matrix_coefficients);
         MP_DBG(demuxer, "|    + Matrix: %s\n",
@@ -714,7 +714,7 @@ static void parse_trackvideo(struct demuxer *demuxer, struct mkv_track *track,
     }
     if (video->n_colour_space && video->colour_space.len == 4) {
         uint8_t *d = (uint8_t *)&video->colour_space.start[0];
-        track->colorspace = d[0] | (d[1] << 8) | (d[2] << 16) | (d[3] << 24);
+        track->colorspace = d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
         MP_DBG(demuxer, "|   + Colorspace: %#"PRIx32"\n", track->colorspace);
     }
     if (video->n_stereo_mode) {
@@ -1559,6 +1559,11 @@ static const char *const mkv_video_tags[][2] = {
     {0}
 };
 
+static void avcodec_par_destructor(void *p)
+{
+    avcodec_parameters_free(p);
+}
+
 static int demux_mkv_open_video(demuxer_t *demuxer, mkv_track_t *track)
 {
     unsigned char *extradata = NULL;
@@ -1680,6 +1685,7 @@ static int demux_mkv_open_video(demuxer_t *demuxer, mkv_track_t *track)
     sh_v->par_h = p.p_h;
 
     sh_v->stereo_mode = track->stereo_mode;
+    sh_v->repr = track->repr;
     sh_v->color = track->color;
 
     if (track->v_projection_pose_roll) {
@@ -1687,7 +1693,36 @@ static int demux_mkv_open_video(demuxer_t *demuxer, mkv_track_t *track)
         sh_v->rotate = rotate;
     }
 
+    // our vessel to transport global track side data to decoder context;
+    // this gets called in all lavc decoders through `mp_set_avctx_codec_headers`
+    // and its failure causes decoding failure. Thus if this call fails here, it is
+    // likely that decoding of this track would also lead to an error.
+    struct AVCodecParameters **lavp = talloc_ptrtype(track, lavp);
+    talloc_set_destructor(lavp, avcodec_par_destructor);
+    *lavp = sh_v->lav_codecpar = mp_codec_params_to_av(sh_v);
+    if (!sh_v->lav_codecpar) {
+        MP_ERR(demuxer, "Failed to create codec parameters for track %d!",
+               track->tnum);
+        goto done;
+    }
+
     if (track->dovi_config) {
+        size_t dovi_size;
+        AVDOVIDecoderConfigurationRecord *dovi = av_dovi_alloc(&dovi_size);
+        MP_HANDLE_OOM(dovi);
+
+        memcpy(dovi, track->dovi_config, dovi_size);
+
+        if (!av_packet_side_data_add(&sh_v->lav_codecpar->coded_side_data,
+                                     &sh_v->lav_codecpar->nb_coded_side_data,
+                                     AV_PKT_DATA_DOVI_CONF,
+                                     dovi, dovi_size, 0))
+        {
+            MP_ERR(demuxer, "Failed to attach Dolby Vision configuration record to "
+                   "codec parameters for track %d!\n", track->tnum);
+            av_free(dovi);
+        }
+
         sh_v->dovi = true;
         sh_v->dv_level = track->dovi_config->dv_level;
         sh_v->dv_profile = track->dovi_config->dv_profile;
@@ -2050,11 +2085,6 @@ static const char *const mkv_sub_tag[][2] = {
     {0}
 };
 
-static void avcodec_par_destructor(void *p)
-{
-    avcodec_parameters_free(p);
-}
-
 static int demux_mkv_open_sub(demuxer_t *demuxer, mkv_track_t *track)
 {
     const char *subtitle_type = NULL;
@@ -2138,7 +2168,7 @@ static void probe_if_image(demuxer_t *demuxer)
 
         int64_t timecode = -1;
         // Arbitrary restriction on packet reading.
-        for (size_t block = 0; block < 100000; block++) {
+        for (size_t block = 0; block < 10000; block++) {
             if (block >= mkv_d->num_blocks && read_next_block_into_queue(demuxer) != 1)
                 break;
             if (mkv_d->blocks[block].track != track)
@@ -2994,18 +3024,6 @@ static int handle_block(demuxer_t *demuxer, struct block_info *block_info)
                     int64_t id = add->n_block_add_id ? add->block_add_id : 1;
                     demux_packet_add_blockadditional(dp, id,
                         add->block_additional.start, add->block_additional.len);
-                }
-            }
-            if (track->dovi_config) {
-                size_t dovi_size;
-                AVDOVIDecoderConfigurationRecord *dovi = av_dovi_alloc(&dovi_size);
-                MP_HANDLE_OOM(dovi);
-                memcpy(dovi, track->dovi_config, dovi_size);
-                if (av_packet_add_side_data(dp->avpacket,
-                                            AV_PKT_DATA_DOVI_CONF,
-                                            (uint8_t *)dovi, dovi_size) < 0)
-                {
-                    av_free(dovi);
                 }
             }
 

@@ -396,7 +396,7 @@ static void xpresent_set(struct vo_x11_state *x11)
 {
     int present = x11->opts->x11_present;
     x11->use_present = x11->present_code &&
-                       ((x11->has_mesa && !x11->has_nvidia && present) ||
+                       ((x11->has_mesa && present) ||
                         present == 2);
     if (x11->use_present) {
         MP_VERBOSE(x11, "XPresent enabled.\n");
@@ -430,11 +430,8 @@ static void xrandr_read(struct vo_x11_state *x11)
     }
 
     /* Look at the available providers on the current screen and try to determine
-     * the driver. If amd/intel/radeon, assume this is mesa. If nvidia is found,
-     * assume nvidia. Because the same screen can have multiple providers (e.g.
-     * a laptop with switchable graphics), we need to know both of these things.
-     * In practice, this is used for determining whether or not to use XPresent
-     * (i.e. needs to be Mesa and not Nvidia). Requires Randr 1.4. */
+     * the driver. If amd/intel/radeon, assume this is mesa. For any of the mesa
+     * drivers, enable XPresent. */
     XRRProviderResources *pr = XRRGetProviderResources(x11->display, x11->rootwin);
     for (int i = 0; i < pr->nproviders; i++) {
         XRRProviderInfo *info = XRRGetProviderInfo(x11->display, r, pr->providers[i]);
@@ -444,11 +441,9 @@ static void xrandr_read(struct vo_x11_state *x11)
         int intel = bstr_find0(provider_name, "intel");
         int modesetting = bstr_find0(provider_name, "modesetting");
         int nouveau = bstr_find0(provider_name, "nouveau");
-        int nvidia = bstr_find0(provider_name, "nvidia");
         int radeon = bstr_find0(provider_name, "radeon");
         x11->has_mesa = x11->has_mesa || amd >= 0 || intel >= 0 ||
                         modesetting >= 0 || nouveau >= 0 || radeon >= 0;
-        x11->has_nvidia = x11->has_nvidia || nvidia >= 0;
         XRRFreeProviderInfo(info);
     }
     if (x11->present_code)
@@ -604,11 +599,11 @@ static void vo_x11_get_bounding_monitors(struct vo_x11_state *x11, long b[4])
         struct xrandr_display *d = &x11->displays[n];
         if (d->rc.y0 < x11->displays[b[0]].rc.y0)
             b[0] = n;
-        if (d->rc.y1 < x11->displays[b[1]].rc.y1)
+        if (d->rc.y1 > x11->displays[b[1]].rc.y1)
             b[1] = n;
         if (d->rc.x0 < x11->displays[b[2]].rc.x0)
             b[2] = n;
-        if (d->rc.x1 < x11->displays[b[3]].rc.x1)
+        if (d->rc.x1 > x11->displays[b[3]].rc.x1)
             b[3] = n;
     }
 }
@@ -1256,7 +1251,7 @@ void vo_x11_check_events(struct vo *vo)
 
     while (XPending(display)) {
         XNextEvent(display, &Event);
-        if (XFilterEvent(&Event, x11->window))
+        if (XFilterEvent(&Event, None))
             continue;
         MP_TRACE(x11, "XEvent: %d\n", Event.type);
         switch (Event.type) {
@@ -1646,6 +1641,8 @@ static void vo_x11_create_window(struct vo *vo, XVisualInfo *vis,
                              XNClientWindow, x11->window,
                              XNFocusWindow, x11->window,
                              NULL);
+        if (x11->xic)
+            XSetICFocus(x11->xic);
     }
 
     if (!x11->parent) {
@@ -1809,34 +1806,30 @@ void vo_x11_config_vo_window(struct vo *vo)
     vo_x11_update_screeninfo(vo);
 
     struct vo_win_geometry geo;
-    vo_calc_window_geometry2(vo, &x11->screenrc, x11->dpi_scale, &geo);
+    vo_calc_window_geometry(vo, &x11->screenrc, &x11->screenrc, x11->dpi_scale,
+                            !x11->pseudo_mapped, &geo);
     vo_apply_window_geometry(vo, &geo);
 
-    struct mp_rect rc = geo.win;
+    struct mp_rect rc = !x11->pseudo_mapped || opts->auto_window_resize || opts->geometry.wh_valid ||
+                        opts->geometry.xy_valid ? geo.win : x11->nofsrc;
 
     if (x11->parent) {
         vo_x11_update_geometry(vo);
         rc = (struct mp_rect){0, 0, RC_W(x11->winrc), RC_H(x11->winrc)};
     }
 
-    bool reset_size = ((x11->old_dw != RC_W(rc) || x11->old_dh != RC_H(rc))
-                       && opts->auto_window_resize) || x11->geometry_change;
-    reset_size |= (x11->old_x != rc.x0 || x11->old_y != rc.y0) &&
-                  (x11->geometry_change);
+    bool reset_size = ((x11->old_dw != RC_W(rc) || x11->old_dh != RC_H(rc))) ||
+                       opts->geometry.wh_valid || opts->geometry.xy_valid;
 
     x11->old_dw = RC_W(rc);
     x11->old_dh = RC_H(rc);
-    x11->old_x = rc.x0;
-    x11->old_y = rc.y0;
 
     if (x11->window_hidden) {
         x11->nofsrc = rc;
         vo_x11_map_window(vo, rc);
     } else if (reset_size) {
-        vo_x11_highlevel_resize(vo, rc, x11->geometry_change);
+        vo_x11_highlevel_resize(vo, rc, geo.flags & VO_WIN_FORCE_POS);
     }
-
-    x11->geometry_change = false;
 
     if (opts->ontop)
         vo_x11_setlayer(vo, opts->ontop);
@@ -1930,14 +1923,32 @@ static void vo_x11_update_geometry(struct vo *vo)
     Window dummy_win;
     Window win = x11->parent ? x11->parent : x11->window;
     x11->winrc = (struct mp_rect){0, 0, 0, 0};
+    x11->last_geometry = (struct m_geometry){0};
     if (win) {
-        XGetGeometry(x11->display, win, &dummy_win, &dummy_int, &dummy_int,
+        int r_x = 0, r_y = 0;
+        XGetGeometry(x11->display, win, &dummy_win, &r_x, &r_y,
                      &w, &h, &dummy_int, &dummy_uint);
         if (w > INT_MAX || h > INT_MAX)
             w = h = 0;
         XTranslateCoordinates(x11->display, win, x11->rootwin, 0, 0,
                               &x, &y, &dummy_win);
         x11->winrc = (struct mp_rect){x, y, x + w, y + h};
+        if (!x11->window_hidden) {
+            // Ah, the pain of X11.
+            long params[4] = {0};
+            x11_get_property_copy(x11, win, XA(x11, _NET_FRAME_EXTENTS),
+                                  XA_CARDINAL, 32, params, sizeof(params));
+            x11->last_geometry = (struct m_geometry){
+                .x = x - params[0],
+                .y = y - params[2],
+                .w = w,
+                .h = h,
+                .xy_valid = 1,
+                .wh_valid = w > 0 && h > 0,
+            };
+            x11->opts->geometry = x11->last_geometry;
+            m_config_cache_write_opt(x11->opts_cache, &x11->opts->geometry);
+        }
     }
     struct xrandr_display *disp = get_xrandr_display(vo, x11->winrc);
     // Try to fallback to something reasonable if we have no disp yet
@@ -2068,38 +2079,6 @@ static void vo_x11_set_geometry(struct vo *vo)
 {
     struct vo_x11_state *x11 = vo->x11;
 
-    if (!x11->window)
-        return;
-
-    x11->geometry_change = true;
-    vo_x11_config_vo_window(vo);
-}
-
-bool vo_x11_check_visible(struct vo *vo)
-{
-    struct vo_x11_state *x11 = vo->x11;
-    struct mp_vo_opts *opts = x11->opts;
-
-    bool render = !x11->hidden || opts->force_render ||
-                  VS_IS_DISP(opts->video_sync);
-    return render;
-}
-
-static void vo_x11_set_input_region(struct vo *vo, bool passthrough)
-{
-    struct vo_x11_state *x11 = vo->x11;
-
-    if (passthrough) {
-        XRectangle rect = {0, 0, 0, 0};
-        Region region = XCreateRegion();
-        XUnionRectWithRegion(&rect, region, region);
-        XShapeCombineRegion(x11->display, x11->window, ShapeInput, 0, 0,
-                            region, ShapeSet);
-        XDestroyRegion(region);
-    } else {
-        XShapeCombineMask(x11->display, x11->window, ShapeInput, 0, 0,
-                          0, ShapeSet);
-    }
 }
 
 int vo_x11_control(struct vo *vo, int *events, int request, void *arg)
@@ -2129,23 +2108,7 @@ int vo_x11_control(struct vo *vo, int *events, int request, void *arg)
                 vo_x11_minimize(vo);
             if (opt == &opts->window_maximized)
                 vo_x11_maximize(vo);
-            if (opt == &opts->cursor_passthrough)
-                vo_x11_set_input_region(vo, opts->cursor_passthrough);
-            if (opt == &opts->x11_present)
-                xpresent_set(x11);
-            if (opt == &opts->keepaspect || opt == &opts->keepaspect_window)
-                vo_x11_sizehint(vo, x11->fs ? x11->nofsrc : x11->winrc, false);
-            if (opt == &opts->geometry || opt == &opts->autofit ||
-                opt == &opts->autofit_smaller || opt == &opts->autofit_larger)
-            {
-                if (opts->window_maximized && !opts->fullscreen) {
-                    x11->opts->window_maximized = false;
-                    m_config_cache_write_opt(x11->opts_cache,
-                            &x11->opts->window_maximized);
-                    vo_x11_maximize(vo);
-                }
-                vo_x11_set_geometry(vo);
-            }
+
         }
         return VO_TRUE;
     }

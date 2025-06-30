@@ -293,6 +293,9 @@ char *m_properties_expand_string(const struct m_property *prop_list,
     bool skip = false;
     int level = 0, skip_level = 0;
     bstr str = bstr0(str0);
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    int n = 0;
+#endif
 
     while (str.len) {
         if (level > 0 && bstr_eatstart0(&str, "}")) {
@@ -309,6 +312,11 @@ char *m_properties_expand_string(const struct m_property *prop_list,
             bstr name = bstr_splice(str, 0, term_pos < 0 ? str.len : term_pos);
             str = bstr_cut(str, term_pos);
             bool have_fallback = bstr_eatstart0(&str, ":");
+
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+            if (n++ > 10)
+                break;
+#endif
 
             if (!skip) {
                 skip = expand_property(prop_list, &ret, &ret_len, name,

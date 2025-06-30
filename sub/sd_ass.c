@@ -60,12 +60,34 @@ struct sd_ass_priv {
     int *packets_animated;
     int num_packets_animated;
     bool check_animated;
-    bool duration_unknown;
 };
 
 struct seen_packet {
     int64_t pos;
     double pts;
+};
+
+#undef OPT_BASE_STRUCT
+#define OPT_BASE_STRUCT struct mp_sub_filter_opts
+
+const struct m_sub_options mp_sub_filter_opts = {
+    .opts = (const struct m_option[]){
+        {"sdh", OPT_BOOL(sub_filter_SDH)},
+        {"sdh-harder", OPT_BOOL(sub_filter_SDH_harder)},
+        {"sdh-enclosures", OPT_STRING(sub_filter_SDH_enclosures)},
+        {"regex-enable", OPT_BOOL(rf_enable)},
+        {"regex-plain", OPT_BOOL(rf_plain)},
+        {"regex", OPT_STRINGLIST(rf_items)},
+        {"jsre", OPT_STRINGLIST(jsre_items)},
+        {"regex-warn", OPT_BOOL(rf_warn)},
+        {0}
+    },
+    .size = sizeof(OPT_BASE_STRUCT),
+    .defaults = &(OPT_BASE_STRUCT){
+        .sub_filter_SDH_enclosures = "([\uFF08",
+        .rf_enable = true,
+    },
+    .change_flags = UPDATE_SUB_FILT,
 };
 
 static void mangle_colors(struct sd *sd, struct sub_bitmaps *parts);
@@ -111,6 +133,7 @@ static void mp_ass_add_default_styles(ASS_Track *track, struct mp_subtitle_opts 
 static const char *const font_mimetypes[] = {
     "application/x-truetype-font",
     "application/vnd.ms-opentype",
+    "application/x-font-otf",
     "application/x-font-ttf",
     "application/x-font", // probably incorrect
     "application/font-sfnt",
@@ -217,7 +240,7 @@ static void assobjects_init(struct sd *sd)
     struct mp_subtitle_opts *opts = sd->opts;
     struct mp_subtitle_shared_opts *shared_opts = sd->shared_opts;
 
-    ctx->ass_library = mp_ass_init(sd->global, sd->opts->sub_style, sd->log);
+
     ass_set_extract_fonts(ctx->ass_library, opts->use_embedded_fonts);
 
     add_subtitle_fonts(sd);
@@ -248,6 +271,10 @@ static void assobjects_init(struct sd *sd)
     ass_set_check_readorder(ctx->ass_track, sd->opts->sub_clear_on_seek ? 0 : 1);
 #endif
 
+#if LIBASS_VERSION >= 0x01703010
+    ass_configure_prune(ctx->ass_track, sd->opts->ass_prune_delay * 1000.0);
+#endif
+
     enable_output(sd, true);
 }
 
@@ -275,9 +302,6 @@ static int init(struct sd *sd)
         ctx->converter = lavc_conv_create(sd);
         if (!ctx->converter)
             return -1;
-
-        if (strcmp(sd->codec->codec, "eia_608") == 0)
-            ctx->duration_unknown = 1;
     }
 
     assobjects_init(sd);
@@ -433,10 +457,7 @@ static void decode(struct sd *sd, struct demux_packet *packet)
                                     &sub_duration);
         if (sd->opts->sub_stretch_durations ||
             packet->duration < 0 || sub_duration == UINT32_MAX) {
-            if (!ctx->duration_unknown) {
-                MP_VERBOSE(sd, "Subtitle with unknown duration.\n");
-                ctx->duration_unknown = true;
-            }
+            MP_VERBOSE(sd, "Subtitle with unknown duration.\n");
             sub_duration = UNKNOWN_DURATION;
         }
 
@@ -449,7 +470,7 @@ static void decode(struct sd *sd, struct demux_packet *packet)
             };
             filter_and_add(sd, &pkt2);
         }
-        if (ctx->duration_unknown) {
+        if (sub_duration == UNKNOWN_DURATION) {
             for (int n = track->n_events - 2; n >= 0; n--) {
                 if (track->events[n].Duration == UNKNOWN_DURATION * 1000) {
                     if (track->events[n].Start != track->events[n + 1].Start) {
@@ -516,8 +537,8 @@ static void configure_ass(struct sd *sd, struct mp_osd_res *dim,
     }
     if (converted || shared_opts->ass_style_override[sd->order]) {
         set_sub_pos = 100.0f - shared_opts->sub_pos[sd->order];
-        set_line_spacing = opts->ass_line_spacing;
-        set_hinting = opts->ass_hinting;
+        set_line_spacing = opts->sub_line_spacing;
+        set_hinting = opts->sub_hinting;
     }
     if (total_override || shared_opts->ass_style_override[sd->order] == ASS_STYLE_OVERRIDE_SCALE) {
         set_font_scale = opts->sub_scale;
@@ -532,16 +553,21 @@ static void configure_ass(struct sd *sd, struct mp_osd_res *dim,
     }
     ass_set_use_margins(priv, set_use_margins);
     ass_set_line_position(priv, set_sub_pos);
-    ass_set_shaper(priv, opts->ass_shaper);
+    ass_set_shaper(priv, opts->sub_shaper);
     int set_force_flags = 0;
     if (total_override) {
         set_force_flags |= ASS_OVERRIDE_BIT_FONT_NAME
                             | ASS_OVERRIDE_BIT_FONT_SIZE_FIELDS
                             | ASS_OVERRIDE_BIT_COLORS
-                            | ASS_OVERRIDE_BIT_BORDER
-                            | ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE;
+                            | ASS_OVERRIDE_BIT_BORDER;
+        if (!opts->sub_scale_signs)
+            set_force_flags |= ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE;
+#if LIBASS_VERSION >= 0x01703020
+        set_force_flags |= ASS_OVERRIDE_BIT_BLUR;
+#endif
     }
-    if (shared_opts->ass_style_override[sd->order] == ASS_STYLE_OVERRIDE_SCALE)
+    if (shared_opts->ass_style_override[sd->order] == ASS_STYLE_OVERRIDE_SCALE &&
+        !opts->sub_scale_signs)
         set_force_flags |= ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE;
     if (converted)
         set_force_flags |= ASS_OVERRIDE_BIT_ALIGNMENT;
@@ -593,9 +619,10 @@ static void configure_ass(struct sd *sd, struct mp_osd_res *dim,
         if (override_playres) {
             int vidw = dim->w - (dim->ml + dim->mr);
             int vidh = dim->h - (dim->mt + dim->mb);
-            int old_playresx = track->PlayResX;
             track->PlayResX = track->PlayResY * (double)vidw / MPMAX(vidh, 1);
-            double fix_margins = track->PlayResX / (double)old_playresx;
+            // ffmpeg and mpv use a default PlayResX of 384 when it is not known,
+            // this comes from VSFilter.
+            double fix_margins = track->PlayResX / (double)MP_ASS_FONT_PLAYRESX;
             for (int n = 0; n < track->n_styles; n++) {
                 track->styles[n].MarginL = lrint(track->styles[n].MarginL * fix_margins);
                 track->styles[n].MarginR = lrint(track->styles[n].MarginR * fix_margins);

@@ -172,7 +172,8 @@ void ra_vk_ctx_uninit(struct ra_ctx *ctx)
 pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
                              pl_vk_inst vkinst,
                              pl_log pllog,
-                             VkSurfaceKHR surface)
+                             VkSurfaceKHR surface,
+                             bool allow_software)
 {
     VkPhysicalDeviceFeatures2 features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -185,6 +186,9 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
     const char *opt_extensions[] = {
         VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
         VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,
+#ifdef VK_EXT_SHADER_OBJECT_EXTENSION_NAME
+        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+#endif
         VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
         VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
         VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
@@ -192,9 +196,18 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
         "VK_KHR_video_decode_av1", /* VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME */
     };
 
+#ifdef VK_EXT_SHADER_OBJECT_EXTENSION_NAME
+    VkPhysicalDeviceShaderObjectFeaturesEXT shader_object_feature = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .shaderObject = true,
+    };
+#endif
+
     VkPhysicalDeviceDescriptorBufferFeaturesEXT descriptor_buffer_feature = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
-        .pNext = NULL,
+#ifdef VK_EXT_SHADER_OBJECT_EXTENSION_NAME
+        .pNext = &shader_object_feature,
+#endif
         .descriptorBuffer = true,
         .descriptorBufferPushDescriptors = true,
     };
@@ -218,6 +231,7 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
         .instance = vkinst->instance,
         .get_proc_addr = vkinst->get_proc_addr,
         .surface = surface,
+        .allow_software = allow_software,
         .async_transfer = opts->async_transfer,
         .async_compute = opts->async_compute,
         .queue_count = opts->queue_count,
@@ -247,7 +261,8 @@ bool ra_vk_ctx_init(struct ra_ctx *ctx, struct mpvk_ctx *vk,
     p->params = params;
     p->opts = mp_get_config_group(p, ctx->global, &vulkan_conf);
 
-    vk->vulkan = mppl_create_vulkan(p->opts, vk->vkinst, vk->pllog, vk->surface);
+    vk->vulkan = mppl_create_vulkan(p->opts, vk->vkinst, vk->pllog, vk->surface,
+                                    ctx->opts.allow_sw);
     if (!vk->vulkan)
         goto error;
 
@@ -302,6 +317,15 @@ char *ra_vk_ctx_get_device_name(struct ra_ctx *ctx)
     return device_name;
 }
 
+static int color_depth(struct ra_swapchain *sw)
+{
+    struct priv *p = sw->priv;
+    if (p->params.color_depth)
+        return p->params.color_depth(sw->ctx);
+
+    return -1;
+}
+
 static bool start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
 {
     struct priv *p = sw->priv;
@@ -351,6 +375,7 @@ static void get_vsync(struct ra_swapchain *sw,
 }
 
 static const struct ra_swapchain_fns vulkan_swapchain = {
+    .color_depth   = color_depth,
     .start_frame   = start_frame,
     .submit_frame  = submit_frame,
     .swap_buffers  = swap_buffers,

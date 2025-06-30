@@ -53,6 +53,7 @@ static const struct flag cmd_flags[] = {
     {"raw",                 MP_EXPAND_PROPERTIES, 0},
     {"repeatable",          MP_DISALLOW_REPEAT, MP_ALLOW_REPEAT},
     {"nonrepeatable",       MP_ALLOW_REPEAT,    MP_DISALLOW_REPEAT},
+    {"nonscalable",         0,               MP_DISALLOW_SCALE},
     {"async",               MP_SYNC_CMD,     MP_ASYNC_CMD},
     {"sync",                MP_ASYNC_CMD,    MP_SYNC_CMD},
     {0}
@@ -618,14 +619,14 @@ bool mp_input_is_repeatable_cmd(struct mp_cmd *cmd)
 
 bool mp_input_is_scalable_cmd(struct mp_cmd *cmd)
 {
-    return cmd->def->scalable;
+    return cmd->def->scalable && !(cmd->flags & MP_DISALLOW_SCALE);
 }
 
 void mp_print_cmd_list(struct mp_log *out)
 {
     for (int i = 0; mp_cmds[i].name; i++) {
         const struct mp_cmd_def *def = &mp_cmds[i];
-        mp_info(out, "%-20.20s", def->name);
+        mp_info(out, "%-25s", def->name);
         for (int j = 0; j < MP_CMD_DEF_MAX_ARGS && def->args[j].type; j++) {
             const struct m_option *arg = &def->args[j];
             bool is_opt = arg->defval || (arg->flags & MP_CMD_OPT_ARG);

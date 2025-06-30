@@ -29,7 +29,7 @@ class MacCommon: Common {
         let log = LogHelper(mp_log_new(vo, vo.pointee.log, "mac"))
         let option = OptionHelper(vo, vo.pointee.global)
         super.init(option, log)
-        self.vo = vo
+        eventsLock.withLock { self.vo = vo }
         input = InputHelper(vo.pointee.input_ctx, option)
         presentation = Presentation(common: self)
         timer = PreciseTimer(common: self)
@@ -41,14 +41,13 @@ class MacCommon: Common {
     }
 
     @objc func config(_ vo: UnsafeMutablePointer<vo>) -> Bool {
-        self.vo = vo
+        eventsLock.withLock { self.vo = vo }
 
         DispatchQueue.main.sync {
             let previousActiveApp = getActiveApp()
             initApp()
 
-            let (_, wr) = getInitProperties(vo)
-
+            let (_, wr, forcePosition) = getInitProperties(vo)
             guard let layer = self.layer else {
                 log.error("Something went wrong, no MetalLayer was initialized")
                 exit(1)
@@ -60,7 +59,9 @@ class MacCommon: Common {
                 initWindowState()
             }
 
-            if (window?.unfsContentFramePixel.size ?? NSSize.zero) != wr.size && option.vo.auto_window_resize {
+            if forcePosition {
+                window?.updateFrame(wr)
+            } else if option.vo.auto_window_resize {
                 window?.updateSize(wr.size)
             }
 
@@ -145,10 +146,6 @@ class MacCommon: Common {
     override func updateDisplaylink() {
         super.updateDisplaylink()
         timer?.updatePolicy(periodSeconds: 1 / currentFps())
-    }
-
-    override func lightSensorUpdate() {
-        flagEvents(VO_EVENT_AMBIENT_LIGHTING_CHANGED)
     }
 
     override func updateICCProfile() {

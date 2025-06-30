@@ -24,6 +24,7 @@
 #include "libmpv/client.h"
 
 #include "audio/aframe.h"
+#include "clipboard/clipboard.h"
 #include "common/common.h"
 #include "filters/f_output_chain.h"
 #include "filters/filter.h"
@@ -140,6 +141,9 @@ struct track {
 
     // Current subtitle state (or cached state if selected==false).
     struct dec_sub *d_sub;
+
+    /* Heuristic for potentially redrawing subs. */
+    bool redraw_subs;
 
     // Current decoding state (NULL if selected==false)
     struct mp_decoder_wrapper *dec;
@@ -283,6 +287,8 @@ typedef struct MPContext {
     bool playback_initialized; // playloop can be run/is running
     int error_playing;
 
+    struct clipboard_ctx *clipboard;
+
     // Return code to use with PT_QUIT
     int quit_custom_rc;
     bool has_quit_custom_rc;
@@ -408,9 +414,6 @@ typedef struct MPContext {
     int last_chapter_seek;
     bool last_chapter_flag;
 
-    /* Heuristic for potentially redrawing subs. */
-    bool redraw_subs;
-
     bool paused;            // internal pause state
     bool playback_active;   // not paused, restarting, loading, unloading
     bool in_playloop;
@@ -481,6 +484,11 @@ struct mp_abort_entry {
                                 // (only valid if client_work_type set)
 };
 
+// U+25CB WHITE CIRCLE
+// U+25CF BLACK CIRCLE
+#define WHITE_CIRCLE "\xe2\x97\x8b"
+#define BLACK_CIRCLE "\xe2\x97\x8f"
+
 // audio.c
 void reset_audio_state(struct MPContext *mpctx);
 void reinit_audio_chain(struct MPContext *mpctx);
@@ -502,6 +510,7 @@ void audio_start_ao(struct MPContext *mpctx);
 void mp_parse_cfgfiles(struct MPContext *mpctx);
 void mp_load_auto_profiles(struct MPContext *mpctx);
 bool mp_load_playback_resume(struct MPContext *mpctx, const char *file);
+char *mp_get_playback_resume_dir(struct MPContext *mpctx);
 void mp_write_watch_later_conf(struct MPContext *mpctx);
 void mp_delete_watch_later_conf(struct MPContext *mpctx, const char *file);
 struct playlist_entry *mp_check_playlist_resume(struct MPContext *mpctx,
@@ -566,6 +575,7 @@ void error_on_track(struct MPContext *mpctx, struct track *track);
 int stream_dump(struct MPContext *mpctx, const char *source_filename);
 double get_track_seek_offset(struct MPContext *mpctx, struct track *track);
 bool str_in_list(bstr str, char **list);
+char *mp_format_track_metadata(void *ctx, struct track *t, bool add_lang);
 
 // osd.c
 void set_osd_bar(struct MPContext *mpctx, int type,

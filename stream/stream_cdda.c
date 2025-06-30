@@ -23,16 +23,12 @@
 
 #include <cdio/cdio.h>
 
-// For cdio_cddap_version
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-prototypes"
 #ifndef TESTING_IS_FINISHED
 // Suppress Wundef warning
 #define TESTING_IS_FINISHED 0
 #endif
 #include <cdio/paranoia/cdda.h>
 #include <cdio/paranoia/paranoia.h>
-#pragma GCC diagnostic pop
 
 #include "common/msg.h"
 #include "config.h"
@@ -254,12 +250,7 @@ static int open_cdda(stream_t *st)
     cdrom_drive_t *cdd = NULL;
     int last_track;
 
-    if (st->path[0]) {
-        p->device = st->path;
-    } else if (p->cdda_device && p->cdda_device[0]) {
-        p->device = p->cdda_device;
-    } else {
-        p->device = DEFAULT_CDROM_DEVICE;
+
     }
 
 #if defined(__NetBSD__)

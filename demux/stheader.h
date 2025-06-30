@@ -90,7 +90,8 @@ struct mp_codec_params {
     unsigned char *extradata;   // codec specific per-stream header
     int extradata_size;
 
-    // Codec specific header data (set by demux_lavf.c only)
+    // Codec specific header data (set by demux_{lavf,mkv,raw}, useful to pass
+    // through stream global side data)
     struct AVCodecParameters *lav_codecpar;
 
     // Timestamp granularity for converting double<->rational timestamps.
@@ -118,7 +119,7 @@ struct mp_codec_params {
     int rotate;           // intended display rotation, in degrees, [0, 359]
     int stereo_mode;      // mp_stereo3d_mode (0 if none/unknown)
     struct pl_color_space color; // colorspace info where available
-    struct pl_color_repr repr;   // color representaion info where available
+    struct pl_color_repr repr;   // color representation info where available
     struct mp_rect crop;         // crop to be applied
 
     bool dovi;

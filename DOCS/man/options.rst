@@ -573,8 +573,8 @@ Playback Control
 
     Known problems:
 
-    - It's fragile. If anything doesn't work, random non-useful behavior may
-      occur. In simple cases, the player will just play nonsense and artifacts.
+    - It's fragile. If anything doesn't work, random behavior may occur.
+      In simple cases, the player will just play nonsense and artifacts.
       In other cases, it may get stuck or heat the CPU. (Exceeding memory usage
       significantly beyond the user-set limits would be a bug, though.)
 
@@ -828,12 +828,15 @@ Program Behavior
 
     ``--scripts`` is a path list option. See `List Options`_ for details.
 
-``--script-opts=key1=value1,key2=value2,...``
+``--script-opt=<key=value>``, ``--script-opts=key1=value1,key2=value2,...``
     Set options for scripts. A script can query an option by key. If an
     option is used and what semantics the option value has depends entirely on
     the loaded scripts. Values not claimed by any scripts are ignored.
 
-    This is a key/value list option. See `List Options`_ for details.
+    Each use of the ``--script-opt`` option will add another option to the
+    internal list, while ``--script-opts`` takes a list of options at once,
+    and overwrites the internal list with it. The latter is a key/value list
+    option. See `List Options`_ for details.
 
 ``--merge-files``
     Pretend that all files passed to mpv are concatenated into a single, big
@@ -907,6 +910,8 @@ Program Behavior
         should use ``%`` before any of the characters ``^$()%|,.[]*+-?`` to
         match that character.
 
+        URLs are converted to lower case before matching.
+
         .. admonition:: Examples
 
             - ``--script-opts=ytdl_hook-exclude='^youtube%.com'``
@@ -916,6 +921,13 @@ Program Behavior
               will exclude any URL that ends with ``.mkv`` or ``.mp4``.
 
         See more lua patterns here: https://www.lua.org/manual/5.1/manual.html#5.4.1
+
+    ``include=<URL1|URL2|...``
+        A ``|``-separated list of URL patterns which mpv should try to parse with
+        youtube-dl first when ``try_ytdl_first`` is ``no``. The patterns are
+        matched in the same way as ``exclude``.
+
+        Default: ``^%w+%.youtube%.com/|^youtube%.com/|^youtu%.be/|^%w+%.twitch%.tv/|^twitch%.tv/``
 
     ``all_formats=<yes|no>``
         If 'yes' will attempt to add all formats found reported by youtube-dl
@@ -976,7 +988,7 @@ Program Behavior
         Add thumbnails as video tracks (default: none).
 
         Thumbnails get downloaded when they are added as tracks, so 'all' can
-        have a noticable impact on how long it takes to open the video when
+        have a noticeable impact on how long it takes to open the video when
         there are a lot of thumbnails.
 
     ``use_manifests=<yes|no>``
@@ -1041,7 +1053,7 @@ Program Behavior
     binding (default: yes). By default, the ``i`` key is used (``I`` to make
     the overlay permanent).
 
-``--load-osd-console=<yes|no>``
+``--load-console=<yes|no>``
     Enable the built-in script that shows a console on a key binding and lets
     you enter commands (default: yes). The ````` key is used to show the
     console by default, and ``ESC`` to hide it again.
@@ -1640,16 +1652,36 @@ Video
     ``--keepaspect=no`` is used.
 
 ``--video-align-x=<-1-1>``, ``--video-align-y=<-1-1>``
-    Moves the video rectangle within the black borders, which are usually added
-    to pad the video to screen if video and screen aspect ratios are different.
-    ``--video-align-y=-1`` would move the video to the top of the screen
-    (leaving a border only on the bottom), a value of ``0`` centers it
-    (default), and a value of ``1`` would put the video at the bottom of the
-    screen.
+    When the video is bigger than the window, these move the displayed rectangle
+    to show different parts of the video. ``--video-align-y=-1`` would display
+    the top of the video, ``0`` would display the center (default), and ``1``
+    would display the bottom.
+
+    When the video is smaller than the window and ``--video-recenter`` is
+    disabled, these move the video rectangle within the black borders, which are
+    usually added to pad the video to the window if video and window aspect
+    ratios are different. ``--video-align-y=-1`` would move the video to the top
+    of the window (leaving a border only on the bottom), ``0`` would center it,
+    and ``1`` would put the video at the bottom of the window.
 
     If video and screen aspect match perfectly, these options do nothing.
 
+    Unlike ``--video-pan-x`` and ``--video-pan-y``, these don't go beyond the
+    video's or window's boundaries or make the displayed rectangle drift off
+    after zooming.
+
     This option is disabled if ``--keepaspect=no`` is used.
+
+``--video-recenter=<yes|no>``
+    Whether to behave as if ``--video-align-x`` and ``--video-align-y`` were 0
+    when the video becomes smaller than the window in the respective direction
+
+    After zooming in until the video is bigger the window, panning with
+    `--video-align-x` and/or `--video-align-y`, and zooming out until the video
+    is smaller than the window, this is useful to recenter the video in the
+    window.
+
+    Default: no.
 
 ``--video-margin-ratio-left=<val>``, ``--video-margin-ratio-right=<val>``, ``--video-margin-ratio-top=<val>``, ``--video-margin-ratio-bottom=<val>``
     Set extra video margins on each border (default: 0). Each value is a ratio
@@ -1969,8 +2001,8 @@ Audio
     Enable exclusive output mode. In this mode, the system is usually locked
     out, and only mpv will be able to output audio.
 
-    This only works for some audio outputs, such as ``wasapi``, ``coreaudio``
-    and ``pipewire``. Other audio outputs silently ignore this option.
+    This only works for some audio outputs, such as ``wasapi``, ``coreaudio``,
+    ``pipewire`` and ``audiounit``. Other audio outputs silently ignore this option.
     They either have no concept of exclusive mode, or the mpv side of the
     implementation is missing.
 
@@ -2283,7 +2315,7 @@ Audio
             directories.
 
 ``--audio-exts=ext1,ext2,...``
-    Audio file extentions to try to match when using ``--audio-file-auto``,
+    Audio file extensions to try to match when using ``--audio-file-auto``,
     ``--autocreate-playlist`` or ``--directory-filter-types``.
 
     This is a string list option. See `List Options`_ for details.
@@ -2415,6 +2447,12 @@ Subtitles
         This affects ASS subtitles as well, and may lead to incorrect subtitle
         rendering. Use with care, or use ``--sub-font-size`` instead.
 
+``--sub-scale-signs=<yes|no>``
+    When set to yes, also apply ``--sub-scale`` to typesetting (or "signs").
+    When this is set to no, ``--sub-scale`` is only applied to dialogue. The
+    distinction between dialogue and typesetting is done on a best effort basis
+    and is not infallible (default: no).
+
 ``--sub-scale-by-window=<yes|no>``
     Whether to scale subtitles with the window size (default: yes). If this is
     disabled while ``--sub-scale-with-window`` is set to yes, changing the window
@@ -2494,7 +2532,7 @@ Subtitles
 
         Using this option may lead to incorrect subtitle rendering.
 
-``--sub-ass-hinting=<none|light|normal|native>``
+``--sub-hinting=<none|light|normal|native>``
     Set font hinting type. <type> can be:
 
     :none:       no hinting (default)
@@ -2509,10 +2547,10 @@ Subtitles
         of animations with some badly authored ASS scripts. It is recommended
         to not use this option, unless really needed.
 
-``--sub-ass-line-spacing=<value>``
+``--sub-line-spacing=<value>``
     Set line spacing value for SSA/ASS renderer.
 
-``--sub-ass-shaper=<simple|complex>``
+``--sub-shaper=<simple|complex>``
     Set the text layout engine used by libass.
 
     :simple:   uses Fribidi only, fast, doesn't render some languages correctly
@@ -2520,6 +2558,22 @@ Subtitles
 
     ``complex`` is the default. If libass hasn't been compiled against HarfBuzz,
     libass silently reverts to ``simple``.
+
+``--sub-ass-prune-delay=<-1|seconds>``
+    Set the delay for automatic pruning of events from memory in libass. When
+    enabled, subtitle events are removed from memory once their end timestamp is
+    older than the specified delay.
+
+    :-1:        disables automatic pruning (default).
+    :seconds:   specify how many seconds after an event is no longer displayed
+                should the pruning occur. ``0`` prunes events as soon as they're
+                off screen.
+
+    .. note::
+
+        This breaks sub-seek and subtitle rendering when changing play-direction
+        from forward to backward during runtime for events that were already
+        "seen" and need to be rendered again, if those events got pruned.
 
 ``--sub-ass-styles=<filename>``
     Load all SSA/ASS styles found in the specified file and use them for
@@ -2533,7 +2587,8 @@ Subtitles
 ``--sub-ass-override=<no|yes|scale|force|strip>``
     Control whether user style overrides should be applied. Note that all of
     these overrides try to be somewhat smart about figuring out whether or not
-    a subtitle is considered a "sign".
+    a subtitle is considered a "sign" and try to be as non-destructive as
+    possible.
 
     :no:    Render subtitles as specified by the subtitle scripts, without
             overrides.
@@ -2542,7 +2597,8 @@ Subtitles
             rendering.
     :scale: Like ``yes``, but also apply ``--sub-scale`` (default).
     :force: Like ``yes``, but also force all ``--sub-*`` options. Can break
-            rendering easily.
+            rendering easily. Certain options aren't overridden if they can
+            potentially be too destructive.
     :strip: Radically strip all ASS tags and styles from the subtitle. This
             is equivalent to the old ``--no-ass`` / ``--no-sub-ass`` options.
 
@@ -2605,7 +2661,7 @@ Subtitles
     default. This also disables libass' incompatible extensions. This currently
     includes bracket pair matching according to the revised Unicode
     Bidirectional Algorithm introduced in Unicode 6.3, and also affects how BiDi
-    runs are split and processed, as well as soft linewrapping of unicode text.
+    runs are split and processed, as well as soft linewrapping of Unicode text.
 
     This affects plaintext (non-ASS) subtitles only. Default: no.
 
@@ -2664,7 +2720,7 @@ Subtitles
     (default: no). Normally, the subtitle canvas is fit into the video canvas
     (e.g. letterboxed). Setting this option uses the video size as subtitle
     canvas size. Can be useful to test broken subtitles, which often happen
-    when the video was trancoded, while attempting to keep the old subtitles.
+    when the video was transcoded, while attempting to keep the old subtitles.
 
 ``--sub-ass=<yes|no>``
     Render ASS subtitles natively (default: yes).
@@ -2698,7 +2754,7 @@ Subtitles
     :all:   Load all subs in the current and ``--sub-file-paths`` directories.
 
 ``--sub-auto-exts=ext1,ext2,...``
-    Subtitle extentions to try and match when using ``--sub-auto``. Note that
+    Subtitle extensions to try and match when using ``--sub-auto``. Note that
     modifying this list will also affect what mpv recognizes as subtitles when
     using drag and drop.
 
@@ -2867,7 +2923,7 @@ Subtitles
     height: if the window height is larger or smaller than 720, the actual size
     of the text increases or decreases as well.
 
-    Default: 55.
+    Default: 38
 
 ``--sub-blur=<0..20.0>``
     Gaussian blur factor applied to the sub font border.
@@ -2895,7 +2951,7 @@ Subtitles
 
     ``--sub-border-size`` is an alias for ``--sub-outline-size``.
 
-    Default: 3.
+    Default: 1.65
 
 ``--sub-border-style=<outline-and-shadow|opaque-box|background-box>``
     The style of the border.
@@ -2920,6 +2976,16 @@ Subtitles
       This corresponds to ``BorderStyle=4``, which is a libass-specific extension.
 
     Default: ``outline-and-shadow``.
+
+    Predefined profiles are available to enable optimized ``background-box`` style
+    for OSD and subtitles.
+
+    .. admonition:: Profiles
+
+        - ``--profile=sub-box`` applies the ``background-box`` style to subtitles
+        - ``--profile=osd-box`` applies the ``background-box`` style to the OSD,
+          including stats and console
+        - ``--profile=box`` applies the ``background-box`` style to both subtitles and OSD
 
 ``--sub-color=<color>``
     Specify the color used for unstyled text subtitles.
@@ -2956,7 +3022,7 @@ Subtitles
     This option specifies the distance of the sub to the left, as well as at
     which distance from the right border long sub text will be broken.
 
-    Default: 25.
+    Default: 19
 
 ``--sub-margin-y=<size>``
     Top and bottom screen margin for the subs in scaled pixels (see
@@ -2965,7 +3031,7 @@ Subtitles
     This option specifies the vertical margins of unstyled text subtitles.
     If you just want to raise the vertical subtitle position, use ``--sub-pos``.
 
-    Default: 22.
+    Default: 34
 
 ``--sub-align-x=<left|center|right>``
     Control to which corner of the screen text subtitles should be
@@ -3230,7 +3296,7 @@ Window
 
 ``--image-display-duration=<seconds|inf>``
     If the current file is an image, play the image for the given amount of
-    seconds (default: 1). ``inf`` means the file is kept open forever (until
+    seconds (default: 5). ``inf`` means the file is kept open forever (until
     the user stops playback manually).
 
     Unlike ``--keep-open``, the player is not paused, but simply continues
@@ -3295,7 +3361,7 @@ Window
 
 ``--ontop-level=<window|system|desktop|level>``
     (macOS only)
-    Sets the level of an ontop window (default: window).
+    Sets the level of an on-top window (default: window).
 
     :window:  On top of all other windows.
     :system:  On top of system elements like Taskbar, Menubar and Dock.
@@ -3351,6 +3417,12 @@ Window
 
     The coordinates are relative to the screen given with ``--screen`` for the
     video output drivers that fully support ``--screen``.
+
+    Some backends update this option at runtime (like all options, it's exposed
+    as property, in this case ``geometry``), and resize their window if the user
+    sets the property. This means the window size is not reset when playing a
+    video with different file. Use ``--reset-on-next-file=geometry`` to get
+    the old behavior.
 
     .. note::
 
@@ -3509,7 +3581,7 @@ Window
 ``--force-window-position``
     Forcefully move mpv's video output window to default location whenever
     there is a change in video parameters, video stream or file. This used to
-    be the default behavior. Currently only affects X11 and SDL VOs.
+    be the default behavior. Currently only affects X11, macvk and SDL VOs.
 
 ``--auto-window-resize=<yes|no>``
     By default, mpv will automatically resize itself if the video's size changes
@@ -3649,9 +3721,9 @@ Window
     is being used.
 
     The auto option enumerates XRandr providers for autodetection. If amd, radeon,
-    intel, or nouveau (the standard x86 Mesa drivers) is found and nvidia is NOT
-    found, presentation feedback is enabled. Other drivers are not assumed to
-    work, so they are not enabled automatically.
+    intel, or nouveau (the standard x86 Mesa drivers) is found presentation
+    feedback is enabled. Other drivers are not assumed to work, so they are not
+    enabled automatically.
 
     ``yes`` or ``no`` can still be passed regardless to enable/disable this
     mechanism in case there is good/bad behavior with whatever your combination
@@ -4152,9 +4224,10 @@ Demuxer
     all. The default is ``auto``, which behaves like ``recursive`` with
     ``--shuffle``, and like ``lazy`` otherwise.
 
-``--directory-filter-types=<video,audio,image>``
+``--directory-filter-types=<video,audio,image,archive,playlist>``
     Media file types to filter when opening directory. If the list is empty,
-    all files are added to the playlist. (Default: ``video,audio,image``)
+    all files are added to the playlist. (Default:
+    ``video,audio,image,archive,playlist``)
 
     This is a string list option. See `List Options`_ for details.
 
@@ -4426,7 +4499,7 @@ OSD
 ``--osd-font-size=<size>``
     Specify the OSD font size. See ``--sub-font-size`` for details.
 
-    Default: 55.
+    Default: 30
 
 ``--osd-msg1=<string>``
     Show this string as message on OSD with OSD level 1 (visible by default).
@@ -4500,6 +4573,23 @@ OSD
 
     Default: 0.5.
 
+``--osd-bar-marker-scale=<0-100>``
+    Factor for the OSD bar marker size relative to the OSD bar outline size.
+
+    Default: 1.3.
+
+``--osd-bar-marker-min-size=<size>``
+    Minimum OSD bar marker size.
+
+    Default: 1.6.
+
+``--osd-bar-marker-style=<none|triangle|line>``
+    Set the OSD bar marker style.
+
+    :none:     Don't draw markers.
+    :triangle: Draw markers as triangles (default).
+    :line:     Draw markers as lines.
+
 ``--osd-blur=<0..20.0>``
     Gaussian blur factor applied to the OSD font border.
     0 means no blur applied (default).
@@ -4526,13 +4616,21 @@ OSD
 
     ``--osd-border-size`` is an alias for ``--osd-outline-size``.
 
-    Default: 3.
+    Default: 1.65
 
 ``--osd-border-style=<outline-and-shadow|opaque-box|background-box>``
     See ``--sub-border-style``. Style used for OSD text border.
 
 ``--osd-color=<color>``
     Specify the color used for OSD.
+    See ``--sub-color`` for details.
+
+``--osd-selected-color=<color>``
+    The color of the selected item in lists.
+    See ``--sub-color`` for details.
+
+``--osd-selected-outline-color=<color>``
+    The outline color of the selected item in lists.
     See ``--sub-color`` for details.
 
 ``--osd-fractions``
@@ -4554,7 +4652,7 @@ OSD
     This option specifies the distance of the OSD to the left, as well as at
     which distance from the right border long OSD text will be broken.
 
-    Default: 25.
+    Default: 16
 
 ``--osd-margin-y=<size>``
     Top and bottom screen margin for the OSD in scaled pixels (see
@@ -4562,7 +4660,7 @@ OSD
 
     This option specifies the vertical margins of the OSD.
 
-    Default: 22.
+    Default: 16
 
 ``--osd-align-x=<left|center|right>``
     Control to which corner of the screen OSD should be
@@ -5473,13 +5571,18 @@ them.
 
     ``ewa_lanczossharp``
         A slightly sharpened version of ``ewa_lanczos``. This is the default
-        when using the ``high-quality`` profile.
+        when using the ``high-quality`` profile. Blur value determined by method
+        originally developed by Nicolas Robidoux for Image Magick, see:
+        https://www.imagemagick.org/discourse-server/viewtopic.php?p=89068#p89068
 
     ``ewa_lanczos4sharpest``
         Very sharp scaler, but also slightly slower than ``ewa_lanczossharp``.
         Prone to ringing, so it's recommended to combine this with an
         anti-ringing shader. On ``--vo=gpu-next``, setting this filter enables
         built-in anti-ringing, so no extra action needs to be taken.
+
+        For more details, see:
+        https://www.imagemagick.org/discourse-server/viewtopic.php?p=128587#p128587
 
     ``mitchell``
         Mitchell-Netravali. Piecewise cubic filter with a support of radius 2.0.
@@ -5595,6 +5698,17 @@ them.
     Note that this doesn't affect the special filters ``bilinear`` and
     ``bicubic_fast``, nor does it affect any polar (EWA) scalers.
 
+    On ``--vo=gpu-next``, this also affects polar (EWA) scalers. Certain
+    filter aliases may also implicitly enable antiringing, regardless of this
+    setting (see ``--scale``).
+
+    .. note::
+
+        When downscaling with separable (orthogonal) filters, setting
+        ``--dscale-antiring`` to a value other than 0.0 (default) will reduce
+        scaler quality and produce aliasing artifacts. On ``--vo=gpu-next``,
+        ``--dscale-antiring`` is disabled for separable (orthogonal) filters.
+
 ``--scale-window=<window>``, ``--cscale-window=<window>``, ``--dscale-window=<window>``, ``--tscale-window=<window>``
     (Advanced users only) Choose a custom windowing function for the kernel.
     Defaults to the filter's preferred window if unset. Use
@@ -5649,6 +5763,9 @@ them.
     ringing artifacts. Enabled by default. This is incompatible with and replaces
     ``--linear-upscaling``. (Note that sigmoidization also requires
     linearization, so the ``LINEAR`` rendering step fires in both cases)
+
+    For more information about sigmoidization, see:
+    https://imagemagick.org/Usage/resize/#resize_sigmoidal
 
 ``--sigmoid-center``
     The center of the sigmoid curve used for ``--sigmoid-upscaling``, must be a
@@ -6279,6 +6396,48 @@ them.
     The shader name is the base part of the shader filename, without the
     extension. (``--vo=gpu-next`` only)
 
+    Some parameters are filled automatically if the shader requests them.
+    Currently following parameters are available:
+
+    ``PTS``
+        PTS of the current frame in seconds.
+
+    ``chroma_offset_x``
+        chroma offset to the reference plane in x direction.
+
+    ``chroma_offset_y``
+        chroma offset to the reference plane in y direction.
+
+    ``min_luma``
+        Minimum luminance value (in cd/m²).
+
+    ``max_luma``
+        Maximum luminance value (in cd/m²).
+
+    ``max_cll``
+        Maximum Content Light Level (in cd/m²).
+
+    ``max_fall``
+        Maximum Frame Average Light Level (in cd/m²).
+
+    ``scene_max_r``
+        Maximum scene light level of the red channel (in cd/m²).
+
+    ``scene_max_g``
+        Maximum scene light level of the green channel (in cd/m²).
+
+    ``scene_max_b``
+        Maximum scene light level of the blue channel (in cd/m²).
+
+    ``scene_avg``
+        Average scene light level (in cd/m²).
+
+    ``max_pq_y``
+        Maximum PQ luminance (in PQ, 0-1).
+
+    ``avg_pq_y``
+        Average PQ luminance (in PQ, 0-1).
+
 ``--deband``
     Enable the debanding algorithm. This greatly reduces the amount of visible
     banding, blocking and other quantization artifacts, at the expense of
@@ -6573,6 +6732,21 @@ them.
     precedence over any other shortcuts, they are not propagated to the mpv core and they can't be
     used in config files like ``input.conf`` or script bindings.
 
+``--macos-bundle-path=path1,path2,...``
+    App Bundles operate in their own shell environment that is different from the one in the
+    terminal. The default PATH variable for all Bundles is ``/usr/bin:/bin:/usr/sbin:/sbin``.
+    Because of that mpv can not find binaries installed by package manager that might be used in
+    scripts for example. This option prepends all given paths to the default Bundle PATH.
+
+    Default value in following order:
+
+    :/usr/local/bin:     homebrew (Intel) install path
+    :/usr/local/sbin:    homebrew (Intel) install path
+    :/opt/local/bin:     MacPorts install path
+    :/opt/local/sbin:    MacPorts install path
+    :/opt/homebrew/bin:  homebrew (ARM) install path
+    :/opt/homebrew/sbin: homebrew (ARM) install path
+
 ``--android-surface-size=<WxH>``
     Set dimensions of the rendering surface used by the Android gpu context.
     Needs to be set by the embedding application if the dimensions change during
@@ -6581,7 +6755,8 @@ them.
     Android with ``--gpu-context=android`` only.
 
 ``--gpu-sw``
-    Continue even if a software renderer is detected.
+    Continue even if a software renderer is detected. This only works with
+    OpenGL/Vulkan backends. For d3d11, see ``--d3d11-warp``.
 
 ``--gpu-context=<context1,context2,...[,]>``
     Specify a priority list of the GPU contexts to be used.
@@ -6670,15 +6845,13 @@ them.
     other ways (like with the ``--gamma`` option or key bindings and the
     ``gamma`` property), the value is multiplied with the other gamma value.
 
-    This option is deprecated and may be removed in the future.
-
 ``--gamma-auto``
     Automatically corrects the gamma value depending on ambient lighting
     conditions (adding a gamma boost for bright rooms).
 
     This option is deprecated and may be removed in the future.
 
-    NOTE: Only implemented on macOS.
+    NOTE: Only implemented on macOS and ``--vo=gpu``.
 
 ``--image-lut=<file>``
     Specifies a custom LUT file (in Adobe .cube format) to apply to the colors
@@ -6703,10 +6876,12 @@ them.
         Fully replaces the color decoding. A LUT of this type should ingest the
         image's native colorspace and output normalized non-linear RGB.
 
-``--target-colorspace-hint``
+``--target-colorspace-hint=<auto|yes|no>``
     Automatically configure the output colorspace of the display to pass
     through the input values of the stream (e.g. for HDR passthrough), if
-    possible. Requires a supporting driver and ``--vo=gpu-next``.
+    possible. In ``auto`` mode (the default), the target colorspace is only set,
+    if the display signals support for HDR colorspace.
+    Requires a supporting driver and ``--vo=gpu-next``. (Default: ``auto``)
 
 ``--target-prim=<value>``
     Specifies the primaries of the display. Video colors will be adapted to
@@ -6804,7 +6979,8 @@ them.
 
     In ``auto`` mode (the default), the chosen peak is an appropriate value
     based on the TRC in use. For SDR curves, it uses 203. For HDR curves, it
-    uses 203 * the transfer function's nominal peak.
+    uses 203 * the transfer function's nominal peak. If available, it will use
+    the target display's peak brightness as reported by the display.
 
     .. note::
 
@@ -6829,6 +7005,7 @@ them.
     black point. Used in black point compensation during HDR tone-mapping.
     ``auto`` is the default and assumes 1000:1 contrast as a typical SDR display
     would have or an infinite contrast when HDR ``--target-trc`` is used.
+    If supported by the API, display contrast will be used as reported.
     ``inf`` contrast specifies display with perfect black level, in practice OLED.
     (Only for ``--vo=gpu-next``)
 
@@ -7257,19 +7434,9 @@ them.
 
     https://libplacebo.org/options/
 
-Miscellaneous
--------------
 
-``--display-tags=tag1,tags2,...``
-    Set the list of tags that should be displayed on the terminal and stats.
-    Tags that are in the list, but are not present in the played file, will not
-    be shown. If a value ends with ``*``, all tags are matched by prefix (though
-    there is no general globbing). Just passing ``*`` essentially filtering.
-
-    The default includes a common list of tags, call mpv with ``--list-options``
-    to see it.
-
-    This is a string list option. See `List Options`_ for details.
+Video Sync
+----------
 
 ``--mc=<seconds/frame>``
     Maximum A-V sync correction per frame (in seconds)
@@ -7423,6 +7590,20 @@ Miscellaneous
     frame dropping due to the audio "overshooting" and skipping multiple video
     frames before the sync logic can react.
 
+Miscellaneous
+-------------
+
+``--display-tags=tag1,tags2,...``
+    Set the list of tags that should be displayed on the terminal and stats.
+    Tags that are in the list, but are not present in the played file, will not
+    be shown. If a value ends with ``*``, all tags are matched by prefix (though
+    there is no general globbing). Just passing ``*`` essentially filtering.
+
+    The default includes a common list of tags, call mpv with ``--list-options``
+    to see it.
+
+    This is a string list option. See `List Options`_ for details.
+
 ``--mf-fps=<value>``
     Framerate used when decoding from multiple PNG or JPEG files with ``mf://``
     (default: 1).
@@ -7477,12 +7658,10 @@ Miscellaneous
 
     .. warning:: Using realtime priority can cause system lockup.
 
-``--media-controls=<yes|player|no>``
+``--media-controls=<yes|no>``
     (Windows only)
     Enable integration of media control interface SystemMediaTransportControls.
-    If set to ``player``, only the player will use the controls. Setting it to
-    ``yes`` will also enable the controls for libmpv integrations.
-    (default: ``player``)
+    Default: yes (except for libmpv)
 
 ``--force-media-title=<string>``
     Force the contents of the ``media-title`` property to this value. Useful
@@ -7541,7 +7720,7 @@ Miscellaneous
     used to disable cover art that is part of the file).
 
 ``--image-exts=ext1,ext2,...``
-    Image file extentions to try to match when using ``--cover-art-auto``,
+    Image file extensions to try to match when using ``--cover-art-auto``,
     ``--autocreate-playlist`` or ``--directory-filter-types``.
 
     This is a string list option. See `List Options`_ for details.
@@ -7557,11 +7736,25 @@ Miscellaneous
     This is a string list option. See `List Options`_ for details.
 
 ``--video-exts=ext1,ext2,...``
-    Video file extentions to try to match when using ``--autocreate-playlist`` or
+    Video file extensions to try to match when using ``--autocreate-playlist`` or
     ``--directory-filter-types``.
 
     This is a string list option. See `List Options`_ for details.
     Use ``--help=video-exts`` to see default extensions.
+
+``--archive-exts=ext1,ext2,...``
+    Archive file extensions to try to match when using ``--autocreate-playlist``
+    or ``--directory-filter-types``.
+
+    This is a string list option. See `List Options`_ for details. Use
+    ``--help=archive-exts`` to see the default extensions.
+
+``--playlist-exts=ext1,ext2,...``
+    Playlist file extensions to try to match when using
+    ``--autocreate-playlist`` or ``--directory-filter-types``.
+
+    This is a string list option. See `List Options`_ for details. Use
+    ``--help=playlist-exts`` to see the default extensions.
 
 ``--autoload-files=<yes|no>``
     Automatically load/select external files (default: yes).
@@ -7665,3 +7858,18 @@ Miscellaneous
     code is the same.)
 
     Conversion is not applied to metadata that is updated at runtime.
+
+``--clipboard-enable=<yes|no>``
+    (Windows, Wayland and macOS only)
+
+    Enable native clipboard support (default: yes). This allows reading and
+    writing to the ``clipboard`` property to get and set clipboard contents.
+
+``--clipboard-monitor=<yes|no>``
+    (Windows and macOS only)
+
+    Enable clipboard monitoring so that the ``clipboard`` property can be
+    observed for content changes (default: no). This only affects clipboard
+    implementations which use polling to monitor clipboard updates.
+    Other platforms currently ignore this option and always/never notify
+    changes.

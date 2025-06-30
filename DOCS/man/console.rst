@@ -3,7 +3,7 @@ CONSOLE
 
 The console is a REPL for mpv input commands. It is displayed on the video
 window. It also shows log messages. It can be disabled entirely using the
-``--load-osd-console=no`` option.
+``--load-console=no`` option.
 
 Keybindings
 -----------
@@ -15,7 +15,8 @@ ESC and Ctrl+[
     Hide the console.
 
 ENTER, Ctrl+j and Ctrl+m
-    Run the typed command.
+    Expand the first completion suggestion if present and if none was selected,
+    and run the typed command.
 
 Shift+ENTER
     Type a literal newline character.
@@ -89,14 +90,25 @@ Shift+INSERT
     Paste text (uses the primary selection on X11 and Wayland).
 
 TAB and Ctrl+i
-    Complete the text at the cursor. The first press inserts the longest common
-    prefix of the completions, and subsequent presses cycle through them.
+    Cycle through completion suggestions.
 
 Shift+TAB
     Cycle through the completions backwards.
 
 Ctrl+l
     Clear all log messages from the console.
+
+MBTN_RIGHT
+    Hide the console.
+
+MBTN_MID
+    Paste text (uses the primary selection on X11 and Wayland).
+
+WHEEL_UP
+    Move back in the command history.
+
+WHEEL_DOWN
+    Move forward in the command history.
 
 Commands
 --------
@@ -112,12 +124,12 @@ Commands
             Enter a percent position to seek to and close the console.
 
         ``Ctrl+o script-message-to console type "loadfile ''; keypress ESC" 11``
-            Enter a file or URL to play. Tab completes paths in the filesystem.
+            Enter a file or URL to play, with autocompletion of paths in the
+            filesystem.
 
 Known issues
 ------------
 
-- Pasting text is slow on Windows
 - Non-ASCII keyboard input has restrictions
 - The cursor keys move between Unicode code-points, not grapheme clusters
 
@@ -135,27 +147,47 @@ Configurable Options
 ~~~~~~~~~~~~~~~~~~~~
 
 ``font``
-    Default: unset (picks a hardcoded font depending on detected platform)
+    Default: a monospace font depending on the platform
 
-    Set the font used for the REPL and the console.
-    This has to be a monospaced font for the completion suggestions to be
-    aligned correctly.
+    Set the font used for the console.
+    A monospaced font is necessary to align completion suggestions correctly in
+    a grid.
+    If the console was opened by calling ``mp.input.select`` and no font was
+    configured, ``--osd-font`` is used, as alignment is not necessary in that
+    case.
 
 ``font_size``
-    Default: 16
+    Default: 24
 
     Set the font size used for the REPL and the console. This will be
-    multiplied by ``display-hidpi-scale``.
+    multiplied by ``display-hidpi-scale`` when the console is not scaled with
+    the window.
 
 ``border_size``
-    Default: 1
+    Default: 1.65
 
     Set the font border size used for the REPL and the console.
+
+``margin_x``
+    Default: same as ``--osd-margin-x``
+
+    The margin from the left of the window.
+
+``margin_y``
+    Default: same as ``--osd-margin-y``
+
+    The margin from the bottom of the window.
+
+``scale_with_window``
+    Default: ``auto``
+
+    Whether to scale the console with the window height. Can be ``yes``, ``no``,
+    or ``auto``, which follows the value of ``--osd-scale-by-window``.
 
 ``case_sensitive``
     Default: no on Windows, yes on other platforms.
 
-    Whether Tab completion is case sensitive. Only works with ASCII characters.
+    Whether autocompletion is case sensitive. Only works with ASCII characters.
 
 ``history_dedup``
     Default: true
@@ -168,3 +200,9 @@ Configurable Options
     The ratio of font height to font width.
     Adjusts table width of completion suggestions.
     Values in the range 1.8..2.5 make sense for common monospace fonts.
+
+``pause_on_open``
+    Default: no
+
+    Whether to pause playback when the console opens, and resume it when the
+    console is closed, if playback was not already paused.

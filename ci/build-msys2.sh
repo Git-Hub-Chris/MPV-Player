@@ -1,18 +1,20 @@
-#!/bin/sh -e
+#!/bin/bash -e
+
+. ./ci/build-common.sh
 
 args=(
-  --werror
-  -Dc_args='-Wno-error=deprecated -Wno-error=deprecated-declarations'
-  -D{d3d-hwaccel,d3d11,dvdnav,jpeg,lcms2,libarchive}=enabled
-  -D{libbluray,lua,shaderc,spirv-cross}=enabled
-  -D{libmpv,tests}=true
+  -D{cdda,d3d-hwaccel,d3d11,dvdnav,jpeg,lcms2,libarchive}=enabled
+  -D{libbluray,lua,shaderc,spirv-cross,uchardet,vapoursynth}=enabled
 )
 
-[[ "$SYS" != "clang32" && "$SYS" != "mingw32" ]] && args+=(
-  -D{cdda,egl-angle-lib,egl-angle-win32,pdf-build}=enabled
-  -D{rubberband,uchardet,vapoursynth,win32-smtc}=enabled
+[[ "$SYS" != "mingw32" ]] && args+=(
+  -D{egl-angle-lib,egl-angle-win32,pdf-build,rubberband,win32-smtc}=enabled
 )
 
-meson setup build "${args[@]}"
+[[ "$SYS" == "clang64" ]] && args+=(
+  -Db_sanitize=address,undefined
+)
+
+meson setup build $common_args "${args[@]}"
 meson compile -C build
 ./build/mpv.com -v --no-config

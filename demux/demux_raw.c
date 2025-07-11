@@ -15,11 +15,8 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "config.h"
-
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <string.h>
 
 #include <libavcodec/avcodec.h>
@@ -54,27 +51,27 @@ struct demux_rawaudio_opts {
 #define OPT_BASE_STRUCT struct demux_rawaudio_opts
 const struct m_sub_options demux_rawaudio_conf = {
     .opts = (const m_option_t[]) {
-        OPT_CHANNELS("channels", channels, 0, .min = 1),
-        OPT_INTRANGE("rate", samplerate, 0, 1000, 8 * 48000),
-        OPT_CHOICE("format", aformat, 0,
-                   ({"u8",      PCM(0, 0,  8, 0)},
-                    {"s8",      PCM(1, 0,  8, 0)},
-                    {"u16le",   PCM(0, 0, 16, 0)}, {"u16be",    PCM(0, 0, 16, 1)},
-                    {"s16le",   PCM(1, 0, 16, 0)}, {"s16be",    PCM(1, 0, 16, 1)},
-                    {"u24le",   PCM(0, 0, 24, 0)}, {"u24be",    PCM(0, 0, 24, 1)},
-                    {"s24le",   PCM(1, 0, 24, 0)}, {"s24be",    PCM(1, 0, 24, 1)},
-                    {"u32le",   PCM(0, 0, 32, 0)}, {"u32be",    PCM(0, 0, 32, 1)},
-                    {"s32le",   PCM(1, 0, 32, 0)}, {"s32be",    PCM(1, 0, 32, 1)},
-                    {"floatle", PCM(0, 1, 32, 0)}, {"floatbe",  PCM(0, 1, 32, 1)},
-                    {"doublele",PCM(0, 1, 64, 0)}, {"doublebe", PCM(0, 1, 64, 1)},
-                    {"u16",     PCM(0, 0, 16, NE)},
-                    {"s16",     PCM(1, 0, 16, NE)},
-                    {"u24",     PCM(0, 0, 24, NE)},
-                    {"s24",     PCM(1, 0, 24, NE)},
-                    {"u32",     PCM(0, 0, 32, NE)},
-                    {"s32",     PCM(1, 0, 32, NE)},
-                    {"float",   PCM(0, 1, 32, NE)},
-                    {"double",  PCM(0, 1, 64, NE)})),
+        {"channels", OPT_CHANNELS(channels), .flags = M_OPT_CHANNELS_LIMITED},
+        {"rate", OPT_INT(samplerate), M_RANGE(1000, 8 * 48000)},
+        {"format", OPT_CHOICE(aformat,
+            {"u8",      PCM(0, 0,  8, 0)},
+            {"s8",      PCM(1, 0,  8, 0)},
+            {"u16le",   PCM(0, 0, 16, 0)},  {"u16be",    PCM(0, 0, 16, 1)},
+            {"s16le",   PCM(1, 0, 16, 0)},  {"s16be",    PCM(1, 0, 16, 1)},
+            {"u24le",   PCM(0, 0, 24, 0)},  {"u24be",    PCM(0, 0, 24, 1)},
+            {"s24le",   PCM(1, 0, 24, 0)},  {"s24be",    PCM(1, 0, 24, 1)},
+            {"u32le",   PCM(0, 0, 32, 0)},  {"u32be",    PCM(0, 0, 32, 1)},
+            {"s32le",   PCM(1, 0, 32, 0)},  {"s32be",    PCM(1, 0, 32, 1)},
+            {"floatle", PCM(0, 1, 32, 0)},  {"floatbe",  PCM(0, 1, 32, 1)},
+            {"doublele",PCM(0, 1, 64, 0)},  {"doublebe", PCM(0, 1, 64, 1)},
+            {"u16",     PCM(0, 0, 16, NE)},
+            {"s16",     PCM(1, 0, 16, NE)},
+            {"u24",     PCM(0, 0, 24, NE)},
+            {"s24",     PCM(1, 0, 24, NE)},
+            {"u32",     PCM(0, 0, 32, NE)},
+            {"s32",     PCM(1, 0, 32, NE)},
+            {"float",   PCM(0, 1, 32, NE)},
+            {"double",  PCM(0, 1, 64, NE)})},
         {0}
     },
     .size = sizeof(struct demux_rawaudio_opts),
@@ -107,13 +104,13 @@ struct demux_rawvideo_opts {
 #define OPT_BASE_STRUCT struct demux_rawvideo_opts
 const struct m_sub_options demux_rawvideo_conf = {
     .opts = (const m_option_t[]) {
-        OPT_INTRANGE("w", width, 0, 1, 8192),
-        OPT_INTRANGE("h", height, 0, 1, 8192),
-        OPT_GENERAL(int, "format", vformat, 0, .type = &m_option_type_fourcc),
-        OPT_IMAGEFORMAT("mp-format", mp_format, 0),
-        OPT_STRING("codec", codec, 0),
-        OPT_FLOATRANGE("fps", fps, 0, 0.001, 1000),
-        OPT_INTRANGE("size", imgsize, 0, 1, 8192 * 8192 * 4),
+        {"w", OPT_INT(width), M_RANGE(1, 8192)},
+        {"h", OPT_INT(height), M_RANGE(1, 8192)},
+        {"format", OPT_FOURCC(vformat)},
+        {"mp-format", OPT_IMAGEFORMAT(mp_format)},
+        {"codec", OPT_STRING(codec)},
+        {"fps", OPT_FLOAT(fps), M_RANGE(0.001, 1000)},
+        {"size", OPT_INT(imgsize), M_RANGE(1, 8192 * 8192 * 4)},
         {0}
     },
     .size = sizeof(struct demux_rawvideo_opts),
@@ -137,8 +134,8 @@ static int generic_open(struct demuxer *demuxer)
     struct stream *s = demuxer->stream;
     struct priv *p = demuxer->priv;
 
-    int64_t end = 0;
-    if (stream_control(s, STREAM_CTRL_GET_SIZE, &end) == STREAM_OK)
+    int64_t end = stream_get_size(s);
+    if (end >= 0)
         demuxer->duration = (end / p->frame_size) / p->frame_rate;
 
     return 0;
@@ -247,8 +244,7 @@ static int demux_rawvideo_open(demuxer_t *demuxer, enum demux_check check)
     c->disp_h = height;
     if (mp_imgfmt) {
         c->lav_codecpar = avcodec_parameters_alloc();
-        if (!c->lav_codecpar)
-            abort();
+        MP_HANDLE_OOM(c->lav_codecpar);
         c->lav_codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
         c->lav_codecpar->codec_id = mp_codec_to_av_codec_id(decoder);
         c->lav_codecpar->format = imgfmt2pixfmt(mp_imgfmt);
@@ -269,41 +265,45 @@ static int demux_rawvideo_open(demuxer_t *demuxer, enum demux_check check)
     return generic_open(demuxer);
 }
 
-static int raw_fill_buffer(demuxer_t *demuxer)
+static bool raw_read_packet(struct demuxer *demuxer, struct demux_packet **pkt)
 {
     struct priv *p = demuxer->priv;
 
     if (demuxer->stream->eof)
-        return 0;
+        return false;
 
     struct demux_packet *dp = new_demux_packet(p->frame_size * p->read_frames);
     if (!dp) {
         MP_ERR(demuxer, "Can't read packet.\n");
-        return 1;
+        return true;
     }
 
+    dp->keyframe = true;
     dp->pos = stream_tell(demuxer->stream);
     dp->pts = (dp->pos  / p->frame_size) / p->frame_rate;
 
     int len = stream_read(demuxer->stream, dp->buffer, dp->len);
     demux_packet_shorten(dp, len);
-    demux_add_packet(p->sh, dp);
 
-    return 1;
+    dp->stream = p->sh->index;
+    *pkt = dp;
+
+    return true;
 }
 
 static void raw_seek(demuxer_t *demuxer, double seek_pts, int flags)
 {
     struct priv *p = demuxer->priv;
     stream_t *s = demuxer->stream;
-    int64_t end = 0;
-    stream_control(s, STREAM_CTRL_GET_SIZE, &end);
-    int64_t pos = seek_pts * p->frame_rate * p->frame_size;
+    int64_t end = stream_get_size(s);
+    int64_t frame_nr = seek_pts * p->frame_rate;
+    frame_nr = frame_nr - (frame_nr % p->read_frames);
+    int64_t pos = frame_nr * p->frame_size;
     if (flags & SEEK_FACTOR)
         pos = end * seek_pts;
     if (pos < 0)
         pos = 0;
-    if (end && pos > end)
+    if (end > 0 && pos > end)
         pos = end;
     stream_seek(s, (pos / p->frame_size) * p->frame_size);
 }
@@ -312,7 +312,7 @@ const demuxer_desc_t demuxer_desc_rawaudio = {
     .name = "rawaudio",
     .desc = "Uncompressed audio",
     .open = demux_rawaudio_open,
-    .fill_buffer = raw_fill_buffer,
+    .read_packet = raw_read_packet,
     .seek = raw_seek,
 };
 
@@ -320,6 +320,6 @@ const demuxer_desc_t demuxer_desc_rawvideo = {
     .name = "rawvideo",
     .desc = "Uncompressed video",
     .open = demux_rawvideo_open,
-    .fill_buffer = raw_fill_buffer,
+    .read_packet = raw_read_packet,
     .seek = raw_seek,
 };

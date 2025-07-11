@@ -1,12 +1,18 @@
 #include <math.h>
 
+#include "audio/aframe.h"
+#include "audio/format.h"
 #include "common/common.h"
 #include "common/msg.h"
 #include "options/m_config.h"
 #include "options/options.h"
+#include "video/filter/refqueue.h"
 #include "video/mp_image.h"
+#include "video/mp_image_pool.h"
 
 #include "f_auto_filters.h"
+#include "f_autoconvert.h"
+#include "f_hwtransfer.h"
 #include "f_swscale.h"
 #include "f_utils.h"
 #include "filter.h"
@@ -16,7 +22,7 @@
 struct deint_priv {
     struct mp_subfilter sub;
     int prev_imgfmt;
-    int prev_setting;
+    bool deinterlace_active;
     struct m_config_cache *opts;
 };
 
@@ -40,15 +46,18 @@ static void deint_process(struct mp_filter *f)
         return;
     }
 
+    struct mp_image *img = frame.data;
+    bool interlaced = img->fields & MP_IMGFIELD_INTERLACED;
+
     m_config_cache_update(p->opts);
     struct filter_opts *opts = p->opts->opts;
+    bool should_deinterlace = (opts->deinterlace == -1 && interlaced) ||
+                               opts->deinterlace == 1;
 
-    if (!opts->deinterlace)
+    if (!should_deinterlace)
         mp_subfilter_destroy(&p->sub);
 
-    struct mp_image *img = frame.data;
-
-    if (img->imgfmt == p->prev_imgfmt && p->prev_setting == opts->deinterlace) {
+    if (img->imgfmt == p->prev_imgfmt && p->deinterlace_active == should_deinterlace) {
         mp_subfilter_continue(&p->sub);
         return;
     }
@@ -59,34 +68,84 @@ static void deint_process(struct mp_filter *f)
     assert(!p->sub.filter);
 
     p->prev_imgfmt = img->imgfmt;
-    p->prev_setting = opts->deinterlace;
-    if (!p->prev_setting) {
+    p->deinterlace_active = should_deinterlace;
+    if (!p->deinterlace_active) {
         mp_subfilter_continue(&p->sub);
         return;
     }
 
+    char *field_parity;
+    switch (opts->field_parity) {
+    case MP_FIELD_PARITY_TFF:
+        field_parity = "tff";
+        break;
+    case MP_FIELD_PARITY_BFF:
+        field_parity = "bff";
+        break;
+    default:
+        field_parity = "auto";
+    }
+
+    bool has_filter = true;
     if (img->imgfmt == IMGFMT_VDPAU) {
-        char *args[] = {"deint", "yes", NULL};
+        char *args[] = {"deint", "yes",
+                        "parity", field_parity, NULL};
         p->sub.filter =
             mp_create_user_filter(f, MP_OUTPUT_CHAIN_VIDEO, "vdpaupp", args);
-    } else if (img->imgfmt == IMGFMT_VAAPI) {
-        p->sub.filter =
-            mp_create_user_filter(f, MP_OUTPUT_CHAIN_VIDEO, "vavpp", NULL);
     } else if (img->imgfmt == IMGFMT_D3D11) {
+        char *args[] = {"deint", "yes",
+                        "parity", field_parity, NULL};
         p->sub.filter =
-            mp_create_user_filter(f, MP_OUTPUT_CHAIN_VIDEO, "d3d11vpp", NULL);
-    } else if (mp_sws_supports_input(img->imgfmt)) {
-        char *args[] = {"mode", "send_field", NULL};
+            mp_create_user_filter(f, MP_OUTPUT_CHAIN_VIDEO, "d3d11vpp", args);
+    } else if (img->imgfmt == IMGFMT_CUDA) {
+        char *args[] = {"mode", "send_field",
+                        "parity", field_parity, NULL};
         p->sub.filter =
-            mp_create_user_filter(f, MP_OUTPUT_CHAIN_VIDEO, "yadif", args);
+            mp_create_user_filter(f, MP_OUTPUT_CHAIN_VIDEO, "bwdif_cuda", args);
+    } else if (img->imgfmt == IMGFMT_VULKAN) {
+        char *args[] = {"mode", "send_field",
+                        "parity", field_parity, NULL};
+        p->sub.filter =
+            mp_create_user_filter(f, MP_OUTPUT_CHAIN_VIDEO, "bwdif_vulkan", args);
+    } else if (img->imgfmt == IMGFMT_VAAPI) {
+        char *args[] = {"deint", "motion-adaptive",
+                        "parity", field_parity, NULL};
+        p->sub.filter =
+            mp_create_user_filter(f, MP_OUTPUT_CHAIN_VIDEO, "vavpp", args);
     } else {
-        MP_ERR(f, "no deinterlace filter available for this format\n");
-        mp_subfilter_continue(&p->sub);
-        return;
+        has_filter = false;
     }
 
-    if (!p->sub.filter)
-        MP_ERR(f, "creating deinterlacer failed\n");
+    if (!p->sub.filter) {
+        if (has_filter)
+            MP_ERR(f, "creating deinterlacer failed\n");
+
+        struct mp_filter *subf = mp_bidir_dummy_filter_create(f);
+        struct mp_filter *filters[2] = {0};
+
+        struct mp_autoconvert *ac = mp_autoconvert_create(subf);
+        if (ac) {
+            filters[0] = ac->f;
+            // We know vf_bwdif does not support hw inputs.
+            mp_autoconvert_add_all_sw_imgfmts(ac);
+
+            if (!mp_autoconvert_probe_input_video(ac, img)) {
+                MP_ERR(f, "no deinterlace filter available for format %s\n",
+                       mp_imgfmt_to_name(img->imgfmt));
+                talloc_free(subf);
+                mp_subfilter_continue(&p->sub);
+                return;
+            }
+        }
+
+        char *args[] = {"mode", "send_field",
+                        "parity", field_parity, NULL};
+        filters[1] =
+            mp_create_user_filter(subf, MP_OUTPUT_CHAIN_VIDEO, "bwdif", args);
+
+        mp_chain_filters(subf->ppins[0], subf->ppins[1], filters, 2);
+        p->sub.filter = subf;
+    }
 
     mp_subfilter_continue(&p->sub);
 }
@@ -125,6 +184,12 @@ static const struct mp_filter_info deint_filter = {
     .reset = deint_reset,
     .destroy = deint_destroy,
 };
+
+bool mp_deint_active(struct mp_filter *f)
+{
+    struct deint_priv *p = f->priv;
+    return p->deinterlace_active;
+}
 
 struct mp_filter *mp_deint_create(struct mp_filter *parent)
 {
@@ -269,7 +334,8 @@ struct mp_filter *mp_autorotate_create(struct mp_filter *parent)
 
 struct aspeed_priv {
     struct mp_subfilter sub;
-    double cur_speed;
+    double cur_speed, cur_speed_drop;
+    int current_filter;
 };
 
 static void aspeed_process(struct mp_filter *f)
@@ -279,26 +345,48 @@ static void aspeed_process(struct mp_filter *f)
     if (!mp_subfilter_read(&p->sub))
         return;
 
-    if (fabs(p->cur_speed - 1.0) < 1e-8) {
+    if (!p->sub.filter)
+        p->current_filter = 0;
+
+    double speed = p->cur_speed * p->cur_speed_drop;
+
+    int req_filter = 0;
+    if (fabs(speed - 1.0) >= 1e-8) {
+        req_filter = p->cur_speed_drop == 1.0 ? 1 : 2;
+        if (p->sub.frame.type == MP_FRAME_AUDIO &&
+            !af_fmt_is_pcm(mp_aframe_get_format(p->sub.frame.data)))
+            req_filter = 2;
+    }
+
+    if (req_filter != p->current_filter) {
         if (p->sub.filter)
-            MP_VERBOSE(f, "removing scaletempo\n");
+            MP_VERBOSE(f, "removing audio speed filter\n");
         if (!mp_subfilter_drain_destroy(&p->sub))
             return;
-    } else if (!p->sub.filter) {
-        MP_VERBOSE(f, "adding scaletempo\n");
-        p->sub.filter =
-            mp_create_user_filter(f, MP_OUTPUT_CHAIN_AUDIO, "scaletempo", NULL);
-        if (!p->sub.filter) {
-            MP_ERR(f, "could not create scaletempo filter\n");
-            mp_subfilter_continue(&p->sub);
-            return;
+
+        if (req_filter) {
+            if (req_filter == 1) {
+                MP_VERBOSE(f, "adding scaletempo2\n");
+                p->sub.filter = mp_create_user_filter(f, MP_OUTPUT_CHAIN_AUDIO,
+                                                      "scaletempo2", NULL);
+            } else if (req_filter == 2) {
+                MP_VERBOSE(f, "adding drop\n");
+                p->sub.filter = mp_create_user_filter(f, MP_OUTPUT_CHAIN_AUDIO,
+                                                      "drop", NULL);
+            }
+            if (!p->sub.filter) {
+                MP_ERR(f, "could not create filter\n");
+                mp_subfilter_continue(&p->sub);
+                return;
+            }
+            p->current_filter = req_filter;
         }
     }
 
     if (p->sub.filter) {
         struct mp_filter_command cmd = {
             .type = MP_FILTER_COMMAND_SET_SPEED,
-            .speed = p->cur_speed,
+            .speed = speed,
         };
         mp_filter_command(p->sub.filter, &cmd);
     }
@@ -312,6 +400,11 @@ static bool aspeed_command(struct mp_filter *f, struct mp_filter_command *cmd)
 
     if (cmd->type == MP_FILTER_COMMAND_SET_SPEED) {
         p->cur_speed = cmd->speed;
+        return true;
+    }
+
+    if (cmd->type == MP_FILTER_COMMAND_SET_SPEED_DROP) {
+        p->cur_speed_drop = cmd->speed;
         return true;
     }
 
@@ -355,6 +448,7 @@ struct mp_filter *mp_autoaspeed_create(struct mp_filter *parent)
 
     struct aspeed_priv *p = f->priv;
     p->cur_speed = 1.0;
+    p->cur_speed_drop = 1.0;
 
     p->sub.in = mp_filter_add_pin(f, MP_PIN_IN, "in");
     p->sub.out = mp_filter_add_pin(f, MP_PIN_OUT, "out");

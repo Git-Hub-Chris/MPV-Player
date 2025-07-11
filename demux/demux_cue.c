@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
-#include <dirent.h>
 #include <inttypes.h>
 
 #include "osdep/io.h"
@@ -28,8 +27,11 @@
 #include "mpv_talloc.h"
 
 #include "misc/bstr.h"
+#include "misc/charset_conv.h"
 #include "common/msg.h"
 #include "demux/demux.h"
+#include "options/m_config.h"
+#include "options/m_option.h"
 #include "options/path.h"
 #include "common/common.h"
 #include "stream/stream.h"
@@ -58,7 +60,11 @@ static bool try_open(struct timeline *tl, char *filename)
         || bstrcasecmp(bstr0(tl->demuxer->filename), bfilename) == 0)
         return false;
 
-    struct demuxer *d = demux_open_url(filename, NULL, tl->cancel, tl->global);
+    struct demuxer_params p = {
+        .stream_flags = tl->stream_origin,
+    };
+
+    struct demuxer *d = demux_open_url(filename, &p, tl->cancel, tl->global);
     // Since .bin files are raw PCM data with no headers, we have to explicitly
     // open them. Also, try to avoid to open files that are most likely not .bin
     // files, as that would only play noise. Checking the file extension is
@@ -67,7 +73,7 @@ static bool try_open(struct timeline *tl, char *filename)
     //       CD sector size (2352 bytes)
     if (!d && bstr_case_endswith(bfilename, bstr0(".bin"))) {
         MP_WARN(tl, "CUE: Opening as BIN file!\n");
-        struct demuxer_params p = {.force_format = "rawaudio"};
+        p.force_format = "rawaudio";
         d = demux_open_url(filename, &p, tl->cancel, tl->global);
     }
     if (d) {
@@ -210,6 +216,7 @@ static void build_timeline(struct timeline *tl)
         }
         timeline[i] = (struct timeline_part) {
             .start = starttime,
+            .end = starttime + duration,
             .source_start = tracks[i].start,
             .source = source,
         };
@@ -217,23 +224,21 @@ static void build_timeline(struct timeline *tl)
             .pts = timeline[i].start,
             .metadata = mp_tags_dup(tl, tracks[i].tags),
         };
-        starttime += duration;
+        starttime = timeline[i].end;
     }
 
-    // apparently we need this to give the last part a non-zero length
-    timeline[track_count] = (struct timeline_part) {
-        .start = starttime,
-        // perhaps unused by the timeline code
-        .source_start = 0,
-        .source = timeline[0].source,
+    struct timeline_par *par = talloc_ptrtype(tl, par);
+    *par = (struct timeline_par){
+        .parts = timeline,
+        .num_parts = track_count,
+        .track_layout = timeline[0].source,
     };
 
-    tl->parts = timeline;
-    // the last part is not included it in the count
-    tl->num_parts = track_count + 1 - 1;
     tl->chapters = chapters;
     tl->num_chapters = track_count;
-    tl->track_layout = tl->parts[0].source;
+    MP_TARRAY_APPEND(tl, tl->pars, tl->num_pars, par);
+    tl->meta = par->track_layout;
+    tl->format = "cue";
 
 out:
     talloc_free(ctx);
@@ -246,23 +251,38 @@ static int try_open_file(struct demuxer *demuxer, enum demux_check check)
 
     struct stream *s = demuxer->stream;
     if (check >= DEMUX_CHECK_UNSAFE) {
-        bstr d = stream_peek(s, PROBE_SIZE);
-        if (d.len < 1 || !mp_probe_cue(d))
+        char probe[PROBE_SIZE];
+        int len = stream_read_peek(s, probe, sizeof(probe));
+        if (len < 1 || !mp_probe_cue((bstr){probe, len}))
             return -1;
     }
     struct priv *p = talloc_zero(demuxer, struct priv);
     demuxer->priv = p;
     demuxer->fully_read = true;
-
     bstr data = stream_read_complete(s, p, 1000000);
     if (data.start == NULL)
         return -1;
+
+    struct demux_opts *opts = mp_get_config_group(p, demuxer->global, &demux_conf);
+    const char *charset = mp_charset_guess(p, demuxer->log, data, opts->meta_cp, 0);
+    if (charset && !mp_charset_is_utf8(charset)) {
+        MP_INFO(demuxer, "Using CUE charset: %s\n", charset);
+        bstr utf8 = mp_iconv_to_utf8(demuxer->log, data, charset, MP_ICONV_VERBOSE);
+        if (utf8.start && utf8.start != data.start) {
+            ta_steal(data.start, utf8.start);
+            data = utf8;
+        }
+    }
+    talloc_free(opts);
+
     p->f = mp_parse_cue(data);
     talloc_steal(p, p->f);
     if (!p->f) {
         MP_ERR(demuxer, "error parsing input file!\n");
         return -1;
     }
+
+    demux_close_stream(demuxer);
 
     mp_tags_merge(demuxer->metadata, p->f->tags);
     return 0;

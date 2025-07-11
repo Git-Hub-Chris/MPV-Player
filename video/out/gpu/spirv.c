@@ -5,31 +5,24 @@
 #include "config.h"
 
 extern const struct spirv_compiler_fns spirv_shaderc;
-extern const struct spirv_compiler_fns spirv_nvidia_builtin;
 
 // in probe-order
 enum {
     SPIRV_AUTO = 0,
     SPIRV_SHADERC, // generally preferred, but not packaged everywhere
-    SPIRV_NVIDIA,  // can be useful for testing, only available on nvidia
 };
 
 static const struct spirv_compiler_fns *compilers[] = {
 #if HAVE_SHADERC
     [SPIRV_SHADERC] = &spirv_shaderc,
 #endif
-#if HAVE_VULKAN
-    [SPIRV_NVIDIA]  = &spirv_nvidia_builtin,
-#endif
+    NULL
 };
 
 static const struct m_opt_choice_alternatives compiler_choices[] = {
     {"auto",        SPIRV_AUTO},
 #if HAVE_SHADERC
     {"shaderc",     SPIRV_SHADERC},
-#endif
-#if HAVE_VULKAN
-    {"nvidia",      SPIRV_NVIDIA},
 #endif
     {0}
 };
@@ -41,7 +34,7 @@ struct spirv_opts {
 #define OPT_BASE_STRUCT struct spirv_opts
 const struct m_sub_options spirv_conf = {
     .opts = (const struct m_option[]) {
-        OPT_CHOICE_C("spirv-compiler", compiler, 0, compiler_choices),
+        {"spirv-compiler", OPT_CHOICE_C(compiler, compiler_choices)},
         {0}
     },
     .size = sizeof(struct spirv_opts),
@@ -65,7 +58,7 @@ bool spirv_compiler_init(struct ra_ctx *ctx)
         ctx->spirv->fns = compilers[i];
 
         const char *name = m_opt_choice_str(compiler_choices, i);
-        strncpy(ctx->spirv->name, name, sizeof(ctx->spirv->name));
+        strncpy(ctx->spirv->name, name, sizeof(ctx->spirv->name) - 1);
         MP_VERBOSE(ctx, "Initializing SPIR-V compiler '%s'\n", name);
         if (ctx->spirv->fns->init(ctx))
             return true;

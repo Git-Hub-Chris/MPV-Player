@@ -1,28 +1,26 @@
-#include "config.h"
-
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 
 #include "osdep/io.h"
 
 #include "common/common.h"
 #include "common/msg.h"
-#include "common/global.h"
 #include "stream.h"
 #include "options/m_option.h"
 #include "options/path.h"
 #include "player/client.h"
 #include "libmpv/stream_cb.h"
+#include "misc/thread_tools.h"
 
 struct priv {
     mpv_stream_cb_info info;
+    struct mp_cancel *cancel;
 };
 
-static int fill_buffer(stream_t *s, char *buffer, int max_len)
+static int fill_buffer(stream_t *s, void *buffer, int max_len)
 {
     struct priv *p = s->priv;
     return (int)p->info.read_fn(p->info.cookie, buffer, (size_t)max_len);
@@ -34,22 +32,17 @@ static int seek(stream_t *s, int64_t newpos)
     return p->info.seek_fn(p->info.cookie, newpos) >= 0;
 }
 
-static int control(stream_t *s, int cmd, void *arg)
+static int64_t get_size(stream_t *s)
 {
     struct priv *p = s->priv;
-    switch (cmd) {
-    case STREAM_CTRL_GET_SIZE: {
-        if (!p->info.size_fn)
-            break;
+
+    if (p->info.size_fn) {
         int64_t size = p->info.size_fn(p->info.cookie);
-        if (size >= 0) {
-            *(int64_t *)arg = size;
-            return 1;
-        }
-        break;
+        if (size >= 0)
+            return size;
     }
-    }
-    return STREAM_UNSUPPORTED;
+
+    return -1;
 }
 
 static void s_close(stream_t *s)
@@ -94,9 +87,14 @@ static int open_cb(stream_t *stream)
     }
     stream->fast_skip = true;
     stream->fill_buffer = fill_buffer;
-    stream->control = control;
-    stream->read_chunk = 64 * 1024;
+    stream->get_size = get_size;
     stream->close = s_close;
+
+    if (p->info.cancel_fn && stream->cancel) {
+        p->cancel = mp_cancel_new(p);
+        mp_cancel_set_parent(p->cancel, stream->cancel);
+        mp_cancel_set_cb(p->cancel, p->info.cancel_fn, p->info.cookie);
+    }
 
     return STREAM_OK;
 }
@@ -104,4 +102,5 @@ static int open_cb(stream_t *stream)
 const stream_info_t stream_info_cb = {
     .name = "stream_callback",
     .open = open_cb,
+    .stream_origin = STREAM_ORIGIN_UNSAFE,
 };

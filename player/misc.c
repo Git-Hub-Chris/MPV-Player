@@ -15,12 +15,12 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stddef.h>
-#include <stdbool.h>
-#include <errno.h>
 #include <assert.h>
+#include <errno.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stddef.h>
 
-#include "config.h"
 #include "mpv_talloc.h"
 
 #include "osdep/io.h"
@@ -32,7 +32,6 @@
 #include "options/m_property.h"
 #include "options/m_config.h"
 #include "common/common.h"
-#include "common/global.h"
 #include "common/encode.h"
 #include "common/playlist.h"
 #include "input/input.h"
@@ -45,134 +44,100 @@
 #include "core.h"
 #include "command.h"
 
+const int num_ptracks[STREAM_TYPE_COUNT] = {
+    [STREAM_VIDEO] = 1,
+    [STREAM_AUDIO] = 1,
+    [STREAM_SUB] = 2,
+};
+
 double rel_time_to_abs(struct MPContext *mpctx, struct m_rel_time t)
 {
     double length = get_time_length(mpctx);
-    // declaration up here because of C grammar quirk
-    double chapter_start_pts;
+    // Relative times are an offset to the start of the file.
+    double start = 0;
+    if (mpctx->demuxer && !mpctx->opts->rebase_start_time)
+        start = mpctx->demuxer->start_time;
+
     switch (t.type) {
     case REL_TIME_ABSOLUTE:
         return t.pos;
     case REL_TIME_RELATIVE:
         if (t.pos >= 0) {
-            return t.pos;
+            return start + t.pos;
         } else {
             if (length >= 0)
-                return MPMAX(length + t.pos, 0.0);
+                return start + MPMAX(length + t.pos, 0.0);
         }
         break;
     case REL_TIME_PERCENT:
         if (length >= 0)
-            return length * (t.pos / 100.0);
+            return start + length * (t.pos / 100.0);
         break;
     case REL_TIME_CHAPTER:
-        chapter_start_pts = chapter_start_time(mpctx, t.pos);
-        if (chapter_start_pts != MP_NOPTS_VALUE){
-            /*
-             * rel_time_to_abs always returns rebased timetamps,
-             * even with --rebase-start-time=no. (See the above two
-             * cases.) chapter_start_time values are not rebased without
-             * --rebase-start-time=yes, so we need to rebase them
-             * here to be consistent with the rest of rel_time_to_abs.
-             */
-            if (mpctx->demuxer && !mpctx->opts->rebase_start_time){
-                chapter_start_pts -= mpctx->demuxer->start_time;
-            }
-            return chapter_start_pts;
-        }
-        break;
+        return chapter_start_time(mpctx, t.pos); // already absolute time
     }
+
     return MP_NOPTS_VALUE;
 }
 
-double get_play_end_pts(struct MPContext *mpctx)
+static double get_play_end_pts_setting(struct MPContext *mpctx)
 {
     struct MPOpts *opts = mpctx->opts;
-    double end = MP_NOPTS_VALUE;
-    if (opts->play_end.type) {
-        end = rel_time_to_abs(mpctx, opts->play_end);
-    }
-    if (opts->play_length.type) {
+    double end = rel_time_to_abs(mpctx, opts->play_end);
+    double length = rel_time_to_abs(mpctx, opts->play_length);
+    if (length != MP_NOPTS_VALUE) {
         double start = get_play_start_pts(mpctx);
-        if (start == MP_NOPTS_VALUE)
-            start = 0;
-        double length = rel_time_to_abs(mpctx, opts->play_length);
-        if (length != MP_NOPTS_VALUE && (end == MP_NOPTS_VALUE || start + length < end))
+        if (end == MP_NOPTS_VALUE || start + length < end)
             end = start + length;
-    }
-    if (opts->chapterrange[1] > 0) {
-        double cend = chapter_start_time(mpctx, opts->chapterrange[1]);
-        if (cend != MP_NOPTS_VALUE && (end == MP_NOPTS_VALUE || cend < end))
-            end = cend;
-    }
-    // even though MP_NOPTS_VALUE is currently negative
-    // it doesn't necessarily have to remain that way
-    double ab_loop_start_time = get_ab_loop_start_time(mpctx);
-    if (mpctx->ab_loop_clip && opts->ab_loop[1] != MP_NOPTS_VALUE &&
-        (ab_loop_start_time == MP_NOPTS_VALUE || opts->ab_loop[1] > ab_loop_start_time))
-    {
-        if (end == MP_NOPTS_VALUE || end > opts->ab_loop[1])
-            end = opts->ab_loop[1];
     }
     return end;
 }
 
-/**
- * Get the rebased PTS for which playback should start.
- * The order of priority is as follows:
- *   1. --start, if set.
- *   2. The start chapter, if set.
- *   3. MP_NOPTS_VALUE.
- * If unspecified, return MP_NOPTS_VALUE.
- * Does not return zero unless the start time is explicitly set to zero.
- */
+// Return absolute timestamp against which currently playing media should be
+// clipped. Returns MP_NOPTS_VALUE if no clipping should happen.
+double get_play_end_pts(struct MPContext *mpctx)
+{
+    double end = get_play_end_pts_setting(mpctx);
+    double ab[2];
+    if (mpctx->ab_loop_clip && get_ab_loop_times(mpctx, ab)) {
+        if (end == MP_NOPTS_VALUE || end > ab[1])
+            end = ab[1];
+    }
+    return end;
+}
+
+// Get the absolute PTS at which playback should start.
+// Never returns MP_NOPTS_VALUE.
 double get_play_start_pts(struct MPContext *mpctx)
 {
     struct MPOpts *opts = mpctx->opts;
-    double play_start_pts = rel_time_to_abs(mpctx, opts->play_start);
-    if (play_start_pts == MP_NOPTS_VALUE && opts->chapterrange[0] > 0) {
-        double chapter_start_pts = chapter_start_time(mpctx, opts->chapterrange[0] - 1);
-        if (chapter_start_pts != MP_NOPTS_VALUE) {
-            /*
-             * get_play_start_pts always returns rebased timetamps,
-             * even with --rebase-start-time=no. chapter_start_time
-             * values are not rebased without --rebase-start-time=yes,
-             * so we need to rebase them here to be consistent with
-             * the rest of get_play_start_pts.
-             */
-            if (mpctx->demuxer && !mpctx->opts->rebase_start_time){
-                chapter_start_pts -= mpctx->demuxer->start_time;
-            }
-            play_start_pts = chapter_start_pts;
-        }
-    }
-    return play_start_pts;
+    double res = rel_time_to_abs(mpctx, opts->play_start);
+    if (res == MP_NOPTS_VALUE)
+        res = get_start_time(mpctx, mpctx->play_dir);
+    return res;
 }
 
-/**
- * Get the time that an ab-loop seek should seek to.
- * The order of priority is as follows:
- *   1. --ab-loop-a, if set.
- *   2. The Playback Start PTS, if set.
- *   3. MP_NOPTS_VALUE.
- * If unspecified, return MP_NOPTS_VALUE.
- * Does not return zero unless the start time is explicitly set to zero.
- */
-double get_ab_loop_start_time(struct MPContext *mpctx)
+// Get timestamps to use for AB-loop. Returns false iff any of the timestamps
+// are invalid and/or AB-loops are currently disabled, and set t[] to either
+// the user options or NOPTS on best effort basis.
+bool get_ab_loop_times(struct MPContext *mpctx, double t[2])
 {
     struct MPOpts *opts = mpctx->opts;
-    double ab_loop_start_time;
-    if (opts->ab_loop[0] != MP_NOPTS_VALUE) {
-        ab_loop_start_time = opts->ab_loop[0];
-    } else {
-        /*
-         * There is no check for MP_NOPTS_VALUE here
-         * because that's exactly what we want to return
-         * if get_play_start_pts comes up empty here.
-         */
-        ab_loop_start_time = get_play_start_pts(mpctx);
-    }
-    return ab_loop_start_time;
+    int dir = mpctx->play_dir;
+
+    t[0] = opts->ab_loop[0];
+    t[1] = opts->ab_loop[1];
+
+    if (!mpctx->remaining_ab_loops)
+        return false;
+
+    if (t[0] == MP_NOPTS_VALUE || t[1] == MP_NOPTS_VALUE || t[0] == t[1])
+        return false;
+
+    if (t[0] * dir > t[1] * dir)
+        MPSWAP(double, t[0], t[1]);
+
+    return true;
 }
 
 double get_track_seek_offset(struct MPContext *mpctx, struct track *track)
@@ -182,7 +147,12 @@ double get_track_seek_offset(struct MPContext *mpctx, struct track *track)
         if (track->type == STREAM_AUDIO)
             return -opts->audio_delay;
         if (track->type == STREAM_SUB)
-            return -opts->subs_rend->sub_delay;
+        {
+            for (int n = 0; n < num_ptracks[STREAM_SUB]; n++) {
+                if (mpctx->current_track[n][STREAM_SUB] == track)
+                    return -opts->subs_shared->sub_delay[n];
+            }
+        }
     }
     return 0;
 }
@@ -203,39 +173,36 @@ void issue_refresh_seek(struct MPContext *mpctx, enum seek_precision min_prec)
     queue_seek(mpctx, MPSEEK_ABSOLUTE, get_current_time(mpctx), min_prec, 0);
 }
 
-float mp_get_cache_percent(struct MPContext *mpctx)
+void update_content_type(struct MPContext *mpctx, struct track *track)
 {
-    struct stream_cache_info info = {0};
-    if (mpctx->demuxer)
-        demux_stream_control(mpctx->demuxer, STREAM_CTRL_GET_CACHE_INFO, &info);
-    if (info.size > 0 && info.fill >= 0)
-        return info.fill / (info.size / 100.0);
-    return -1;
-}
-
-bool mp_get_cache_idle(struct MPContext *mpctx)
-{
-    struct stream_cache_info info = {0};
-    if (mpctx->demuxer)
-        demux_stream_control(mpctx->demuxer, STREAM_CTRL_GET_CACHE_INFO, &info);
-    return info.idle;
+    enum mp_content_type content_type;
+    if (!track || !track->vo_c) {
+        content_type = MP_CONTENT_NONE;
+    } else if (track->image) {
+        content_type = MP_CONTENT_IMAGE;
+    } else {
+        content_type = MP_CONTENT_VIDEO;
+    }
+    if (mpctx->video_out)
+        vo_control(mpctx->video_out, VOCTRL_CONTENT_TYPE, &content_type);
 }
 
 void update_vo_playback_state(struct MPContext *mpctx)
 {
     if (mpctx->video_out && mpctx->video_out->config_ok) {
         struct voctrl_playback_state oldstate = mpctx->vo_playback_state;
+        double pos = get_current_pos_ratio(mpctx, false);
         struct voctrl_playback_state newstate = {
-            .taskbar_progress = mpctx->opts->vo->taskbar_progress,
+            .taskbar_progress = mpctx->opts->vo->taskbar_progress && pos >= 0,
             .playing = mpctx->playing,
             .paused = mpctx->paused,
-            .percent_pos = get_percent_pos(mpctx),
+            .position = pos > 0 ? lrint(pos * UINT8_MAX) : 0,
         };
 
         if (oldstate.taskbar_progress != newstate.taskbar_progress ||
             oldstate.playing != newstate.playing ||
             oldstate.paused != newstate.paused ||
-            oldstate.percent_pos != newstate.percent_pos)
+            oldstate.position != newstate.position)
         {
             // Don't update progress bar if it was and still is hidden
             if ((oldstate.playing && oldstate.taskbar_progress) ||
@@ -286,7 +253,8 @@ void error_on_track(struct MPContext *mpctx, struct track *track)
     if (track->type == STREAM_VIDEO)
         MP_INFO(mpctx, "Video: no video\n");
     if (mpctx->opts->stop_playback_on_init_failure ||
-        !(mpctx->vo_chain || mpctx->ao_chain))
+        (!mpctx->current_track[0][STREAM_AUDIO] &&
+         !mpctx->current_track[0][STREAM_VIDEO]))
     {
         if (!mpctx->stop_play)
             mpctx->stop_play = PT_ERROR;
@@ -299,19 +267,23 @@ void error_on_track(struct MPContext *mpctx, struct track *track)
 int stream_dump(struct MPContext *mpctx, const char *source_filename)
 {
     struct MPOpts *opts = mpctx->opts;
-    stream_t *stream = stream_open(source_filename, mpctx->global);
-    if (!stream)
-        return -1;
+    bool ok = false;
+
+    stream_t *stream = stream_create(source_filename,
+                                     STREAM_ORIGIN_DIRECT | STREAM_READ,
+                                     mpctx->playback_abort, mpctx->global);
+    if (!stream || stream->is_directory)
+        goto done;
 
     int64_t size = stream_get_size(stream);
 
     FILE *dest = fopen(opts->stream_dump, "wb");
     if (!dest) {
         MP_ERR(mpctx, "Error opening dump file: %s\n", mp_strerror(errno));
-        return -1;
+        goto done;
     }
 
-    bool ok = true;
+    ok = true;
 
     while (mpctx->stop_play == KEEP_PLAYING && ok) {
         if (!opts->quiet && ((stream->pos / (1024 * 1024)) % 2) == 1) {
@@ -319,29 +291,31 @@ int stream_dump(struct MPContext *mpctx, const char *source_filename)
             MP_MSG(mpctx, MSGL_STATUS, "Dumping %lld/%lld...",
                    (long long int)pos, (long long int)size);
         }
-        bstr data = stream_peek(stream, STREAM_MAX_BUFFER_SIZE);
-        if (data.len == 0) {
+        uint8_t buf[4096];
+        int len = stream_read(stream, buf, sizeof(buf));
+        if (!len) {
             ok &= stream->eof;
             break;
         }
-        ok &= fwrite(data.start, data.len, 1, dest) == 1;
-        stream_skip(stream, data.len);
+        ok &= fwrite(buf, len, 1, dest) == 1;
         mp_wakeup_core(mpctx); // don't actually sleep
         mp_idle(mpctx); // but process input
     }
 
     ok &= fclose(dest) == 0;
+done:
     free_stream(stream);
     return ok ? 0 : -1;
 }
 
 void merge_playlist_files(struct playlist *pl)
 {
-    if (!pl->first)
+    if (!pl->num_entries)
         return;
     char *edl = talloc_strdup(NULL, "edl://");
-    for (struct playlist_entry *e = pl->first; e; e = e->next) {
-        if (e != pl->first)
+    for (int n = 0; n < pl->num_entries; n++) {
+        struct playlist_entry *e = pl->entries[n];
+        if (n)
             edl = talloc_strdup_append_buffer(edl, ";");
         // Escape if needed
         if (e->filename[strcspn(e->filename, "=%,;\n")] ||
@@ -353,6 +327,89 @@ void merge_playlist_files(struct playlist *pl)
         edl = talloc_strdup_append_buffer(edl, e->filename);
     }
     playlist_clear(pl);
-    playlist_add_file(pl, edl);
+    playlist_append_file(pl, edl);
     talloc_free(edl);
+}
+
+const char *mp_status_str(enum playback_status st)
+{
+    switch (st) {
+    case STATUS_SYNCING:    return "syncing";
+    case STATUS_READY:      return "ready";
+    case STATUS_PLAYING:    return "playing";
+    case STATUS_DRAINING:   return "draining";
+    case STATUS_EOF:        return "eof";
+    default:                return "bug";
+    }
+}
+
+bool str_in_list(bstr str, char **list)
+{
+    if (!list)
+        return false;
+    while (*list) {
+        if (!bstrcasecmp0(str, *list++))
+            return true;
+    }
+    return false;
+}
+
+#define ADD_FLAG(ctx, dst, flag, first) do {                           \
+    bstr_xappend_asprintf(ctx, &dst, " %s%s", first ? "[" : "", flag); \
+    first = false;                                                     \
+} while(0)
+
+char *mp_format_track_metadata(void *ctx, struct track *t, bool add_lang)
+{
+    struct sh_stream *s = t->stream;
+    bstr dst = {0};
+
+    if (t->title)
+        bstr_xappend_asprintf(ctx, &dst, "'%s' ", t->title);
+
+    const char *codec = s ? s->codec->codec : NULL;
+
+    bstr_xappend0(ctx, &dst, "(");
+
+    if (add_lang && t->lang)
+        bstr_xappend_asprintf(ctx, &dst, "%s ", t->lang);
+
+    bstr_xappend0(ctx, &dst, codec ? codec : "<unknown>");
+
+    if (s && s->codec->codec_profile)
+        bstr_xappend_asprintf(ctx, &dst, " [%s]", s->codec->codec_profile);
+    if (s && s->codec->disp_w)
+        bstr_xappend_asprintf(ctx, &dst, " %dx%d", s->codec->disp_w, s->codec->disp_h);
+    if (s && s->codec->fps && !t->image) {
+        char *fps = mp_format_double(ctx, s->codec->fps, 4, false, false, true);
+        bstr_xappend_asprintf(ctx, &dst, " %s fps", fps);
+    }
+    if (s && s->codec->channels.num)
+        bstr_xappend_asprintf(ctx, &dst, " %dch", s->codec->channels.num);
+    if (s && s->codec->samplerate)
+        bstr_xappend_asprintf(ctx, &dst, " %d Hz", s->codec->samplerate);
+    if (s && s->codec->bitrate) {
+        bstr_xappend_asprintf(ctx, &dst, " %d kbps", (s->codec->bitrate + 500) / 1000);
+    } else if (s && s->hls_bitrate) {
+        bstr_xappend_asprintf(ctx, &dst, " %d kbps", (s->hls_bitrate + 500) / 1000);
+    }
+    bstr_xappend0(ctx, &dst, ")");
+
+    bool first = true;
+    if (t->default_track)
+        ADD_FLAG(ctx, dst, "default", first);
+    if (t->forced_track)
+        ADD_FLAG(ctx, dst, "forced", first);
+    if (t->dependent_track)
+        ADD_FLAG(ctx, dst, "dependent", first);
+    if (t->visual_impaired_track)
+        ADD_FLAG(ctx, dst, "visual-impaired", first);
+    if (t->hearing_impaired_track)
+        ADD_FLAG(ctx, dst, "hearing-impaired", first);
+    if (t->is_external)
+        ADD_FLAG(ctx, dst, "external", first);
+    if (!first)
+        bstr_xappend0(ctx, &dst, "]");
+
+    return bstrto0(ctx, dst);
 }

@@ -20,7 +20,6 @@
 
 #include <stdbool.h>
 #include <inttypes.h>
-#include <pthread.h>
 #include <va/va.h>
 
 #include "mp_image.h"
@@ -36,11 +35,14 @@ struct mp_vaapi_ctx {
     void (*destroy_native_ctx)(void *native_ctx);
 };
 
-#define CHECK_VA_STATUS(ctx, msg) \
+#define CHECK_VA_STATUS_LEVEL(ctx, msg, level) \
     (status == VA_STATUS_SUCCESS ? true \
-        : (MP_ERR(ctx, "%s failed (%s)\n", msg, vaErrorStr(status)), false))
+        : (MP_MSG(ctx, level, "%s failed (%s)\n", msg, vaErrorStr(status)), false))
 
-int                      va_get_colorspace_flag(enum mp_csp csp);
+#define CHECK_VA_STATUS(ctx, msg) \
+    CHECK_VA_STATUS_LEVEL(ctx, msg, MSGL_ERR)
+
+int                      va_get_colorspace_flag(enum pl_color_system csp);
 
 struct mp_vaapi_ctx *    va_initialize(VADisplay *display, struct mp_log *plog, bool probing);
 void                     va_destroy(struct mp_vaapi_ctx *ctx);

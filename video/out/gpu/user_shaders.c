@@ -16,6 +16,7 @@
  */
 
 #include <assert.h>
+#include <math.h>
 
 #include "common/msg.h"
 #include "misc/ctype.h"
@@ -52,9 +53,11 @@ static bool parse_rpn_szexpr(struct bstr line, struct szexp out[MAX_SZEXP_SIZE])
         case '-': exp->tag = SZEXP_OP2; exp->val.op = SZEXP_OP_SUB; continue;
         case '*': exp->tag = SZEXP_OP2; exp->val.op = SZEXP_OP_MUL; continue;
         case '/': exp->tag = SZEXP_OP2; exp->val.op = SZEXP_OP_DIV; continue;
+        case '%': exp->tag = SZEXP_OP2; exp->val.op = SZEXP_OP_MOD; continue;
         case '!': exp->tag = SZEXP_OP1; exp->val.op = SZEXP_OP_NOT; continue;
         case '>': exp->tag = SZEXP_OP2; exp->val.op = SZEXP_OP_GT;  continue;
         case '<': exp->tag = SZEXP_OP2; exp->val.op = SZEXP_OP_LT;  continue;
+        case '=': exp->tag = SZEXP_OP2; exp->val.op = SZEXP_OP_EQ;  continue;
         }
 
         if (mp_isdigit(word.start[0])) {
@@ -99,7 +102,7 @@ bool eval_szexpr(struct mp_log *log, void *priv,
 
             switch (expr[i].val.op) {
             case SZEXP_OP_NOT: stack[idx-1] = !stack[idx-1]; break;
-            default: abort();
+            default: MP_ASSERT_UNREACHABLE();
             }
             continue;
 
@@ -118,9 +121,11 @@ bool eval_szexpr(struct mp_log *log, void *priv,
             case SZEXP_OP_SUB: res = op1 - op2; break;
             case SZEXP_OP_MUL: res = op1 * op2; break;
             case SZEXP_OP_DIV: res = op1 / op2; break;
+            case SZEXP_OP_MOD: res = fmodf(op1, op2); break;
             case SZEXP_OP_GT:  res = op1 > op2; break;
             case SZEXP_OP_LT:  res = op1 < op2; break;
-            default: abort();
+            case SZEXP_OP_EQ:  res = op1 == op2; break;
+            default: MP_ASSERT_UNREACHABLE();
             }
 
             if (!isfinite(res)) {
@@ -165,6 +170,7 @@ static bool parse_hook(struct mp_log *log, struct bstr *body,
     *out = (struct gl_user_shader_hook){
         .pass_desc = bstr0("(unknown)"),
         .offset = identity_trans,
+        .align_offset = false,
         .width = {{ SZEXP_VAR_W, { .varname = bstr0("HOOKED") }}},
         .height = {{ SZEXP_VAR_H, { .varname = bstr0("HOOKED") }}},
         .cond = {{ SZEXP_CONST, { .cval = 1.0 }}},
@@ -216,13 +222,18 @@ static bool parse_hook(struct mp_log *log, struct bstr *body,
         }
 
         if (bstr_eatstart0(&line, "OFFSET")) {
-            float ox, oy;
-            if (bstr_sscanf(line, "%f %f", &ox, &oy) != 2) {
-                mp_err(log, "Error while parsing OFFSET!\n");
-                return false;
+            line = bstr_strip(line);
+            if (bstr_equals0(line, "ALIGN")) {
+                out->align_offset = true;
+            } else {
+                float ox, oy;
+                if (bstr_sscanf(line, "%f %f", &ox, &oy) != 2) {
+                    mp_err(log, "Error while parsing OFFSET!\n");
+                    return false;
+                }
+                out->offset.t[0] = ox;
+                out->offset.t[1] = oy;
             }
-            out->offset.t[0] = ox;
-            out->offset.t[1] = oy;
             continue;
         }
 
@@ -420,7 +431,7 @@ static bool parse_tex(struct mp_log *log, struct ra *ra, struct bstr *body,
 
 void parse_user_shader(struct mp_log *log, struct ra *ra, struct bstr shader,
                        void *priv,
-                       bool (*dohook)(void *p, struct gl_user_shader_hook hook),
+                       bool (*dohook)(void *p, const struct gl_user_shader_hook *hook),
                        bool (*dotex)(void *p, struct gl_user_shader_tex tex))
 {
     if (!dohook || !dotex || !shader.len)
@@ -446,7 +457,7 @@ void parse_user_shader(struct mp_log *log, struct ra *ra, struct bstr shader,
         }
 
         struct gl_user_shader_hook h;
-        if (!parse_hook(log, &shader, &h) || !dohook(priv, h))
+        if (!parse_hook(log, &shader, &h) || !dohook(priv, &h))
             return;
     }
 }

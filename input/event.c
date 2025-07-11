@@ -37,6 +37,21 @@ void mp_event_drop_files(struct input_ctx *ictx, int num_files, char **files,
             };
             mp_input_run_cmd(ictx, cmd);
         }
+    } else if (action == DND_INSERT_NEXT) {
+        /* To insert the entries in the correct order, we iterate over them
+           backwards */
+        for (int i = num_files - 1; i >= 0; i--) {
+            const char *cmd[] = {
+                "osd-auto",
+                "loadfile",
+                files[i],
+                /* Since we're inserting in reverse, wait til the final item
+                   is added to start playing */
+                (i > 0) ? "insert-next" : "insert-next-play",
+                NULL
+            };
+            mp_input_run_cmd(ictx, cmd);
+        }
     } else {
         for (int i = 0; i < num_files; i++) {
             const char *cmd[] = {
@@ -64,7 +79,7 @@ int mp_event_drop_mime_data(struct input_ctx *ictx, const char *mime_type,
         while (data.len) {
             bstr line = bstr_getline(data, &data);
             line = bstr_strip_linebreaks(line);
-            if (bstr_startswith0(line, "#"))
+            if (bstr_startswith0(line, "#") || !line.start[0])
                 continue;
             char *s = bstrto0(tmp, line);
             MP_TARRAY_APPEND(tmp, files, num_files, s);

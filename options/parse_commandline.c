@@ -22,14 +22,11 @@
 #include <assert.h>
 #include <stdbool.h>
 
-#include "config.h"
-
 #include "osdep/io.h"
-#include "common/global.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
 #include "m_option.h"
-#include "m_config.h"
+#include "m_config_frontend.h"
 #include "options.h"
 #include "common/playlist.h"
 #include "parse_commandline.h"
@@ -40,6 +37,7 @@
 struct parse_state {
     struct m_config *config;
     char **argv;
+    struct mp_log *log; // silent if NULL
 
     bool no_more_opts;
     bool error;
@@ -49,13 +47,13 @@ struct parse_state {
     struct bstr param;
 };
 
-// Returns 0 if a valid option/file is available, <0 on error, 1 on end of args.
-static int split_opt_silent(struct parse_state *p)
+// Returns true if more args, false if all parsed or an error occurred.
+static bool split_opt(struct parse_state *p)
 {
     assert(!p->error);
 
     if (!p->argv || !p->argv[0])
-        return 1;
+        return false;
 
     p->is_opt = false;
     p->arg = bstr0(p->argv[0]);
@@ -64,16 +62,17 @@ static int split_opt_silent(struct parse_state *p)
     p->argv++;
 
     if (p->no_more_opts || !bstr_startswith0(p->arg, "-") || p->arg.len == 1)
-        return 0;
+        return true;
 
     if (bstrcmp0(p->arg, "--") == 0) {
         p->no_more_opts = true;
-        return split_opt_silent(p);
+        return split_opt(p);
     }
 
     p->is_opt = true;
 
-    if (!bstr_eatstart0(&p->arg, "--"))
+    bool new_opt = bstr_eatstart0(&p->arg, "--");
+    if (!new_opt)
         bstr_eatstart0(&p->arg, "-");
 
     bool ambiguous = !bstr_split_tok(p->arg, "=", &p->arg, &p->param);
@@ -81,39 +80,32 @@ static int split_opt_silent(struct parse_state *p)
     bool need_param = m_config_option_requires_param(p->config, p->arg) > 0;
 
     if (ambiguous && need_param) {
-        if (!p->argv[0])
-            return M_OPT_MISSING_PARAM;
+        if (!p->argv[0] || new_opt) {
+            p->error = true;
+            MP_FATAL(p, "Error parsing commandline option %.*s: %s\n",
+                     BSTR_P(p->arg), m_option_strerror(M_OPT_MISSING_PARAM));
+            MP_WARN(p, "Make sure you're using e.g. '--%.*s=value' instead "
+                    "of '--%.*s value'.\n", BSTR_P(p->arg), BSTR_P(p->arg));
+            return false;
+        }
         p->param = bstr0(p->argv[0]);
         p->argv++;
     }
 
-    return 0;
+    return true;
 }
 
-// Returns true if more args, false if all parsed or an error occurred.
-static bool split_opt(struct parse_state *p)
-{
-    int r = split_opt_silent(p);
-    if (r >= 0)
-        return r == 0;
-    p->error = true;
-
-    MP_FATAL(p->config, "Error parsing commandline option %.*s: %s\n",
-             BSTR_P(p->arg), m_option_strerror(r));
-    return false;
-}
-
-#ifdef __MINGW32__
+#ifdef _WIN32
 static void process_non_option(struct playlist *files, const char *arg)
 {
     glob_t gg;
 
     // Glob filenames on Windows (cmd.exe doesn't do this automatically)
     if (glob(arg, 0, NULL, &gg)) {
-        playlist_add_file(files, arg);
+        playlist_append_file(files, arg);
     } else {
         for (int i = 0; i < gg.gl_pathc; i++)
-            playlist_add_file(files, gg.gl_pathv[i]);
+            playlist_append_file(files, gg.gl_pathv[i]);
 
         globfree(&gg);
     }
@@ -121,7 +113,7 @@ static void process_non_option(struct playlist *files, const char *arg)
 #else
 static void process_non_option(struct playlist *files, const char *arg)
 {
-    playlist_add_file(files, arg);
+    playlist_append_file(files, arg);
 }
 #endif
 
@@ -140,7 +132,7 @@ int m_config_parse_mp_command_line(m_config_t *config, struct playlist *files,
 
     mode = GLOBAL;
 
-    struct parse_state p = {config, argv};
+    struct parse_state p = {config, argv, config->log};
     while (split_opt(&p)) {
         if (p.is_opt) {
             int flags = M_SETOPT_FROM_CMDLINE;
@@ -165,7 +157,7 @@ int m_config_parse_mp_command_line(m_config_t *config, struct playlist *files,
                 }
                 mode = LOCAL;
                 assert(!local_start);
-                local_start = files->last;
+                local_start = playlist_get_last(files);
                 continue;
             }
 
@@ -179,14 +171,15 @@ int m_config_parse_mp_command_line(m_config_t *config, struct playlist *files,
                     // the entry _after_ local_start, until the end of the list.
                     // If local_start is NULL, the list was empty on '{', and we
                     // want all files in the list.
-                    struct playlist_entry *cur
-                        = local_start ? local_start->next : files->first;
+                    struct playlist_entry *cur = local_start
+                        ? playlist_entry_get_rel(local_start, 1)
+                        : playlist_get_first(files);
                     if (!cur)
                         MP_WARN(config, "Ignored options!\n");
                     while (cur) {
                         playlist_entry_add_params(cur, local_params,
                                                 local_params_count);
-                        cur = cur->next;
+                        cur = playlist_entry_get_rel(cur, 1);
                     }
                 }
                 local_params_count = 0;
@@ -200,13 +193,14 @@ int m_config_parse_mp_command_line(m_config_t *config, struct playlist *files,
                 // append the playlist to the local args
                 char *param0 = bstrdup0(NULL, p.param);
                 struct playlist *pl = playlist_parse_file(param0, NULL, global);
-                talloc_free(param0);
                 if (!pl) {
                     MP_FATAL(config, "Error reading playlist '%.*s'\n",
                              BSTR_P(p.param));
+                    talloc_free(param0);
                     goto err_out;
                 }
                 playlist_transfer_entries(files, pl);
+                talloc_free(param0);
                 talloc_free(pl);
                 continue;
             }
@@ -218,43 +212,8 @@ int m_config_parse_mp_command_line(m_config_t *config, struct playlist *files,
         } else {
             // filename
             void *tmp = talloc_new(NULL);
-            bstr file = p.arg;
             char *file0 = bstrdup0(tmp, p.arg);
-#if HAVE_GPL
-            // expand DVD filename entries like dvd://1-3 into component titles
-            if (bstr_startswith0(file, "dvd://")) {
-                int offset = 6;
-                char *splitpos = strstr(file0 + offset, "-");
-                if (splitpos != NULL) {
-                    char *endpos;
-                    int start_title = strtol(file0 + offset, &endpos, 10);
-                    int end_title;
-                    //entries like dvd://-2 imply start at title 1
-                    if (start_title < 0) {
-                        end_title = abs(start_title);
-                        start_title = 1;
-                    } else
-                        end_title = strtol(splitpos + 1, &endpos, 10);
-
-                    #define dvd_range(a)  (a >= 0 && a < 255)
-                    if (dvd_range(start_title) && dvd_range(end_title)
-                            && (start_title < end_title)) {
-                        for (int j = start_title; j <= end_title; j++) {
-                            char *f = talloc_asprintf(tmp, "dvd://%d%s", j,
-                                                      endpos);
-                            playlist_add_file(files, f);
-                        }
-                    } else
-                        MP_ERR(config, "Invalid play entry %s\n", file0);
-
-                } else // dvd:// or dvd://x entry
-                    playlist_add_file(files, file0);
-            } else {
-                process_non_option(files, file0);
-            }
-#else
             process_non_option(files, file0);
-#endif
             talloc_free(tmp);
         }
     }
@@ -283,8 +242,8 @@ err_out:
 void m_config_preparse_command_line(m_config_t *config, struct mpv_global *global,
                                     int *verbose, char **argv)
 {
-    struct parse_state p = {config, argv};
-    while (split_opt_silent(&p) == 0) {
+    struct parse_state p = {config, argv, mp_null_log};
+    while (split_opt(&p)) {
         if (p.is_opt) {
             // Ignore non-pre-parse options. They will be set later.
             // Option parsing errors will be handled later as well.

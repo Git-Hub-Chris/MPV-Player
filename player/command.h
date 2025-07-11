@@ -21,6 +21,7 @@
 #include <stdbool.h>
 
 #include "libmpv/client.h"
+#include "osdep/compiler.h"
 
 struct MPContext;
 struct mp_cmd;
@@ -69,15 +70,18 @@ void run_command(struct MPContext *mpctx, struct mp_cmd *cmd,
                  struct mp_abort_entry *abort,
                  void (*on_completion)(struct mp_cmd_ctx *cmd),
                  void *on_completion_priv);
+void run_command_opts(struct MPContext *mpctx);
 void mp_cmd_ctx_complete(struct mp_cmd_ctx *cmd);
+PRINTF_ATTRIBUTE(3, 4)
+void mp_cmd_msg(struct mp_cmd_ctx *cmd, int status, const char *msg, ...);
 char *mp_property_expand_string(struct MPContext *mpctx, const char *str);
 char *mp_property_expand_escaped_string(struct MPContext *mpctx, const char *str);
 void property_print_help(struct MPContext *mpctx);
 int mp_property_do(const char* name, int action, void* val,
                    struct MPContext *mpctx);
 
-int mp_on_set_option(void *ctx, struct m_config_option *co, void *data, int flags);
-void mp_option_change_callback(void *ctx, struct m_config_option *co, int flags);
+void mp_option_change_callback(void *ctx, struct m_config_option *co, int flags,
+                               bool self_update);
 
 void mp_notify(struct MPContext *mpctx, int event, void *arg);
 void mp_notify_property(struct MPContext *mpctx, const char *property);
@@ -95,17 +99,27 @@ enum {
     MP_EVENT_CACHE_UPDATE,
     MP_EVENT_WIN_RESIZE,
     MP_EVENT_WIN_STATE,
+    MP_EVENT_WIN_STATE2,
+    MP_EVENT_FOCUS,
+    MP_EVENT_AMBIENT_LIGHTING_CHANGED,
     MP_EVENT_CHANGE_PLAYLIST,
     MP_EVENT_CORE_IDLE,
     MP_EVENT_DURATION_UPDATE,
+    MP_EVENT_INPUT_PROCESSED,
+    MP_EVENT_TRACKS_CHANGED,
+    MP_EVENT_TRACK_SWITCHED,
+    MP_EVENT_METADATA_UPDATE,
+    MP_EVENT_CHAPTER_CHANGE,
 };
 
 bool mp_hook_test_completion(struct MPContext *mpctx, char *type);
 void mp_hook_start(struct MPContext *mpctx, char *type);
-int mp_hook_continue(struct MPContext *mpctx, char *client, uint64_t id);
-void mp_hook_add(struct MPContext *mpctx, const char *client, const char *name,
-                 uint64_t user_id, int pri, bool legacy);
+int mp_hook_continue(struct MPContext *mpctx, int64_t client_id, uint64_t id);
+void mp_hook_add(struct MPContext *mpctx, char *client, int64_t client_id,
+                 const char *name, uint64_t user_id, int pri);
 
 void mark_seek(struct MPContext *mpctx);
+
+void mp_abort_cache_dumping(struct MPContext *mpctx);
 
 #endif /* MPLAYER_COMMAND_H */

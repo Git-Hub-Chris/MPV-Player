@@ -15,8 +15,6 @@
  * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <libavutil/common.h>
-
 #include "config.h"
 
 #if !HAVE_GPL
@@ -25,13 +23,21 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <string.h>
-#include <strings.h>
 #include <errno.h>
 #include <assert.h>
 
+#ifdef __linux__
+#include <linux/cdrom.h>
+#include <scsi/sg.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#endif
+
 #include <dvdnav/dvdnav.h>
+#include <libavutil/common.h>
+#include <libavutil/intreadwrite.h>
 
 #include "osdep/io.h"
 
@@ -44,7 +50,6 @@
 #include "stream.h"
 #include "demux/demux.h"
 #include "video/out/vo.h"
-#include "stream_dvd_common.h"
 
 #define TITLE_MENU -1
 #define TITLE_LONGEST -2
@@ -67,6 +72,27 @@ struct priv {
     struct dvd_opts *opts;
 };
 
+struct dvd_opts {
+    int angle;
+    int speed;
+    char *device;
+};
+
+#define OPT_BASE_STRUCT struct dvd_opts
+
+const struct m_sub_options dvd_conf = {
+    .opts = (const struct m_option[]){
+        {"device", OPT_STRING(device), .flags = M_OPT_FILE},
+        {"speed", OPT_INT(speed)},
+        {"angle", OPT_INT(angle), M_RANGE(1, 99)},
+        {0}
+    },
+    .size = sizeof(struct dvd_opts),
+    .defaults = &(const struct dvd_opts){
+        .angle = 1,
+    },
+};
+
 #define DNE(e) [e] = # e
 static const char *const mp_dvdnav_events[] = {
     DNE(DVDNAV_BLOCK_OK),
@@ -86,6 +112,102 @@ static const char *const mp_dvdnav_events[] = {
 
 #define LOOKUP_NAME(array, i) \
     (((i) >= 0 && (i) < MP_ARRAY_SIZE(array)) ? array[(i)] : "?")
+
+static void dvd_set_speed(stream_t *stream, char *device, unsigned speed)
+{
+#if defined(__linux__) && defined(SG_IO) && defined(GPCMD_SET_STREAMING)
+    int fd;
+    unsigned char buffer[28];
+    unsigned char cmd[12];
+    struct sg_io_hdr sghdr;
+    struct stat st;
+
+    memset(&st, 0, sizeof(st));
+
+    if (stat(device, &st) == -1) return;
+
+    if (!S_ISBLK(st.st_mode)) return; /* not a block device */
+
+    switch (speed) {
+    case 0: /* don't touch speed setting */
+        return;
+    case -1: /* restore default value */
+        MP_INFO(stream, "Restoring DVD speed... ");
+        break;
+    default: /* limit to <speed> KB/s */
+        // speed < 100 is multiple of DVD single speed (1350KB/s)
+        if (speed < 100)
+            speed *= 1350;
+        MP_INFO(stream, "Limiting DVD speed to %dKB/s... ", speed);
+        break;
+    }
+
+    memset(&sghdr, 0, sizeof(sghdr));
+    sghdr.interface_id = 'S';
+    sghdr.timeout = 5000;
+    sghdr.dxfer_direction = SG_DXFER_TO_DEV;
+    sghdr.dxfer_len = sizeof(buffer);
+    sghdr.dxferp = buffer;
+    sghdr.cmd_len = sizeof(cmd);
+    sghdr.cmdp = cmd;
+
+    memset(cmd, 0, sizeof(cmd));
+    cmd[0] = GPCMD_SET_STREAMING;
+    cmd[10] = sizeof(buffer);
+
+    memset(buffer, 0, sizeof(buffer));
+    /* first sector 0, last sector 0xffffffff */
+    AV_WB32(buffer + 8, 0xffffffff);
+    if (speed == -1)
+        buffer[0] = 4; /* restore default */
+    else {
+        /* <speed> kilobyte */
+        AV_WB32(buffer + 12, speed);
+        AV_WB32(buffer + 20, speed);
+    }
+    /* 1 second */
+    AV_WB16(buffer + 18, 1000);
+    AV_WB16(buffer + 26, 1000);
+
+    fd = open(device, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd == -1) {
+        MP_INFO(stream, "Couldn't open DVD device for writing, changing DVD speed needs write access.\n");
+        return;
+    }
+
+    if (ioctl(fd, SG_IO, &sghdr) < 0)
+        MP_INFO(stream, "failed\n");
+    else
+        MP_INFO(stream, "successful\n");
+
+    close(fd);
+#endif
+}
+
+// Check if this is likely to be an .ifo or similar file.
+static int dvd_probe(const char *path, const char *ext, const char *sig)
+{
+    if (!bstr_case_endswith(bstr0(path), bstr0(ext)))
+        return false;
+
+    FILE *temp = fopen(path, "rb");
+    if (!temp)
+        return false;
+
+    bool r = false;
+
+    char data[50];
+
+    assert(strlen(sig) <= sizeof(data));
+
+    if (fread(data, 50, 1, temp) == 1) {
+        if (memcmp(data, sig, strlen(sig)) == 0)
+            r = true;
+    }
+
+    fclose(temp);
+    return r;
+}
 
 /**
  * \brief mp_dvdnav_lang_from_aid() returns the language corresponding to audio id 'aid'
@@ -154,13 +276,16 @@ static int mp_dvdnav_number_of_subs(stream_t *stream)
     return n;
 }
 
-static int fill_buffer(stream_t *s, char *buf, int max_len)
+static int fill_buffer(stream_t *s, void *buf, int max_len)
 {
     struct priv *priv = s->priv;
     dvdnav_t *dvdnav = priv->dvdnav;
 
-    if (max_len < 2048)
+    if (max_len < 2048) {
+        MP_FATAL(s, "Short read size. Data corruption will follow. Please "
+                    "provide a patch.\n");
         return -1;
+    }
 
     while (1) {
         int len = -1;
@@ -173,7 +298,7 @@ static int fill_buffer(stream_t *s, char *buf, int max_len)
         }
         if (event != DVDNAV_BLOCK_OK) {
             const char *name = LOOKUP_NAME(mp_dvdnav_events, event);
-            MP_VERBOSE(s, "DVDNAV: event %s (%d).\n", name, event);
+            MP_TRACE(s, "DVDNAV: event %s (%d).\n", name, event);
         }
         switch (event) {
         case DVDNAV_BLOCK_OK:
@@ -369,6 +494,7 @@ static int control(stream_t *stream, int cmd, void *arg)
             break;
         if (dvdnav_angle_change(dvdnav, new_angle) != DVDNAV_STATUS_OK)
             return 1;
+        break;
     }
     case STREAM_CTRL_GET_LANG: {
         struct stream_lang_req *req = arg;
@@ -390,7 +516,7 @@ static int control(stream_t *stream, int cmd, void *arg)
         struct stream_dvd_info_req *req = arg;
         memset(req, 0, sizeof(*req));
         req->num_subs = mp_dvdnav_number_of_subs(stream);
-        assert(sizeof(uint32_t) == sizeof(unsigned int));
+        static_assert(sizeof(uint32_t) == sizeof(unsigned int), "");
         memcpy(req->palette, priv->spu_clut, sizeof(req->palette));
         return STREAM_OK;
     }
@@ -455,9 +581,14 @@ static int open_s_internal(stream_t *stream)
 {
     struct priv *priv, *p;
     priv = p = stream->priv;
-    char *filename;
 
     p->opts = mp_get_config_group(stream, stream->global, &dvd_conf);
+
+    char *filename = "/dev/dvd";
+
+#if defined(_WIN32)
+    filename = "D:";
+#endif
 
     if (p->device && p->device[0])
         filename = p->device;
@@ -468,7 +599,7 @@ static int open_s_internal(stream_t *stream)
     if (!new_dvdnav_stream(stream, filename)) {
         MP_ERR(stream, "Couldn't open DVD device: %s\n",
                 filename);
-        return STREAM_UNSUPPORTED;
+        return STREAM_ERROR;
     }
 
     if (p->track == TITLE_LONGEST) { // longest
@@ -514,13 +645,11 @@ static int open_s_internal(stream_t *stream)
     if (p->opts->angle > 1)
         dvdnav_angle_change(priv->dvdnav, p->opts->angle);
 
-    stream->sector_size = 2048;
     stream->fill_buffer = fill_buffer;
     stream->control = control;
     stream->close = stream_dvdnav_close;
     stream->demuxer = "+disc";
     stream->lavf_type = "mpeg";
-    stream->allow_caching = false;
 
     return STREAM_OK;
 }
@@ -535,7 +664,13 @@ static int open_s(stream_t *stream)
 
     priv->track = TITLE_LONGEST;
 
-    if (bstr_equals0(title, "longest") || bstr_equals0(title, "first")) {
+    struct MPOpts *opts = mp_get_config_group(stream, stream->global, &mp_opt_root);
+    int edition_id = opts->edition_id;
+    talloc_free(opts);
+
+    if (edition_id >= 0) {
+        priv->track = edition_id;
+    } else if (bstr_equals0(title, "longest") || bstr_equals0(title, "first")) {
         priv->track = TITLE_LONGEST;
     } else if (bstr_equals0(title, "menu")) {
         priv->track = TITLE_MENU;
@@ -557,6 +692,7 @@ const stream_info_t stream_info_dvdnav = {
     .name = "dvdnav",
     .open = open_s,
     .protocols = (const char*const[]){ "dvd", "dvdnav", NULL },
+    .stream_origin = STREAM_ORIGIN_UNSAFE,
 };
 
 static bool check_ifo(const char *path)
@@ -609,4 +745,5 @@ const stream_info_t stream_info_ifo_dvdnav = {
     .name = "ifo_dvdnav",
     .open = ifo_dvdnav_stream_open,
     .protocols = (const char*const[]){ "file", "", NULL },
+    .stream_origin = STREAM_ORIGIN_UNSAFE,
 };

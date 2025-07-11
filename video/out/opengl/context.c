@@ -21,15 +21,18 @@
 #include "utils.h"
 
 // 0-terminated list of desktop GL versions a backend should try to
-// initialize. The first entry is the most preferred version.
-const int mpgl_preferred_gl_versions[] = {
+// initialize. Each entry is the minimum required version.
+const int mpgl_min_required_gl_versions[] = {
+    /*
+     * Nvidia drivers will not provide the highest supported version
+     * when 320 core is requested. Instead, it just returns 3.2. This
+     * would be bad, as we actually want compute shaders that require
+     * 4.2, so we have to request a sufficiently high version. We use
+     * 440 to maximise driver compatibility as we don't need anything
+     * from newer versions.
+     */
     440,
-    430,
-    400,
-    330,
     320,
-    310,
-    300,
     210,
     0
 };
@@ -40,39 +43,29 @@ enum {
     FLUSH_AUTO,
 };
 
-enum {
-    GLES_AUTO = 0,
-    GLES_YES,
-    GLES_NO,
-};
-
 struct opengl_opts {
-    int use_glfinish;
-    int waitvsync;
+    bool use_glfinish;
+    bool waitvsync;
     int vsync_pattern[2];
     int swapinterval;
     int early_flush;
-    int restrict_version;
     int gles_mode;
 };
 
 #define OPT_BASE_STRUCT struct opengl_opts
 const struct m_sub_options opengl_conf = {
     .opts = (const struct m_option[]) {
-        OPT_FLAG("opengl-glfinish", use_glfinish, 0),
-        OPT_FLAG("opengl-waitvsync", waitvsync, 0),
-        OPT_INT("opengl-swapinterval", swapinterval, 0),
-        OPT_INTPAIR("opengl-check-pattern", vsync_pattern, 0),
-        OPT_INT("opengl-restrict", restrict_version, 0),
-        OPT_CHOICE("opengl-es", gles_mode, 0,
-                ({"auto", GLES_AUTO}, {"yes", GLES_YES}, {"no", GLES_NO})),
-        OPT_CHOICE("opengl-early-flush", early_flush, 0,
-                ({"no", FLUSH_NO}, {"yes", FLUSH_YES}, {"auto", FLUSH_AUTO})),
-
-        OPT_REPLACED("opengl-debug", "gpu-debug"),
-        OPT_REPLACED("opengl-sw", "gpu-sw"),
-        OPT_REPLACED("opengl-vsync-fences", "swapchain-depth"),
-        OPT_REPLACED("opengl-backend", "gpu-context"),
+        {"opengl-glfinish", OPT_BOOL(use_glfinish)},
+        {"opengl-waitvsync", OPT_BOOL(waitvsync)},
+        {"opengl-swapinterval", OPT_INT(swapinterval), .flags = UPDATE_VO},
+        {"opengl-check-pattern-a", OPT_INT(vsync_pattern[0])},
+        {"opengl-check-pattern-b", OPT_INT(vsync_pattern[1])},
+        {"opengl-es", OPT_CHOICE(gles_mode,
+            {"auto", GLES_AUTO}, {"yes", GLES_YES}, {"no", GLES_NO}),
+            .flags = UPDATE_VO,
+        },
+        {"opengl-early-flush", OPT_CHOICE(early_flush,
+            {"no", FLUSH_NO}, {"yes", FLUSH_YES}, {"auto", FLUSH_AUTO})},
         {0},
     },
     .defaults = &(const struct opengl_opts) {
@@ -100,29 +93,17 @@ struct priv {
     int num_vsync_fences;
 };
 
-bool ra_gl_ctx_test_version(struct ra_ctx *ctx, int version, bool es)
+enum gles_mode ra_gl_ctx_get_glesmode(struct ra_ctx *ctx)
 {
-    bool ret;
-    struct opengl_opts *opts;
     void *tmp = talloc_new(NULL);
+    struct opengl_opts *opts;
+    enum gles_mode mode;
+
     opts = mp_get_config_group(tmp, ctx->global, &opengl_conf);
+    mode = opts->gles_mode;
 
-    // Version too high
-    if (opts->restrict_version && version >= opts->restrict_version) {
-        ret = false;
-        goto done;
-    }
-
-    switch (opts->gles_mode) {
-    case GLES_YES:  ret = es;   goto done;
-    case GLES_NO:   ret = !es;  goto done;
-    case GLES_AUTO: ret = true; goto done;
-    default: abort();
-    }
-
-done:
     talloc_free(tmp);
-    return ret;
+    return mode;
 }
 
 void ra_gl_ctx_uninit(struct ra_ctx *ctx)
@@ -134,6 +115,10 @@ void ra_gl_ctx_uninit(struct ra_ctx *ctx)
         talloc_free(ctx->swapchain);
         ctx->swapchain = NULL;
     }
+
+    // Clean up any potentially left-over debug callback
+    if (ctx->ra)
+        ra_gl_set_debug(ctx->ra, false);
 
     ra_free(&ctx->ra);
 }
@@ -235,8 +220,19 @@ int ra_gl_ctx_color_depth(struct ra_swapchain *sw)
 bool ra_gl_ctx_start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
 {
     struct priv *p = sw->priv;
-    out_fbo->tex = p->wrapped_fb;
-    out_fbo->flip = !p->params.flipped; // OpenGL FBs are normally flipped
+
+    bool visible = true;
+    if (p->params.check_visible)
+        visible = p->params.check_visible(sw->ctx);
+
+    // If out_fbo is NULL, this was called from vo_gpu_next. Bail out.
+    if (!out_fbo || !visible)
+        return visible;
+
+    *out_fbo = (struct ra_fbo) {
+         .tex = p->wrapped_fb,
+         .flip = !p->gl->flipped, // OpenGL FBs are normally flipped
+    };
     return true;
 }
 
@@ -258,7 +254,7 @@ bool ra_gl_ctx_submit_frame(struct ra_swapchain *sw, const struct vo_frame *fram
     case FLUSH_AUTO:
         if (frame->display_synced)
             break;
-        // fall through
+        MP_FALLTHROUGH;
     case FLUSH_YES:
         gl->Flush();
     }
@@ -276,7 +272,7 @@ static void check_pattern(struct priv *p, int item)
         p->matches++;
     } else {
         p->mismatches++;
-        MP_WARN(p, "wrong pattern, expected %d got %d (hit: %d, mis: %d)\n",
+        MP_WARN(p, "wrong pattern, expected %d got %d (hit: %d, miss: %d)\n",
                 expected, item, p->matches, p->mismatches);
     }
 }
@@ -306,11 +302,19 @@ void ra_gl_ctx_swap_buffers(struct ra_swapchain *sw)
             check_pattern(p, step);
     }
 
-    while (p->num_vsync_fences >= sw->ctx->opts.swapchain_depth) {
+    while (p->num_vsync_fences >= sw->ctx->vo->opts->swapchain_depth) {
         gl->ClientWaitSync(p->vsync_fences[0], GL_SYNC_FLUSH_COMMANDS_BIT, 1e9);
         gl->DeleteSync(p->vsync_fences[0]);
         MP_TARRAY_REMOVE_AT(p->vsync_fences, p->num_vsync_fences, 0);
     }
+}
+
+static void ra_gl_ctx_get_vsync(struct ra_swapchain *sw,
+                                struct vo_vsync_info *info)
+{
+    struct priv *p = sw->priv;
+    if (p->params.get_vsync)
+        p->params.get_vsync(sw->ctx, info);
 }
 
 static const struct ra_swapchain_fns ra_gl_swapchain_fns = {
@@ -318,4 +322,5 @@ static const struct ra_swapchain_fns ra_gl_swapchain_fns = {
     .start_frame   = ra_gl_ctx_start_frame,
     .submit_frame  = ra_gl_ctx_submit_frame,
     .swap_buffers  = ra_gl_ctx_swap_buffers,
+    .get_vsync     = ra_gl_ctx_get_vsync,
 };

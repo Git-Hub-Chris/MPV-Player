@@ -19,48 +19,10 @@ syntax is:
     The ``--vf`` description describes how libavfilter can be used and how to
     workaround deprecated mpv filters.
 
-See ``--vf`` group of options for info on how ``--af-defaults``, ``--af-add``,
-``--af-pre``, ``--af-del``, ``--af-clr``, and possibly others work.
+See ``--vf`` group of options for info on how ``--af-add``, ``--af-pre``,
+``--af-clr``, and possibly others work.
 
 Available filters are:
-
-``lavrresample[=option1:option2:...]``
-    This filter uses libavresample (or libswresample, depending on the build)
-    to change sample rate, sample format, or channel layout of the audio stream.
-    This filter is automatically enabled if the audio output does not support
-    the audio configuration of the file being played.
-
-    .. warning::
-
-        Deprecated. Either use the ``--audio-resample-...`` options to customize
-        resampling, or the libavfilter ``--af=aresample`` filter, which has its
-        own options.
-
-    It supports only the following sample formats: u8, s16, s32, float.
-
-    ``filter-size=<length>``
-        Length of the filter with respect to the lower sampling rate. (default:
-        16)
-    ``phase-shift=<count>``
-        Log2 of the number of polyphase entries. (..., 10->1024, 11->2048,
-        12->4096, ...) (default: 10->1024)
-    ``cutoff=<cutoff>``
-        Cutoff frequency (0.0-1.0), default set depending upon filter length.
-    ``linear``
-        If set then filters will be linearly interpolated between polyphase
-        entries. (default: no)
-    ``no-detach``
-        Do not detach if input and output audio format/rate/channels match.
-        (If you just want to set defaults for this filter that will be used
-        even by automatically inserted lavrresample instances, you should
-        prefer setting them with the ``--audio-resample-...`` options.) This
-        does not do anything anymore and the filter will never detach.
-    ``normalize=<yes|no|auto>``
-        Whether to normalize when remixing channel layouts (default: auto).
-        ``auto`` uses the value set by ``--audio-normalize-downmix``.
-    ``o=<string>``
-        Set AVOptions on the SwrContext or AVAudioResampleContext. These should
-        be documented by FFmpeg or Libav.
 
 ``lavcac3enc[=options]``
     Encode multi-channel audio to AC-3 at runtime using libavcodec. Supports
@@ -138,7 +100,7 @@ Available filters are:
 
 ``scaletempo[=option1:option2:...]``
     Scales audio tempo without altering pitch, optionally synced to playback
-    speed (default).
+    speed.
 
     This works by playing 'stride' ms of audio at normal speed then consuming
     'stride*scale' ms of input audio. It pieces the strides together by
@@ -154,8 +116,8 @@ Available filters are:
         cause noticeable skips at high scale amounts and an echo at low scale
         amounts. Very low values will alter pitch. Increasing improves
         performance. (default: 60)
-    ``overlap=<percent>``
-        Percentage of stride to overlap. Decreasing improves performance.
+    ``overlap=<factor>``
+        Factor of stride to overlap. Decreasing improves performance.
         (default: .20)
     ``search=<amount>``
         Length in milliseconds to search for best overlap position. Decreasing
@@ -200,21 +162,59 @@ Available filters are:
             Changing playback speed would change pitch, leaving audio tempo at
             1.2x.
 
+``scaletempo2[=option1:option2:...]``
+    Scales audio tempo without altering pitch.
+    The algorithm is ported from chromium and uses the
+    Waveform Similarity Overlap-and-add (WSOLA) method.
+    It seems to achieves higher audio quality than scaletempo, and rubberband R2
+    engine, or ``engine=faster``. This filter is inserted automatically if
+    ``audio-pitch-correction`` option is used (on by default) when the playback
+    speed is changed.
+
+    By default, the ``search-interval`` and ``window-size`` parameters
+    have the same values as in chromium.
+
+    ``min-speed=<speed>``
+        Mute audio if the playback speed is below ``<speed>``. (default: 0.25)
+
+    ``max-speed=<speed>``
+        Mute audio if the playback speed is above ``<speed>``
+        and ``<speed> != 0``. (default: 8.0)
+
+    ``search-interval=<amount>``
+        Length in milliseconds to search for best overlap position. (default: 40)
+
+    ``window-size=<amount>``
+        Length in milliseconds of the overlap-and-add window. (default: 12)
+
 ``rubberband``
     High quality pitch correction with librubberband. This can be used in place
-    of ``scaletempo``, and will be used to adjust audio pitch when playing
-    at speed different from normal. It can also be used to adjust audio pitch
-    without changing playback speed.
+    of ``scaletempo`` and ``scaletempo2``, and will be used to adjust audio pitch
+    when playing at speed different from normal. It can also be used to adjust
+    audio pitch without changing playback speed.
 
-    ``<pitch-scale>``
+    ``pitch-scale=<amount>``
         Sets the pitch scaling factor. Frequencies are multiplied by this value.
+        (default: 1.0)
+
+    ``engine=<faster|finer>``
+        Select the core Rubberband engine to be used. There are two available:
+
+        :Faster: This is the Rubberband R2 engine. It uses significantly less
+                 CPU than the Finer (R3) engine.
+        :Finer: This is the Rubberband R3 engine. This engine is only available
+                with librubberband version 3 or newer. This produces significantly
+                higher quality output, at the cost of higher CPU usage. (Default
+                if available)
 
     This filter has a number of additional sub-options. You can list them with
     ``mpv --af=rubberband=help``. This will also show the default values
     for each option. The options are not documented here, because they are
     merely passed to librubberband. Look at the librubberband documentation
     to learn what each option does:
-    http://breakfastquay.com/rubberband/code-doc/classRubberBand_1_1RubberBandStretcher.html
+    https://breakfastquay.com/rubberband/code-doc/classRubberBand_1_1RubberBandStretcher.html
+    Do note that certain options are only applicable to one of R2 (faster) and
+    R3 (finer) engines.
     (The mapping of the mpv rubberband filter sub-option names and values to
     those of librubberband follows a simple pattern: ``"Option" + Name + Value``.)
 
@@ -226,10 +226,7 @@ Available filters are:
         using the standard ``speed`` property, not ``af-command``.
 
     ``multiply-pitch <factor>``
-        Multiply the current value of ``<pitch-scale>`` dynamically.  For
-        example: 0.5 to go down by an octave, 1.5 to go up by a perfect fifth.
-        If you want to go up or down by semi-tones, use 1.059463094352953 and
-        0.9438743126816935
+        Multiply the current value of ``<pitch-scale>`` dynamically.
 
 ``lavfi=graph``
     Filter audio using FFmpeg's libavfilter.
@@ -258,3 +255,10 @@ Available filters are:
         broken filters. In practice, these broken filters will either cause slow
         A/V desync over time (with some files), or break playback completely if
         you seek or start playback from the middle of a file.
+
+``drop``
+    This filter drops or repeats audio frames to adapt to playback speed. It
+    always operates on full audio frames, because it was made to handle SPDIF
+    (compressed audio passthrough). This is used automatically if the
+    ``--video-sync=display-adrop`` option is used. Do not use this filter (or
+    the given option); they are extremely low quality.

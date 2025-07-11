@@ -1,20 +1,22 @@
 #include <windows.h>
-
-#ifndef BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE
-#define BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE (0x0001)
-#endif
-
-#include "config.h"
+#include <shellapi.h>
 
 #include "common/common.h"
 #include "osdep/io.h"
 #include "osdep/terminal.h"
 #include "osdep/main-fn.h"
 
-int wmain(int argc, wchar_t *argv[]);
+#ifndef HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION
 
-// mpv does its own wildcard expansion in the option parser
-int _dowildcard = 0;
+#define HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION  1
+#define HeapOptimizeResources ((HEAP_INFORMATION_CLASS)3)
+
+typedef struct HEAP_OPTIMIZE_RESOURCES_INFORMATION {
+    DWORD Version;
+    DWORD Flags;
+} HEAP_OPTIMIZE_RESOURCES_INFORMATION;
+
+#endif
 
 static bool is_valid_handle(HANDLE h)
 {
@@ -37,18 +39,21 @@ static void microsoft_nonsense(void)
     // Enable heap corruption detection
     HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
 
-    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
-    WINBOOL (WINAPI *pSetSearchPathMode)(DWORD Flags) =
-        (WINBOOL (WINAPI *)(DWORD))GetProcAddress(kernel32, "SetSearchPathMode");
+    // Allow heap cache optimization and memory decommit
+    HEAP_OPTIMIZE_RESOURCES_INFORMATION heap_info = {
+        .Version = HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION
+    };
+    HeapSetInformation(NULL, HeapOptimizeResources, &heap_info,
+                       sizeof(heap_info));
 
     // Always use safe search paths for DLLs and other files, ie. never use the
     // current directory
     SetDllDirectoryW(L"");
-    if (pSetSearchPathMode)
-        pSetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE);
+    SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE |
+                      BASE_SEARCH_PATH_PERMANENT);
 }
 
-int wmain(int argc, wchar_t *argv[])
+int main(void)
 {
     microsoft_nonsense();
 
@@ -61,11 +66,14 @@ int wmain(int argc, wchar_t *argv[])
     // is expecting mpv to show some UI, so enable the pseudo-GUI profile.
     bool gui = !has_console && !has_redirected_stdio();
 
+    int argc = 0;
+    wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+
     int argv_len = 0;
     char **argv_u8 = NULL;
 
     // Build mpv's UTF-8 argv, and add the pseudo-GUI profile if necessary
-    if (argv[0])
+    if (argc > 0 && argv[0])
         MP_TARRAY_APPEND(NULL, argv_u8, argv_len, mp_to_utf8(argv_u8, argv[0]));
     if (gui) {
         MP_TARRAY_APPEND(NULL, argv_u8, argv_len,
@@ -79,4 +87,9 @@ int wmain(int argc, wchar_t *argv[])
 
     talloc_free(argv_u8);
     return ret;
+}
+
+int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, LPSTR cmdline, int cmdshow)
+{
+    return main();
 }

@@ -17,7 +17,7 @@
 #include "utils.h"
 
 // Force cache flush if more than this number of shaders is created.
-#define SC_MAX_ENTRIES 48
+#define SC_MAX_ENTRIES 256
 
 union uniform_val {
     float f[9];         // RA_VARTYPE_FLOAT
@@ -185,8 +185,6 @@ void gl_sc_enable_extension(struct gl_shader_cache *sc, char *name)
     MP_TARRAY_APPEND(sc, sc->exts, sc->num_exts, talloc_strdup(sc, name));
 }
 
-#define bstr_xappend0(sc, b, s) bstr_xappend(sc, b, bstr0(s))
-
 void gl_sc_add(struct gl_shader_cache *sc, const char *text)
 {
     bstr_xappend0(sc, &sc->text, text);
@@ -254,7 +252,7 @@ static struct sc_uniform *find_uniform(struct gl_shader_cache *sc,
 
 static int gl_sc_next_binding(struct gl_shader_cache *sc, enum ra_vartype type)
 {
-    return sc->next_binding[sc->ra->fns->desc_namespace(type)]++;
+    return sc->next_binding[sc->ra->fns->desc_namespace(sc->ra, type)]++;
 }
 
 void gl_sc_uniform_dynamic(struct gl_shader_cache *sc)
@@ -339,7 +337,7 @@ void gl_sc_uniform_image2D_wo(struct gl_shader_cache *sc, const char *name,
 
     struct sc_uniform *u = find_uniform(sc, name);
     u->input.type = RA_VARTYPE_IMG_W;
-    u->glsl_type = "writeonly image2D";
+    u->glsl_type = sc->ra->glsl_es ? "writeonly highp image2D" : "writeonly image2D";
     u->input.binding = gl_sc_next_binding(sc, u->input.type);
     u->v.tex = tex;
 }
@@ -458,6 +456,26 @@ void gl_sc_blend(struct gl_shader_cache *sc,
     sc->params.blend_dst_alpha = blend_dst_alpha;
 }
 
+const char *gl_sc_bvec(struct gl_shader_cache *sc, int dims)
+{
+    static const char *bvecs[] = {
+        [1] = "bool",
+        [2] = "bvec2",
+        [3] = "bvec3",
+        [4] = "bvec4",
+    };
+
+    static const char *vecs[] = {
+        [1] = "float",
+        [2] = "vec2",
+        [3] = "vec3",
+        [4] = "vec4",
+    };
+
+    assert(dims > 0 && dims < MP_ARRAY_SIZE(bvecs));
+    return sc->ra->glsl_version >= 130 ? bvecs[dims] : vecs[dims];
+}
+
 static const char *vao_glsl_type(const struct ra_renderpass_input *e)
 {
     // pretty dumb... too dumb, but works for us
@@ -466,7 +484,7 @@ static const char *vao_glsl_type(const struct ra_renderpass_input *e)
     case 2: return "vec2";
     case 3: return "vec3";
     case 4: return "vec4";
-    default: abort();
+    default: MP_ASSERT_UNREACHABLE();
     }
 }
 
@@ -533,14 +551,20 @@ static void update_uniform(struct gl_shader_cache *sc, struct sc_entry *e,
         assert(e->pushc);
         update_pushc(sc->ra, e->pushc, u);
         break;
-    default: abort();
+    default: MP_ASSERT_UNREACHABLE();
     }
 }
 
-void gl_sc_set_cache_dir(struct gl_shader_cache *sc, const char *dir)
+void gl_sc_set_cache_dir(struct gl_shader_cache *sc, char *dir)
 {
     talloc_free(sc->cache_dir);
+    if (dir && dir[0]) {
+        dir = mp_get_user_path(NULL, sc->global, dir);
+    } else {
+        dir = mp_find_user_file(NULL, sc->global, "cache", "");
+    }
     sc->cache_dir = talloc_strdup(sc, dir);
+    talloc_free(dir);
 }
 
 static bool create_pass(struct gl_shader_cache *sc, struct sc_entry *entry)
@@ -559,8 +583,7 @@ static bool create_pass(struct gl_shader_cache *sc, struct sc_entry *entry)
         cache_dir = mp_get_user_path(tmp, sc->global, sc->cache_dir);
 
         struct AVSHA *sha = av_sha_alloc();
-        if (!sha)
-            abort();
+        MP_HANDLE_OOM(sha);
         av_sha_init(sha, 256);
         av_sha_update(sha, entry->total.start, entry->total.len);
 
@@ -666,8 +689,7 @@ static void add_uniforms(struct gl_shader_cache *sc, bstr *dst)
             struct sc_uniform *u = &sc->uniforms[n];
             if (u->type != SC_UNIFORM_TYPE_PUSHC)
                 continue;
-            // push constants don't support explicit offsets
-            ADD(dst, "/*offset=%zu*/ %s %s;\n", u->offset, u->glsl_type,
+            ADD(dst, "layout(offset=%zu) %s %s;\n", u->offset, u->glsl_type,
                 u->input.name);
         }
         ADD(dst, "};\n");
@@ -681,7 +703,7 @@ static void add_uniforms(struct gl_shader_cache *sc, bstr *dst)
         case RA_VARTYPE_INT:
         case RA_VARTYPE_FLOAT:
             assert(sc->ra->caps & RA_CAP_GLOBAL_UNIFORM);
-            // fall through
+            MP_FALLTHROUGH;
         case RA_VARTYPE_TEX:
             // Vulkan requires explicitly assigning the bindings in the shader
             // source. For OpenGL it's optional, but requires higher GL version
@@ -696,7 +718,7 @@ static void add_uniforms(struct gl_shader_cache *sc, bstr *dst)
                 u->input.binding, u->input.name, u->buffer_format);
             break;
         case RA_VARTYPE_BUF_RW:
-            ADD(dst, "layout(std430, binding=%d) buffer %s { %s };\n",
+            ADD(dst, "layout(std430, binding=%d) restrict coherent buffer %s { %s };\n",
                 u->input.binding, u->input.name, u->buffer_format);
             break;
         case RA_VARTYPE_IMG_W: {
@@ -713,7 +735,7 @@ static void add_uniforms(struct gl_shader_cache *sc, bstr *dst)
             } else if (fmt) {
                 ADD(dst, "layout(%s) ", fmt);
             }
-            ADD(dst, "uniform %s %s;\n", u->glsl_type, u->input.name);
+            ADD(dst, "uniform restrict %s %s;\n", u->glsl_type, u->input.name);
         }
         }
     }
@@ -762,7 +784,12 @@ static void gl_sc_generate(struct gl_shader_cache *sc,
     for (int n = 0; n < sc->num_exts; n++)
         ADD(header, "#extension %s : enable\n", sc->exts[n]);
     if (glsl_es) {
+        ADD(header, "#ifdef GL_FRAGMENT_PRECISION_HIGH\n");
+        ADD(header, "precision highp float;\n");
+        ADD(header, "#else\n");
         ADD(header, "precision mediump float;\n");
+        ADD(header, "#endif\n");
+
         ADD(header, "precision mediump sampler2D;\n");
         if (sc->ra->caps & RA_CAP_TEX_3D)
             ADD(header, "precision mediump sampler3D;\n");

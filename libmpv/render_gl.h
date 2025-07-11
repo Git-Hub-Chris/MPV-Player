@@ -93,7 +93,7 @@ extern "C" {
  *                MPV_RENDER_PARAM_WL_DISPLAY for Wayland)
  * - nVidia/Linux: Both GLX and EGL should work (GLX is required if vdpau is
  *                 used, e.g. due to old drivers.)
- * - OSX: CGL is required (CGLGetCurrentContext() returning non-NULL)
+ * - macOS: CGL is required (CGLGetCurrentContext() returning non-NULL)
  * - iOS: EAGL is required (EAGLContext.currentContext returning non-nil)
  *
  * Once these things are setup, hardware decoding can be enabled/disabled at
@@ -120,11 +120,6 @@ typedef struct mpv_opengl_init_params {
      * Value passed as ctx parameter to get_proc_address().
      */
     void *get_proc_address_ctx;
-    /**
-     * This should not be used. It is deprecated and will be removed or ignored
-     * when the opengl_cb API is removed.
-     */
-    const char *extra_exts;
 } mpv_opengl_init_params;
 
 /**
@@ -150,11 +145,32 @@ typedef struct mpv_opengl_fbo {
 } mpv_opengl_fbo;
 
 /**
- * For MPV_RENDER_PARAM_DRM_DISPLAY.
+ * Deprecated. For MPV_RENDER_PARAM_DRM_DISPLAY.
  */
 typedef struct mpv_opengl_drm_params {
+    int fd;
+    int crtc_id;
+    int connector_id;
+    struct _drmModeAtomicReq **atomic_request_ptr;
+    int render_fd;
+} mpv_opengl_drm_params;
+
+/**
+ * For MPV_RENDER_PARAM_DRM_DRAW_SURFACE_SIZE.
+ */
+typedef struct mpv_opengl_drm_draw_surface_size {
     /**
-     * DRM fd (int). set this to -1 if invalid.
+     * size of the draw plane surface in pixels.
+     */
+    int width, height;
+} mpv_opengl_drm_draw_surface_size;
+
+/**
+ * For MPV_RENDER_PARAM_DRM_DISPLAY_V2.
+ */
+typedef struct mpv_opengl_drm_params_v2 {
+    /**
+     * DRM fd (int). Set to -1 if invalid.
      */
     int fd;
 
@@ -174,17 +190,19 @@ typedef struct mpv_opengl_drm_params {
      * The atomic request pointer is usually changed at every renderloop.
      */
     struct _drmModeAtomicReq **atomic_request_ptr;
-} mpv_opengl_drm_params;
+
+    /**
+     * DRM render node. Used for VAAPI interop.
+     * Set to -1 if invalid.
+     */
+    int render_fd;
+} mpv_opengl_drm_params_v2;
+
 
 /**
- * For MPV_RENDER_PARAM_DRM_OSD_SIZE.
+ * For backwards compatibility with the old naming of mpv_opengl_drm_draw_surface_size
  */
-typedef struct mpv_opengl_drm_osd_size {
-    /**
-     * size of the OSD in pixels.
-     */
-    int width, height;
-} mpv_opengl_drm_osd_size;
+#define mpv_opengl_drm_osd_size mpv_opengl_drm_draw_surface_size
 
 #ifdef __cplusplus
 }

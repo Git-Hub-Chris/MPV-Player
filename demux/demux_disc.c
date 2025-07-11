@@ -94,7 +94,7 @@ static void add_dvd_streams(demuxer_t *demuxer)
 
             // emulate the extradata
             struct mp_csp_params csp = MP_CSP_PARAMS_DEFAULTS;
-            struct mp_cmat cmatrix;
+            struct pl_transform3x3 cmatrix;
             mp_get_csp_matrix(&csp, &cmatrix);
 
             char *s = talloc_strdup(sh, "");
@@ -177,9 +177,15 @@ static void d_seek(demuxer_t *demuxer, double seek_pts, int flags)
 
     MP_VERBOSE(demuxer, "seek to: %f\n", seek_pts);
 
+    // Supposed to induce a seek reset. Does it even work? I don't know.
+    // It will log some bogus error messages, since the demuxer will try a
+    // low level seek, which will obviously not work. But it will probably
+    // clear its internal buffers.
+    demux_seek(p->slave, 0, SEEK_FACTOR | SEEK_FORCE);
+    stream_drop_buffers(demuxer->stream);
+
     double seek_arg[] = {seek_pts, flags};
     stream_control(demuxer->stream, STREAM_CTRL_SEEK_TO_TIME, seek_arg);
-    demux_control(p->slave, DEMUXER_CTRL_RESYNC, NULL);
 
     p->seek_reinit = true;
 }
@@ -199,15 +205,15 @@ static void reset_pts(demuxer_t *demuxer)
     p->seek_reinit = false;
 }
 
-static int d_fill_buffer(demuxer_t *demuxer)
+static bool d_read_packet(struct demuxer *demuxer, struct demux_packet **out_pkt)
 {
     struct priv *p = demuxer->priv;
 
     struct demux_packet *pkt = demux_read_any_packet(p->slave);
     if (!pkt)
-        return 0;
+        return false;
 
-    demux_update(p->slave);
+    demux_update(p->slave, MP_NOPTS_VALUE);
 
     if (p->seek_reinit)
         reset_pts(demuxer);
@@ -215,18 +221,20 @@ static int d_fill_buffer(demuxer_t *demuxer)
     add_streams(demuxer);
     if (pkt->stream >= p->num_streams) { // out of memory?
         talloc_free(pkt);
-        return 0;
+        return true;
     }
 
     struct sh_stream *sh = p->streams[pkt->stream];
     if (!demux_stream_is_selected(sh)) {
         talloc_free(pkt);
-        return 1;
+        return true;
     }
 
+    pkt->stream = sh->index;
+
     if (p->is_cdda) {
-        demux_add_packet(sh, pkt);
-        return 1;
+        *out_pkt = pkt;
+        return true;
     }
 
     MP_TRACE(demuxer, "ipts: %d %f %f\n", sh->type, pkt->pts, pkt->dts);
@@ -261,8 +269,35 @@ static int d_fill_buffer(demuxer_t *demuxer)
 
     MP_TRACE(demuxer, "opts: %d %f %f\n", sh->type, pkt->pts, pkt->dts);
 
-    demux_add_packet(sh, pkt);
+    *out_pkt = pkt;
     return 1;
+}
+
+static void add_stream_editions(struct demuxer *demuxer)
+{
+    unsigned titles = 0;
+    if (stream_control(demuxer->stream, STREAM_CTRL_GET_NUM_TITLES, &titles) != STREAM_OK)
+        return;
+    for (unsigned title = 0; title < titles; ++title) {
+        double duration = title;
+        if (stream_control(demuxer->stream, STREAM_CTRL_GET_TITLE_LENGTH, &duration) != STREAM_OK)
+            continue;
+
+        struct demux_edition new = {
+            .demuxer_id = title,
+            .default_edition = false,
+            .metadata = talloc_zero(demuxer, struct mp_tags),
+        };
+        MP_TARRAY_APPEND(demuxer, demuxer->editions, demuxer->num_editions, new);
+
+        char *time = mp_format_time(duration, true);
+        double playlist = title;
+        if (stream_control(demuxer->stream, STREAM_CTRL_GET_TITLE_PLAYLIST, &playlist) == STREAM_OK)
+            time = talloc_asprintf_append(time, ") (%05.0f.mpls", playlist);
+        mp_tags_set_str(new.metadata, "TITLE",
+                        mp_tprintf(42, "title: %u (%s)", title + 1, time));
+        talloc_free(time);
+    }
 }
 
 static void add_stream_chapters(struct demuxer *demuxer)
@@ -287,16 +322,14 @@ static int d_open(demuxer_t *demuxer, enum demux_check check)
 
     struct demuxer_params params = {
         .force_format = "+lavf",
-        .does_not_own_stream = true,
+        .external_stream = demuxer->stream,
+        .stream_flags = demuxer->stream_origin,
     };
 
     struct stream *cur = demuxer->stream;
     const char *sname = "";
-    while (cur) {
-        if (cur->info)
-            sname = cur->info->name;
-        cur = cur->underlying; // down the caching chain
-    }
+    if (cur->info)
+        sname = cur->info->name;
 
     p->is_cdda = strcmp(sname, "cdda") == 0;
     p->is_dvd = strcmp(sname, "dvd") == 0 ||
@@ -316,36 +349,28 @@ static int d_open(demuxer_t *demuxer, enum demux_check check)
 
     // Initialize the playback time. We need to read _some_ data to get the
     // correct stream-layer time (at least with libdvdnav).
-    stream_peek(demuxer->stream, 1);
+    stream_read_peek(demuxer->stream, &(char){0}, 1);
     reset_pts(demuxer);
 
-    p->slave = demux_open(demuxer->stream, &params, demuxer->global);
+    p->slave = demux_open_url("-", &params, demuxer->cancel, demuxer->global);
     if (!p->slave)
         return -1;
 
-    // So that we don't miss initial packets of delayed subtitle streams.
-    demux_set_stream_autoselect(p->slave, true);
-
-    // With cache enabled, the stream can be seekable. This causes demux_lavf.c
-    // (actually libavformat/mpegts.c) to seek sometimes when reading a packet.
-    // It does this to seek back a bit in case the current file position points
-    // into the middle of a packet.
-    if (!p->is_cdda) {
-        demuxer->stream->seekable = false;
-
-        // Can be seekable even if the stream isn't.
-        demuxer->seekable = true;
-    }
+    // Can be seekable even if the stream isn't.
+    demuxer->seekable = true;
 
     add_dvd_streams(demuxer);
     add_streams(demuxer);
     add_stream_chapters(demuxer);
+    add_stream_editions(demuxer);
 
     double len;
     if (stream_control(demuxer->stream, STREAM_CTRL_GET_TIME_LENGTH, &len) >= 1)
         demuxer->duration = len;
 
-    demuxer->extended_ctrls = true;
+    unsigned title;
+    if (stream_control(demuxer->stream, STREAM_CTRL_GET_CURRENT_TITLE, &title) >= 1)
+        demuxer->edition = title;
 
     return 0;
 }
@@ -356,27 +381,12 @@ static void d_close(demuxer_t *demuxer)
     demux_free(p->slave);
 }
 
-static int d_control(demuxer_t *demuxer, int cmd, void *arg)
-{
-    struct priv *p = demuxer->priv;
-
-    switch (cmd) {
-    case DEMUXER_CTRL_RESYNC:
-        demux_flush(p->slave);
-        break; // relay to slave demuxer
-    case DEMUXER_CTRL_SWITCHED_TRACKS:
-        reselect_streams(demuxer);
-        return CONTROL_OK;
-    }
-    return demux_control(p->slave, cmd, arg);
-}
-
 const demuxer_desc_t demuxer_desc_disc = {
     .name = "disc",
     .desc = "CD/DVD/BD wrapper",
-    .fill_buffer = d_fill_buffer,
+    .read_packet = d_read_packet,
     .open = d_open,
     .close = d_close,
     .seek = d_seek,
-    .control = d_control,
+    .switched_tracks = reselect_streams,
 };

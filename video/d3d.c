@@ -15,8 +15,6 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <pthread.h>
-
 #include "config.h"
 
 #include <libavcodec/avcodec.h>
@@ -28,20 +26,21 @@
 #include <libavutil/hwcontext_dxva2.h>
 #endif
 
-#include "common/common.h"
 #include "common/av_common.h"
+#include "common/common.h"
+#include "osdep/threads.h"
+#include "osdep/windows_utils.h"
 #include "video/fmt-conversion.h"
 #include "video/hwdec.h"
-#include "video/mp_image.h"
 #include "video/mp_image_pool.h"
-#include "osdep/windows_utils.h"
+#include "video/mp_image.h"
 
 #include "d3d.h"
 
 HMODULE d3d11_dll, d3d9_dll, dxva2_dll;
 PFN_D3D11_CREATE_DEVICE d3d11_D3D11CreateDevice;
 
-static pthread_once_t d3d_load_once = PTHREAD_ONCE_INIT;
+static mp_once d3d_load_once = MP_STATIC_ONCE_INITIALIZER;
 
 #if !HAVE_UWP
 static void d3d_do_load(void)
@@ -65,7 +64,7 @@ static void d3d_do_load(void)
 
 void d3d_load_dlls(void)
 {
-    pthread_once(&d3d_load_once, d3d_do_load);
+    mp_exec_once(&d3d_load_once, d3d_do_load);
 }
 
 // Test if Direct3D11 can be used by us. Basically, this prevents trying to use
@@ -112,15 +111,6 @@ AVBufferRef *d3d11_wrap_device_ref(ID3D11Device *device)
     return device_ref;
 }
 
-static void d3d11_complete_image_params(struct mp_image *img)
-{
-    AVHWFramesContext *hw_frames = (void *)img->hwctx->data;
-
-    // According to hwcontex_d3d11va.h, this means DXGI_FORMAT_420_OPAQUE.
-    img->params.hw_flags = hw_frames->sw_format == AV_PIX_FMT_YUV420P
-                         ? MP_IMAGE_HW_FLAG_OPAQUE : 0;
-}
-
 static struct AVBufferRef *d3d11_create_standalone(struct mpv_global *global,
         struct mp_log *plog, struct hwcontext_create_dev_params *params)
 {
@@ -152,7 +142,6 @@ static struct AVBufferRef *d3d11_create_standalone(struct mpv_global *global,
 
 const struct hwcontext_fns hwcontext_fns_d3d11 = {
     .av_hwdevice_type       = AV_HWDEVICE_TYPE_D3D11VA,
-    .complete_image_params  = d3d11_complete_image_params,
     .refine_hwframes        = d3d11_refine_hwframes,
     .create_dev             = d3d11_create_standalone,
 };
@@ -197,7 +186,7 @@ AVBufferRef *d3d9_wrap_device_ref(IDirect3DDevice9 *device)
     if (FAILED(hr))
         goto fail;
 
-    IDirect3DDeviceManager9_ResetDevice(hwctx->devmgr, device, reset_token);
+    hr = IDirect3DDeviceManager9_ResetDevice(hwctx->devmgr, device, reset_token);
     if (FAILED(hr))
         goto fail;
 

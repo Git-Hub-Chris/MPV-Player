@@ -178,6 +178,22 @@ struct mp_filter *mp_bidir_nop_filter_create(struct mp_filter *parent)
     return f;
 }
 
+static const struct mp_filter_info bidir_dummy_filter = {
+    .name = "dummy",
+};
+
+struct mp_filter *mp_bidir_dummy_filter_create(struct mp_filter *parent)
+{
+    struct mp_filter *f = mp_filter_create(parent, &bidir_dummy_filter);
+    if (!f)
+        return NULL;
+
+    mp_filter_add_pin(f, MP_PIN_IN, "in");
+    mp_filter_add_pin(f, MP_PIN_OUT, "out");
+
+    return f;
+}
+
 struct fixed_aframe_size_priv {
     int samples;
     bool pad_silence;
@@ -234,7 +250,7 @@ static void fixed_aframe_size_process(struct mp_filter *f)
         int in_samples = mp_aframe_get_size(p->in);
         int copy = MPMIN(in_samples, p->samples - p->out_written);
         if (!mp_aframe_copy_samples(p->out, p->out_written, p->in, 0, copy))
-            assert(0);
+            MP_ASSERT_UNREACHABLE();
         mp_aframe_skip_samples(p->in, copy);
         p->out_written += copy;
     }

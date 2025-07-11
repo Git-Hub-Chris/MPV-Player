@@ -23,30 +23,24 @@
 #include "common/msg.h"
 #include "audio/format.h"
 #include "options/m_option.h"
+#include "osdep/threads.h"
 #include "osdep/timer.h"
 
 #include <SLES/OpenSLES.h>
 #include <SLES/OpenSLES_Android.h>
-
-#include <pthread.h>
 
 struct priv {
     SLObjectItf sl, output_mix, player;
     SLBufferQueueItf buffer_queue;
     SLEngineItf engine;
     SLPlayItf play;
-    char *buf;
-    size_t buffer_size;
-    pthread_mutex_t buffer_lock;
+    void *buf;
+    int bytes_per_enqueue;
+    mp_mutex buffer_lock;
     double audio_latency;
 
-    int cfg_frames_per_buffer;
-};
-
-static const int fmtmap[][2] = {
-    { AF_FORMAT_U8, SL_PCMSAMPLEFORMAT_FIXED_8 },
-    { AF_FORMAT_S16, SL_PCMSAMPLEFORMAT_FIXED_16 },
-    { 0 }
+    int frames_per_enqueue;
+    int buffer_size_in_ms;
 };
 
 #define DESTROY(thing) \
@@ -67,11 +61,10 @@ static void uninit(struct ao *ao)
     p->engine = NULL;
     p->play = NULL;
 
-    pthread_mutex_destroy(&p->buffer_lock);
+    mp_mutex_destroy(&p->buffer_lock);
 
     free(p->buf);
     p->buf = NULL;
-    p->buffer_size = 0;
 }
 
 #undef DESTROY
@@ -81,25 +74,21 @@ static void buffer_callback(SLBufferQueueItf buffer_queue, void *context)
     struct ao *ao = context;
     struct priv *p = ao->priv;
     SLresult res;
-    void *data[1];
     double delay;
 
-    pthread_mutex_lock(&p->buffer_lock);
+    mp_mutex_lock(&p->buffer_lock);
 
-    data[0] = p->buf;
-    delay = 2 * p->buffer_size / (double)ao->bps;
+    delay = p->frames_per_enqueue / (double)ao->samplerate;
     delay += p->audio_latency;
-    ao_read_data(ao, data, p->buffer_size / ao->sstride,
-        mp_time_us() + 1000000LL * delay);
+    ao_read_data(ao, &p->buf, p->frames_per_enqueue,
+        mp_time_ns() + MP_TIME_S_TO_NS(delay), NULL, true, true);
 
-    res = (*buffer_queue)->Enqueue(buffer_queue, p->buf, p->buffer_size);
+    res = (*buffer_queue)->Enqueue(buffer_queue, p->buf, p->bytes_per_enqueue);
     if (res != SL_RESULT_SUCCESS)
         MP_ERR(ao, "Failed to Enqueue: %d\n", res);
 
-    pthread_mutex_unlock(&p->buffer_lock);
+    mp_mutex_unlock(&p->buffer_lock);
 }
-
-#define DEFAULT_BUFFER_SIZE_MS 250
 
 #define CHK(stmt) \
     { \
@@ -115,12 +104,14 @@ static int init(struct ao *ao)
     struct priv *p = ao->priv;
     SLDataLocator_BufferQueue locator_buffer_queue;
     SLDataLocator_OutputMix locator_output_mix;
-    SLDataFormat_PCM pcm;
+    SLAndroidDataFormat_PCM_EX pcm;
     SLDataSource audio_source;
     SLDataSink audio_sink;
 
     // This AO only supports two channels at the moment
     mp_chmap_from_channels(&ao->channels, 2);
+    // Upstream "Wilhelm" supports only 8000 <= rate <= 192000
+    ao->samplerate = MPCLAMP(ao->samplerate, 8000, 192000);
 
     CHK(slCreateEngine(&p->sl, 0, NULL, 0, NULL, NULL));
     CHK((*p->sl)->Realize(p->sl, SL_BOOLEAN_FALSE));
@@ -129,44 +120,56 @@ static int init(struct ao *ao)
     CHK((*p->output_mix)->Realize(p->output_mix, SL_BOOLEAN_FALSE));
 
     locator_buffer_queue.locatorType = SL_DATALOCATOR_BUFFERQUEUE;
-    locator_buffer_queue.numBuffers = 1;
+    locator_buffer_queue.numBuffers = 8;
 
-    pcm.formatType = SL_DATAFORMAT_PCM;
-    pcm.numChannels = 2;
-
-    int compatible_formats[AF_FORMAT_COUNT + 1];
-    af_get_best_sample_formats(ao->format, compatible_formats);
-    pcm.bitsPerSample = 0;
-    for (int i = 0; compatible_formats[i] && !pcm.bitsPerSample; ++i)
-        for (int j = 0; fmtmap[j][0]; ++j)
-            if (compatible_formats[i] == fmtmap[j][0]) {
-                ao->format = fmtmap[j][0];
-                pcm.bitsPerSample = fmtmap[j][1];
-                break;
-            }
-    if (!pcm.bitsPerSample) {
-        MP_ERR(ao, "Cannot find compatible audio format\n");
-        goto error;
+    if (af_fmt_is_int(ao->format)) {
+        // Be future-proof
+        if (af_fmt_to_bytes(ao->format) > 2)
+            ao->format = AF_FORMAT_S32;
+        else
+            ao->format = af_fmt_from_planar(ao->format);
+        pcm.formatType = SL_DATAFORMAT_PCM;
+    } else {
+        ao->format = AF_FORMAT_FLOAT;
+        pcm.formatType = SL_ANDROID_DATAFORMAT_PCM_EX;
+        pcm.representation = SL_ANDROID_PCM_REPRESENTATION_FLOAT;
     }
-    pcm.containerSize = 8 * af_fmt_to_bytes(ao->format);
+    pcm.numChannels = ao->channels.num;
+    pcm.containerSize = pcm.bitsPerSample = 8 * af_fmt_to_bytes(ao->format);
     pcm.channelMask = SL_SPEAKER_FRONT_LEFT | SL_SPEAKER_FRONT_RIGHT;
     pcm.endianness = SL_BYTEORDER_LITTLEENDIAN;
+    pcm.sampleRate = ao->samplerate * 1000;
 
-    // samplesPerSec is misnamed, actually it's samples per ms
-    pcm.samplesPerSec = ao->samplerate * 1000;
+    if (p->buffer_size_in_ms) {
+        ao->device_buffer = ao->samplerate * p->buffer_size_in_ms / 1000;
+        // As the purpose of buffer_size_in_ms is to request a specific
+        // soft buffer size:
+        ao->def_buffer = 0;
+    }
 
-    if (p->cfg_frames_per_buffer)
-        ao->device_buffer = p->cfg_frames_per_buffer;
-    else
-        ao->device_buffer = ao->samplerate * DEFAULT_BUFFER_SIZE_MS / 1000;
-    p->buffer_size = ao->device_buffer * ao->channels.num *
+    // But it does not make sense if it is smaller than the enqueue size:
+    if (p->frames_per_enqueue) {
+        ao->device_buffer = MPMAX(ao->device_buffer, p->frames_per_enqueue);
+    } else {
+        if (ao->device_buffer) {
+            p->frames_per_enqueue = ao->device_buffer;
+        } else if (ao->def_buffer) {
+            p->frames_per_enqueue = ao->def_buffer * ao->samplerate;
+        } else {
+            MP_ERR(ao, "Enqueue size is not set and can neither be derived\n");
+            goto error;
+        }
+    }
+
+    p->bytes_per_enqueue = p->frames_per_enqueue * ao->channels.num *
         af_fmt_to_bytes(ao->format);
-    p->buf = calloc(1, p->buffer_size);
+    p->buf = calloc(1, p->bytes_per_enqueue);
     if (!p->buf) {
         MP_ERR(ao, "Failed to allocate device buffer\n");
         goto error;
     }
-    int r = pthread_mutex_init(&p->buffer_lock, NULL);
+
+    int r = mp_mutex_init(&p->buffer_lock);
     if (r) {
         MP_ERR(ao, "Failed to initialize the mutex: %d\n", r);
         goto error;
@@ -245,11 +248,17 @@ const struct ao_driver audio_out_opensles = {
     .init      = init,
     .uninit    = uninit,
     .reset     = reset,
-    .resume    = resume,
+    .start     = resume,
 
     .priv_size = sizeof(struct priv),
+    .priv_defaults = &(const struct priv) {
+        .buffer_size_in_ms = 250,
+    },
     .options = (const struct m_option[]) {
-        OPT_INTRANGE("frames-per-buffer", cfg_frames_per_buffer, 0, 1, 96000),
+        {"frames-per-enqueue", OPT_INT(frames_per_enqueue),
+            M_RANGE(1, 96000)},
+        {"buffer-size-in-ms", OPT_INT(buffer_size_in_ms),
+            M_RANGE(0, 500)},
         {0}
     },
     .options_prefix = "opensles",

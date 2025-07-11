@@ -20,7 +20,6 @@
 
 #include "video/img_format.h"
 #include "fmt-conversion.h"
-#include "config.h"
 
 static const struct {
     int fmt;
@@ -33,6 +32,7 @@ static const struct {
     {IMGFMT_ABGR, AV_PIX_FMT_ABGR},
     {IMGFMT_RGBA, AV_PIX_FMT_RGBA},
     {IMGFMT_RGB24, AV_PIX_FMT_RGB24},
+    {IMGFMT_PAL8,  AV_PIX_FMT_PAL8},
     {IMGFMT_UYVY,  AV_PIX_FMT_UYVY422},
     {IMGFMT_NV12,  AV_PIX_FMT_NV12},
     {IMGFMT_Y8,    AV_PIX_FMT_GRAY8},
@@ -45,40 +45,28 @@ static const struct {
     {IMGFMT_420P,  AV_PIX_FMT_YUVJ420P},
     {IMGFMT_444P,  AV_PIX_FMT_YUVJ444P},
 
-#if LIBAVUTIL_VERSION_MICRO >= 100
     {IMGFMT_BGR0,  AV_PIX_FMT_BGR0},
     {IMGFMT_0RGB,  AV_PIX_FMT_0RGB},
     {IMGFMT_RGB0,  AV_PIX_FMT_RGB0},
     {IMGFMT_0BGR,  AV_PIX_FMT_0BGR},
-#else
-    {IMGFMT_BGR0,  AV_PIX_FMT_BGRA},
-    {IMGFMT_0RGB,  AV_PIX_FMT_ARGB},
-    {IMGFMT_RGB0,  AV_PIX_FMT_RGBA},
-    {IMGFMT_0BGR,  AV_PIX_FMT_ABGR},
-#endif
 
     {IMGFMT_RGBA64, AV_PIX_FMT_RGBA64},
 
+#ifdef AV_PIX_FMT_X2RGB10
+    {IMGFMT_RGB30,  AV_PIX_FMT_X2RGB10},
+#endif
+
     {IMGFMT_VDPAU, AV_PIX_FMT_VDPAU},
-#if HAVE_VIDEOTOOLBOX_HWACCEL
     {IMGFMT_VIDEOTOOLBOX,   AV_PIX_FMT_VIDEOTOOLBOX},
-#endif
-#if HAVE_ANDROID
     {IMGFMT_MEDIACODEC, AV_PIX_FMT_MEDIACODEC},
-#endif
     {IMGFMT_VAAPI, AV_PIX_FMT_VAAPI},
     {IMGFMT_DXVA2, AV_PIX_FMT_DXVA2_VLD},
-#if HAVE_D3D_HWACCEL
     {IMGFMT_D3D11, AV_PIX_FMT_D3D11},
-#endif
     {IMGFMT_MMAL, AV_PIX_FMT_MMAL},
-#if HAVE_CUDA_HWACCEL
     {IMGFMT_CUDA, AV_PIX_FMT_CUDA},
-#endif
     {IMGFMT_P010, AV_PIX_FMT_P010},
-#if HAVE_DRMPRIME
     {IMGFMT_DRMPRIME, AV_PIX_FMT_DRM_PRIME},
-#endif
+    {IMGFMT_VULKAN, AV_PIX_FMT_VULKAN},
 
     {0, AV_PIX_FMT_NONE}
 };
@@ -92,7 +80,7 @@ enum AVPixelFormat imgfmt2pixfmt(int fmt)
         enum AVPixelFormat pixfmt = fmt - IMGFMT_AVPIXFMT_START;
         // Avoid duplicate format - each format must be unique.
         int mpfmt = pixfmt2imgfmt(pixfmt);
-        if (mpfmt == fmt)
+        if (mpfmt == fmt && av_pix_fmt_desc_get(pixfmt))
             return pixfmt;
         return AV_PIX_FMT_NONE;
     }
@@ -115,7 +103,7 @@ int pixfmt2imgfmt(enum AVPixelFormat pix_fmt)
     }
 
     int generic = IMGFMT_AVPIXFMT_START + pix_fmt;
-    if (generic < IMGFMT_AVPIXFMT_END)
+    if (generic < IMGFMT_AVPIXFMT_END && av_pix_fmt_desc_get(pix_fmt))
         return generic;
 
     return 0;

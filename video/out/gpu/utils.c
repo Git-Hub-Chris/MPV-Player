@@ -33,10 +33,25 @@ void gl_transform_trans(struct gl_transform t, struct gl_transform *x)
     gl_transform_vec(t, &x->t[0], &x->t[1]);
 }
 
-void gl_transform_ortho_fbo(struct gl_transform *t, struct ra_fbo fbo)
+void gl_transform_ortho_fbo(struct gl_transform *t, const struct ra_fbo *fbo)
 {
-    int y_dir = fbo.flip ? -1 : 1;
-    gl_transform_ortho(t, 0, fbo.tex->params.w, 0, fbo.tex->params.h * y_dir);
+    int y_dir = fbo->flip ? -1 : 1;
+    gl_transform_ortho(t, 0, fbo->tex->params.w, 0, fbo->tex->params.h * y_dir);
+}
+
+double gl_video_scale_ambient_lux(float lmin, float lmax,
+                                  float rmin, float rmax, double lux)
+{
+    assert(lmax > lmin);
+
+    double num = (rmax - rmin) * (log10(lux) - log10(lmin));
+    double den = log10(lmax) - log10(lmin);
+    double result = num / den + rmin;
+
+    // clamp the result
+    float max = MPMAX(rmax, rmin);
+    float min = MPMIN(rmax, rmin);
+    return MPMAX(MPMIN(result, max), min);
 }
 
 void ra_buf_pool_uninit(struct ra *ra, struct ra_buf_pool *pool)
@@ -141,16 +156,17 @@ struct ra_layout std140_layout(struct ra_renderpass_input *inp)
     // the nearest multiple of vec4
     // 4. Matrices are treated like arrays of vectors
     // 5. Arrays/matrices are laid out with a stride equal to the alignment
-    size_t size = el_size * inp->dim_v;
+    size_t stride = el_size * inp->dim_v;
+    size_t align = stride;
     if (inp->dim_v == 3)
-        size += el_size;
+        align += el_size;
     if (inp->dim_m > 1)
-        size = MP_ALIGN_UP(size, sizeof(float[4]));
+        stride = align = MP_ALIGN_UP(stride, sizeof(float[4]));
 
     return (struct ra_layout) {
-        .align  = size,
-        .stride = size,
-        .size   = size * inp->dim_m,
+        .align  = align,
+        .stride = stride,
+        .size   = stride * inp->dim_m,
     };
 }
 
@@ -160,14 +176,15 @@ struct ra_layout std430_layout(struct ra_renderpass_input *inp)
 
     // std430 packing rules: like std140, except arrays/matrices are always
     // "tightly" packed, even arrays/matrices of vec3s
-    size_t size = el_size * inp->dim_v;
+    size_t stride = el_size * inp->dim_v;
+    size_t align = stride;
     if (inp->dim_v == 3 && inp->dim_m == 1)
-        size += el_size;
+        align += el_size;
 
     return (struct ra_layout) {
-        .align  = size,
-        .stride = size,
-        .size   = size * inp->dim_m,
+        .align  = align,
+        .stride = stride,
+        .size   = stride * inp->dim_m,
     };
 }
 
@@ -198,7 +215,7 @@ bool ra_tex_resize(struct ra *ra, struct mp_log *log, struct ra_tex **tex,
         .src_linear = true,
         .render_src = true,
         .render_dst = true,
-        .storage_dst = true,
+        .storage_dst = fmt->storable,
         .blit_src = true,
     };
 

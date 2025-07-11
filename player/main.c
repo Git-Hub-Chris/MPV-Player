@@ -21,16 +21,20 @@
 #include <math.h>
 #include <assert.h>
 #include <string.h>
-#include <pthread.h>
 #include <locale.h>
 
 #include "config.h"
+
+#include <libplacebo/config.h>
+
 #include "mpv_talloc.h"
 
 #include "misc/dispatch.h"
+#include "misc/random.h"
 #include "misc/thread_pool.h"
 #include "osdep/io.h"
 #include "osdep/terminal.h"
+#include "osdep/threads.h"
 #include "osdep/timer.h"
 #include "osdep/main-fn.h"
 
@@ -41,8 +45,10 @@
 #include "options/m_option.h"
 #include "options/m_property.h"
 #include "common/common.h"
+#include "common/encode_lavc.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
+#include "common/stats.h"
 #include "common/global.h"
 #include "filters/f_decoder_wrapper.h"
 #include "options/parse_configfile.h"
@@ -53,7 +59,6 @@
 #include "input/input.h"
 
 #include "audio/out/ao.h"
-#include "demux/demux.h"
 #include "misc/thread_tools.h"
 #include "sub/osd.h"
 #include "video/out/vo.h"
@@ -64,25 +69,25 @@
 #include "screenshot.h"
 
 static const char def_config[] =
-#include "player/builtin_conf.inc"
+#include "etc/builtin.conf.inc"
 ;
 
+#if HAVE_WIN32_SMTC
+#include "osdep/win32/smtc.h"
+#endif
+
 #if HAVE_COCOA
-#include "osdep/macosx_events.h"
+#include "osdep/mac/app_bridge.h"
 #endif
 
 #ifndef FULLCONFIG
 #define FULLCONFIG "(missing)\n"
 #endif
 
-#if !HAVE_STDATOMIC
-pthread_mutex_t mp_atomic_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
-
 enum exit_reason {
-  EXIT_NONE,
-  EXIT_NORMAL,
-  EXIT_ERROR,
+    EXIT_NONE,
+    EXIT_NORMAL,
+    EXIT_ERROR,
 };
 
 const char mp_help_text[] =
@@ -97,19 +102,18 @@ const char mp_help_text[] =
 " --playlist=<file> specify playlist file\n"
 "\n"
 " --list-options    list all mpv options\n"
-" --h=<string>      print options which contain the given string in their name\n"
-"\n";
+" --h=<string>      print options which contain the given string in their name\n";
 
-static pthread_mutex_t terminal_owner_lock = PTHREAD_MUTEX_INITIALIZER;
+static mp_static_mutex terminal_owner_lock = MP_STATIC_MUTEX_INITIALIZER;
 static struct MPContext *terminal_owner;
 
 static bool cas_terminal_owner(struct MPContext *old, struct MPContext *new)
 {
-    pthread_mutex_lock(&terminal_owner_lock);
+    mp_mutex_lock(&terminal_owner_lock);
     bool r = terminal_owner == old;
     if (r)
         terminal_owner = new;
-    pthread_mutex_unlock(&terminal_owner_lock);
+    mp_mutex_unlock(&terminal_owner_lock);
     return r;
 }
 
@@ -131,24 +135,32 @@ void mp_update_logging(struct MPContext *mpctx, bool preinit)
         }
     }
 
-    if (mp_msg_has_log_file(mpctx->global) && !had_log_file)
-        mp_print_version(mpctx->log, false); // for log-file=... in config files
+    if (mp_msg_has_log_file(mpctx->global) && !had_log_file) {
+        // for log-file=... in config files.
+        // we did flush earlier messages, but they were in a cyclic buffer, so
+        // the version might have been overwritten. ensure we have it.
+        mp_print_version(mpctx->log, false);
+    }
 
     if (enabled && !preinit && mpctx->opts->consolecontrols)
         terminal_setup_getch(mpctx->input);
+
+    if (enabled)
+        encoder_update_log(mpctx->global);
 }
 
 void mp_print_version(struct mp_log *log, int always)
 {
     int v = always ? MSGL_INFO : MSGL_V;
-    mp_msg(log, v, "%s %s\n built on %s\n",
-           mpv_version, mpv_copyright, mpv_builddate);
-    print_libav_versions(log, v);
-    mp_msg(log, v, "\n");
+    mp_msg(log, v, "%s %s\n", mpv_version, mpv_copyright);
+    if (strcmp(mpv_builddate, "UNKNOWN"))
+        mp_msg(log, v, " built on %s\n", mpv_builddate);
+    mp_msg(log, v, "libplacebo version: %s\n", PL_VERSION);
+    check_library_versions(log, v);
     // Only in verbose mode.
     if (!always) {
         mp_msg(log, MSGL_V, "Configuration: " CONFIGURATION "\n");
-        mp_msg(log, MSGL_V, "List of enabled features: %s\n", FULLCONFIG);
+        mp_msg(log, MSGL_V, "List of enabled features: " FULLCONFIG "\n");
         #ifdef NDEBUG
             mp_msg(log, MSGL_V, "Built with NDEBUG.\n");
         #endif
@@ -185,13 +197,15 @@ void mp_destroy(struct MPContext *mpctx)
     }
 
     mp_input_uninit(mpctx->input);
+    mp_clipboard_destroy(mpctx->clipboard);
 
     uninit_libav(mpctx->global);
 
     mp_msg_uninit(mpctx->global);
     assert(!mpctx->num_abort_list);
     talloc_free(mpctx->abort_list);
-    pthread_mutex_destroy(&mpctx->abort_lock);
+    mp_mutex_destroy(&mpctx->abort_lock);
+    talloc_free(mpctx->mconfig); // destroy before dispatch
     talloc_free(mpctx);
 }
 
@@ -199,33 +213,10 @@ static bool handle_help_options(struct MPContext *mpctx)
 {
     struct MPOpts *opts = mpctx->opts;
     struct mp_log *log = mpctx->log;
-    if (opts->audio_decoders && strcmp(opts->audio_decoders, "help") == 0) {
-        struct mp_decoder_list *list = audio_decoder_list();
-        mp_print_decoders(log, MSGL_INFO, "Audio decoders:", list);
-        talloc_free(list);
-        return true;
-    }
-    if (opts->audio_spdif && strcmp(opts->audio_spdif, "help") == 0) {
-        MP_INFO(mpctx, "Choices: ac3,dts-hd,dts (and possibly more)\n");
-        return true;
-    }
-    if (opts->video_decoders && strcmp(opts->video_decoders, "help") == 0) {
-        struct mp_decoder_list *list = video_decoder_list();
-        mp_print_decoders(log, MSGL_INFO, "Video decoders:", list);
-        talloc_free(list);
-        return true;
-    }
-    if ((opts->demuxer_name && strcmp(opts->demuxer_name, "help") == 0) ||
-        (opts->audio_demuxer_name && strcmp(opts->audio_demuxer_name, "help") == 0) ||
-        (opts->sub_demuxer_name && strcmp(opts->sub_demuxer_name, "help") == 0)) {
-        demuxer_help(log);
-        MP_INFO(mpctx, "\n");
-        return true;
-    }
     if (opts->ao_opts->audio_device &&
         strcmp(opts->ao_opts->audio_device, "help") == 0)
     {
-        ao_print_devices(mpctx->global, log);
+        ao_print_devices(mpctx->global, log, mpctx->ao);
         return true;
     }
     if (opts->property_print_help) {
@@ -239,9 +230,12 @@ static bool handle_help_options(struct MPContext *mpctx)
 
 static int cfg_include(void *ctx, char *filename, int flags)
 {
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    return 1;
+#endif
     struct MPContext *mpctx = ctx;
     char *fname = mp_get_user_path(NULL, mpctx->global, filename);
-    int r = m_config_parse_config_file(mpctx->mconfig, fname, NULL, flags);
+    int r = m_config_parse_config_file(mpctx->mconfig, mpctx->global, fname, NULL, flags);
     talloc_free(fname);
     return r;
 }
@@ -265,43 +259,50 @@ struct MPContext *mp_create(void)
     }
 
     char *enable_talloc = getenv("MPV_LEAK_REPORT");
-    if (enable_talloc && strcmp(enable_talloc, "1") == 0)
+    if (!enable_talloc)
+        enable_talloc = HAVE_TA_LEAK_REPORT ? "1" : "0";
+    if (strcmp(enable_talloc, "1") == 0)
         talloc_enable_leak_report();
 
     mp_time_init();
+    mp_rand_seed(0);
 
     struct MPContext *mpctx = talloc(NULL, MPContext);
     *mpctx = (struct MPContext){
         .last_chapter = -2,
         .term_osd_contents = talloc_strdup(mpctx, ""),
         .osd_progbar = { .type = -1 },
-        .playlist = talloc_struct(mpctx, struct playlist, {0}),
+        .playlist = talloc_zero(mpctx, struct playlist),
         .dispatch = mp_dispatch_create(mpctx),
         .playback_abort = mp_cancel_new(mpctx),
         .thread_pool = mp_thread_pool_create(mpctx, 0, 1, 30),
-        .stop_play = PT_STOP,
+        .stop_play = PT_NEXT_ENTRY,
+        .play_dir = 1,
     };
 
-    pthread_mutex_init(&mpctx->abort_lock, NULL);
+    mp_mutex_init(&mpctx->abort_lock);
 
     mpctx->global = talloc_zero(mpctx, struct mpv_global);
+
+    stats_global_init(mpctx->global);
 
     // Nothing must call mp_msg*() and related before this
     mp_msg_init(mpctx->global);
     mpctx->log = mp_log_new(mpctx, mpctx->global->log, "!cplayer");
     mpctx->statusline = mp_log_new(mpctx, mpctx->log, "!statusline");
 
+    mpctx->stats = stats_ctx_create(mpctx, mpctx->global, "main");
+
     // Create the config context and register the options
-    mpctx->mconfig = m_config_new(mpctx, mpctx->log, sizeof(struct MPOpts),
-                                  &mp_default_opts, mp_opts);
+    mpctx->mconfig = m_config_new(mpctx, mpctx->log, &mp_opt_root);
     mpctx->opts = mpctx->mconfig->optstruct;
+    mpctx->global->config = mpctx->mconfig->shadow;
     mpctx->mconfig->includefunc = cfg_include;
     mpctx->mconfig->includefunc_ctx = mpctx;
     mpctx->mconfig->use_profiles = true;
     mpctx->mconfig->is_toplevel = true;
     mpctx->mconfig->global = mpctx->global;
     m_config_parse(mpctx->mconfig, "", bstr0(def_config), NULL, 0);
-    m_config_create_shadow(mpctx->mconfig);
 
     mpctx->input = mp_input_init(mpctx->global, mp_wakeup_core_cb, mpctx);
     screenshot_init(mpctx);
@@ -317,6 +318,8 @@ struct MPContext *mp_create(void)
     char *verbose_env = getenv("MPV_VERBOSE");
     if (verbose_env)
         mpctx->opts->verbose = atoi(verbose_env);
+
+    mp_cancel_trigger(mpctx->playback_abort);
 
     return mpctx;
 }
@@ -339,6 +342,7 @@ int mp_initialize(struct MPContext *mpctx, char **options)
     }
 
     mp_init_paths(mpctx->global, opts);
+    mp_msg_set_early_logging(mpctx->global, true);
     mp_update_logging(mpctx, true);
 
     if (options) {
@@ -365,38 +369,29 @@ int mp_initialize(struct MPContext *mpctx, char **options)
         m_config_set_profile(mpctx->mconfig, "pseudo-gui", 0);
     }
 
-    mp_get_resume_defaults(mpctx);
+    // Backup the default settings, which should not be stored in the resume
+    // config files. This explicitly includes values set by config files and
+    // the command line.
+    m_config_backup_watch_later_opts(mpctx->mconfig);
 
     mp_input_load_config(mpctx->input);
 
     // From this point on, all mpctx members are initialized.
     mpctx->initialized = true;
-    mpctx->mconfig->option_set_callback = mp_on_set_option;
-    mpctx->mconfig->option_set_callback_cb = mpctx;
     mpctx->mconfig->option_change_callback = mp_option_change_callback;
     mpctx->mconfig->option_change_callback_ctx = mpctx;
+    m_config_set_update_dispatch_queue(mpctx->mconfig, mpctx->dispatch);
     // Run all update handlers.
-    mp_option_change_callback(mpctx, NULL, UPDATE_OPTS_MASK);
+    mp_option_change_callback(mpctx, NULL, UPDATE_OPTS_MASK, false);
 
     if (handle_help_options(mpctx))
         return 1; // help
 
-    if (!print_libav_versions(mp_null_log, 0)) {
-        // Using mismatched libraries can be legitimate, but even then it's
-        // a bad idea. We don't acknowledge its usefulness and stability.
-        // Distro maintainers who patch this out should be aware that mpv
-        // intentionally ignores ABI in some places where it's not possible to
-        // get by without violating it.
-        print_libav_versions(mpctx->log, MSGL_FATAL);
-        MP_FATAL(mpctx, "\nmpv was compiled against a different version of "
-                 "FFmpeg/Libav than the shared\nlibrary it is linked against. "
-                 "This is most likely a broken build and could\nresult in "
-                 "misbehavior and crashes.\n\nmpv does not support this "
-                 "configuration and will not run - rebuild mpv instead.\n");
-        return -1;
-    }
+    check_library_versions(mp_null_log, 0);
 
-    if (!mpctx->playlist->first && !opts->player_idle_mode) {
+    if (!mpctx->playlist->num_entries && !opts->player_idle_mode &&
+        options)
+    {
         // nothing to play
         mp_print_version(mpctx->log, true);
         MP_INFO(mpctx, "%s", mp_help_text);
@@ -406,8 +401,13 @@ int mp_initialize(struct MPContext *mpctx, char **options)
     MP_STATS(mpctx, "start init");
 
 #if HAVE_COCOA
-    mpv_handle *ctx = mp_new_client(mpctx->clients, "osx");
+    mpv_handle *ctx = mp_new_client(mpctx->clients, "mac");
     cocoa_set_mpv_handle(ctx);
+#endif
+
+#if HAVE_WIN32_SMTC
+    if (opts->media_controls)
+        mp_smtc_init(mp_new_client(mpctx->clients, "SystemMediaTransportControls"));
 #endif
 
     if (opts->encode_opts->file && opts->encode_opts->file[0]) {
@@ -416,19 +416,16 @@ int mp_initialize(struct MPContext *mpctx, char **options)
             MP_INFO(mpctx, "Encoding initialization failed.\n");
             return -1;
         }
-        m_config_set_profile(mpctx->mconfig, "encoding", 0);
-        mp_input_enable_section(mpctx->input, "encode", MP_INPUT_EXCLUSIVE);
     }
-
-#if !HAVE_LIBASS
-    MP_WARN(mpctx, "Compiled without libass.\n");
-    MP_WARN(mpctx, "There will be no OSD and no text subtitles.\n");
-#endif
 
     mp_load_scripts(mpctx);
 
     if (opts->force_vo == 2 && handle_force_window(mpctx, false) < 0)
         return -1;
+
+    // Needed to properly enter _initial_ idle mode if playlist empty.
+    if (mpctx->opts->player_idle_mode && !mpctx->playlist->num_entries)
+        mpctx->stop_play = PT_STOP;
 
     MP_STATS(mpctx, "end init");
 
@@ -475,7 +472,7 @@ int mpv_main(int argc, char *argv[])
     }
 
     if (reason)
-        MP_INFO(mpctx, "\nExiting... (%s)\n", reason);
+        MP_INFO(mpctx, "Exiting... (%s)\n", reason);
     if (mpctx->has_quit_custom_rc)
         rc = mpctx->quit_custom_rc;
 

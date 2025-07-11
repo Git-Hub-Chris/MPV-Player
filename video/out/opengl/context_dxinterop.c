@@ -30,11 +30,6 @@
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 #define HINST_THISCOMPONENT ((HINSTANCE)&__ImageBase)
 
-// mingw-w64 header typo?
-#ifndef IDirect3DSwapChain9Ex_GetBackBuffer
-#define IDirect3DSwapChain9Ex_GetBackBuffer IDirect3DSwapChain9EX_GetBackBuffer
-#endif
-
 struct priv {
     GL gl;
 
@@ -148,7 +143,7 @@ static int os_ctx_create(struct ra_ctx *ctx)
     }
 
     const char *wgl_exts = wglGetExtensionsStringARB(p->os_dc);
-    if (!strstr(wgl_exts, "WGL_ARB_create_context")) {
+    if (!gl_check_extension(wgl_exts, "WGL_ARB_create_context")) {
         MP_FATAL(ctx->vo, "The OpenGL driver does not support OpenGL 3.x\n");
         goto fail;
     }
@@ -346,7 +341,7 @@ static void fill_presentparams(struct ra_ctx *ctx,
         .BackBufferHeight = ctx->vo->dheight ? ctx->vo->dheight : 1,
         // Add one frame for the backbuffer and one frame of "slack" to reduce
         // contention with the window manager when acquiring the backbuffer
-        .BackBufferCount = ctx->opts.swapchain_depth + 2,
+        .BackBufferCount = ctx->vo->opts->swapchain_depth + 2,
         .SwapEffect = IsWindows7OrGreater() ? D3DSWAPEFFECT_FLIPEX : D3DSWAPEFFECT_FLIP,
         // Automatically get the backbuffer format from the display format
         .BackBufferFormat = D3DFMT_UNKNOWN,
@@ -398,7 +393,7 @@ static int d3d_create(struct ra_ctx *ctx)
         return -1;
     }
 
-    IDirect3DDevice9Ex_SetMaximumFrameLatency(p->device, ctx->opts.swapchain_depth);
+    IDirect3DDevice9Ex_SetMaximumFrameLatency(p->device, ctx->vo->opts->swapchain_depth);
 
     // Register the Direct3D device with WGL_NV_dx_interop
     p->device_h = gl->DXOpenDeviceNV(p->device);
@@ -555,10 +550,10 @@ static bool dxgl_init(struct ra_ctx *ctx)
     static const struct ra_swapchain_fns empty_swapchain_fns = {0};
     struct ra_gl_ctx_params params = {
         .swap_buffers = dxgl_swap_buffers,
-        .flipped = true,
         .external_swapchain = &empty_swapchain_fns,
     };
 
+    gl->flipped = true;
     if (!ra_gl_ctx_init(ctx, gl, params))
         goto fail;
 
@@ -598,6 +593,7 @@ static int dxgl_control(struct ra_ctx *ctx, int *events, int request,
 const struct ra_ctx_fns ra_ctx_dxgl = {
     .type         = "opengl",
     .name         = "dxinterop",
+    .description  = "WGL rendering/Direct3D 9Ex presentation",
     .init         = dxgl_init,
     .reconfig     = dxgl_reconfig,
     .control      = dxgl_control,

@@ -17,11 +17,8 @@
 
 #include <assert.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
-#include <dirent.h>
 #include <math.h>
 #include <stdint.h>
 
@@ -33,14 +30,13 @@
 #include "options/m_property.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
+#include "common/stats.h"
 #include "options/m_option.h"
 #include "input/input.h"
 #include "options/path.h"
 #include "misc/bstr.h"
-#include "osdep/subprocess.h"
 #include "osdep/timer.h"
 #include "osdep/threads.h"
-#include "osdep/getpid.h"
 #include "stream/stream.h"
 #include "sub/osd.h"
 #include "core.h"
@@ -60,10 +56,13 @@ static const char *const builtin_files[][3] = {
 // Represents a loaded script. Each has its own js state.
 struct script_ctx {
     const char *filename;
+    const char *path; // NULL if single file
     struct mpv_handle *client;
     struct MPContext *mpctx;
     struct mp_log *log;
     char *last_error_str;
+    size_t js_malloc_size;
+    struct stats_ctx *stats;
 };
 
 static struct script_ctx *jctx(js_State *J)
@@ -75,6 +74,11 @@ static mpv_handle *jclient(js_State *J)
 {
     return jctx(J)->client;
 }
+
+static void pushnode(js_State *J, mpv_node *node);
+static void makenode(void *ta_ctx, mpv_node *dst, js_State *J, int idx);
+static int jsL_checkint(js_State *J, int idx);
+static uint64_t jsL_checkuint64(js_State *J, int idx);
 
 /**********************************************************************
  *  conventions, MuJS notes and vm errors
@@ -94,16 +98,25 @@ static mpv_handle *jclient(js_State *J)
 //   padded with undefined if called with less, or bigger if called with more.
 //
 // - Almost all vm APIs (js_*) may throw an error - a longjmp to the last
-//   recovery/catch point, which could skip releasing resources. Use protected
-//   code (e.g. js_pcall) between aquisition and release. Alternatively, use
-//   the autofree mechanism to manage it more easily. See more details below.
+//   recovery/catch point, which could skip releasing resources. This includes
+//   js_try itself(!), except at the outer-most [1] js_try which is always
+//   entering the try part (and the catch part if the try part throws).
+//   The assumption should be that anything can throw and needs careful setup.
+//   One such automated setup is the autofree mechanism. Details later.
 //
 // - Unless named s_foo, all the functions at this file (inc. init) which
 //   touch the vm may throw, but either cleanup resources regardless (mostly
 //   autofree) or leave allocated resources on caller-provided talloc context
 //   which the caller should release, typically with autofree (e.g. makenode).
 //
-// - Functions named s_foo (safe foo) never throw, return 0 on success, else 1.
+// - Functions named s_foo (safe foo) never throw if called at the outer-most
+//   try-levels, or, inside JS C functions - never throw after allocating.
+//   If they didn't throw then they return 0 on success, 1 on js-errors.
+//
+// [1] In practice the N outer-most (nested) tries are guaranteed to enter the
+//     try/carch code, where N is the mujs try-stack size (64 with mujs 1.1.3).
+//     But because we can't track try-level at (called-back) JS C functions,
+//     it's only guaranteed when we know we're near the outer-most try level.
 
 /**********************************************************************
  *  mpv scripting API error handling
@@ -194,13 +207,27 @@ static bool pushed_error(js_State *J, int err, int def)
 //   inserted into the vm using af_newcfunction, but otherwise used normally.
 //
 //  To wrap an autofree function af_TARGET in C:
-//  1. Create a wrapper s_TARGET which runs af_TARGET safely inside js_try.
-//  2. Use s_TARGET like so (always autofree, and throws if af_TARGET threw):
-//       void *af = talloc_new(NULL);
-//       int r = s_TARGET(J, ..., af);  // use J, af where the callee expects.
+//  1. Create a wrapper s_TARGET which does this:
+//      if (js_try(J))
+//          return 1;
+//      *af = talloc_new(NULL);
+//      af_TARGET(J, ..., *af);
+//      js_endtry(J);
+//      return 0;
+//  2. Use s_TARGET like so (frees if allocated, throws if {s,af}_TARGET threw):
+//       void *af = NULL;
+//       int r = s_TARGET(J, ..., &af);  // use J, af where the callee expects.
 //       talloc_free(af);
 //       if (r)
 //           js_throw(J);
+//
+//  The reason that the allocation happens inside try/catch is that js_try
+//  itself can throw (if it runs out of try-stack) and therefore the code
+//  inside the try part is not reached - but neither is the catch part(!),
+//  and instead it throws to the next outer catch - but before we've allocated
+//  anything, hence no leaks on such case. If js_try did get entered, then the
+//  allocation happened, and then if af_TARGET threw then s_TARGET will catch
+//  it (and return 1) and we'll free if afterwards.
 
 // add_af_file, add_af_dir, add_af_mpv_alloc take a valid FILE*/DIR*/char* value
 // respectively, and fclose/closedir/mpv_free it when the parent is freed.
@@ -259,11 +286,12 @@ static mpv_node *new_af_mpv_node(void *parent)
 typedef void (*af_CFunction)(js_State*, void*);
 
 // safely run autofree js c function directly
-static int s_run_af_jsc(js_State *J, af_CFunction fn, void *af)
+static int s_run_af_jsc(js_State *J, af_CFunction fn, void **af)
 {
     if (js_try(J))
         return 1;
-    fn(J, af);
+    *af = talloc_new(NULL);
+    fn(J, *af);
     js_endtry(J);
     return 0;
 }
@@ -278,8 +306,8 @@ static void script__autofree(js_State *J)
     af_CFunction fn = (af_CFunction)js_touserdata(J, -1, "af_fn");
     js_pop(J, 2);
 
-    void *af = talloc_new(NULL);
-    int r = s_run_af_jsc(J, fn, af);
+    void *af = NULL;
+    int r = s_run_af_jsc(J, fn, &af);
     talloc_free(af);
     if (r)
         js_throw(J);
@@ -323,38 +351,29 @@ static void af_push_file(js_State *J, const char *fname, int limit, void *af)
         return;
     }
 
-    FILE *f = fopen(filename, "rb");
-    if (!f)
+    // mp.utils.read_file allows partial read up to limit which results in
+    // error for stream_read_file if the file is larger than limit, so use
+    // STREAM_ALLOW_PARTIAL_READ to allow reading returning partial results.
+    // Additionally, disable error logging by stream since the exception
+    // can be caught and handled by a JS script.
+    int flags = STREAM_READ_FILE_FLAGS_DEFAULT | STREAM_ALLOW_PARTIAL_READ |
+                STREAM_SILENT;
+    bstr data = stream_read_file2(filename, af, flags,
+                                  jctx(J)->mpctx->global, limit);
+    if (data.start) {
+        js_pushlstring(J, data.start, data.len);
+    } else {
         js_error(J, "cannot open file: '%s'", filename);
-    add_af_file(af, f);
-
-    int len = MPMIN(limit, 32 * 1024);  // initial allocation, size*2 strategy
-    int got = 0;
-    char *s = NULL;
-    while ((s = talloc_realloc(af, s, char, len))) {
-        int want = len - got;
-        int r = fread(s + got, 1, want, f);
-
-        if (feof(f) || (len == limit && r == want)) {
-            js_pushlstring(J, s, got + r);
-            return;
-        }
-        if (r != want)
-            js_error(J, "cannot read data from file: '%s'", filename);
-
-        got = got + r;
-        len = MPMIN(limit, len * 2);
     }
-
-    js_error(J, "cannot allocate %d bytes for file: '%s'", len, filename);
 }
 
 // Safely run af_push_file.
-static int s_push_file(js_State *J, const char *fname, int limit, void *af)
+static int s_push_file(js_State *J, const char *fname, int limit, void **af)
 {
     if (js_try(J))
         return 1;
-    af_push_file(J, fname, limit, af);
+    *af = talloc_new(NULL);
+    af_push_file(J, fname, limit, *af);
     js_endtry(J);
     return 0;
 }
@@ -362,8 +381,8 @@ static int s_push_file(js_State *J, const char *fname, int limit, void *af)
 // Called directly, push up to limit bytes of file fname (from builtin/os).
 static void push_file_content(js_State *J, const char *fname, int limit)
 {
-    void *af = talloc_new(NULL);
-    int r = s_push_file(J, fname, limit, af);
+    void *af = NULL;
+    int r = s_push_file(J, fname, limit, &af);
     talloc_free(af);
     if (r)
         js_throw(J);
@@ -372,7 +391,7 @@ static void push_file_content(js_State *J, const char *fname, int limit)
 // utils.read_file(..). args: fname [,max]. returns [up to max] bytes as string.
 static void script_read_file(js_State *J)
 {
-    int limit = js_isundefined(J, 2) ? -1 : js_tonumber(J, 2);
+    int limit = js_isundefined(J, 2) ? -1 : jsL_checkint(J, 2);
     push_file_content(J, js_tostring(J, 1), limit);
 }
 
@@ -453,6 +472,25 @@ static int s_init_js(js_State *J, struct script_ctx *ctx)
     return 0;
 }
 
+static void *mp_js_alloc(void *actx, void *ptr, int size_)
+{
+    if (size_ < 0)
+        return NULL;
+
+    struct script_ctx* ctx = actx;
+    size_t size = size_, osize = 0;
+    if (ptr)  // free/realloc
+        osize = ta_get_size(ptr);
+
+    void *ret = talloc_realloc_size(actx, ptr, size);
+
+    if (!size || ret) {  // free / successful realloc/malloc
+        ctx->js_malloc_size = ctx->js_malloc_size - osize + size;
+        stats_size_value(ctx->stats, "mem", ctx->js_malloc_size);
+    }
+    return ret;
+}
+
 /**********************************************************************
  *  Initialization - booting the script
  *********************************************************************/
@@ -464,19 +502,33 @@ static int s_init_js(js_State *J, struct script_ctx *ctx)
 //
 // Note: init functions don't need autofree. They can use ctx as a talloc
 // context and free normally. If they throw - ctx is freed right afterwards.
-static int s_load_javascript(struct mpv_handle *client, const char *fname)
+static int s_load_javascript(struct mp_script_args *args)
 {
     struct script_ctx *ctx = talloc_ptrtype(NULL, ctx);
     *ctx = (struct script_ctx) {
-        .client = client,
-        .mpctx = mp_client_get_core(client),
-        .log = mp_client_get_log(client),
+        .client = args->client,
+        .mpctx = args->mpctx,
+        .log = args->log,
         .last_error_str = talloc_strdup(ctx, "Cannot initialize JavaScript"),
-        .filename = fname,
+        .filename = args->filename,
+        .path = args->path,
+        .js_malloc_size = 0,
+        .stats = stats_ctx_create(ctx, args->mpctx->global,
+                    mp_tprintf(80, "script/%s", mpv_client_name(args->client))),
     };
 
+    stats_register_thread_cputime(ctx->stats, "cpu");
+
+    js_Alloc alloc_fn = NULL;
+    void *actx = NULL;
+
+    if (args->mpctx->opts->js_memory_report) {
+        alloc_fn = mp_js_alloc;
+        actx = ctx;
+    }
+
     int r = -1;
-    js_State *J = js_newstate(NULL, NULL, 0);
+    js_State *J = js_newstate(alloc_fn, actx, 0);
     if (!J || s_init_js(J, ctx))
         goto error_out;
 
@@ -501,11 +553,6 @@ error_out:
 /**********************************************************************
  *  Main mp.* scripting APIs and helpers
  *********************************************************************/
-static void pushnode(js_State *J, mpv_node *node);
-static void makenode(void *ta_ctx, mpv_node *dst, js_State *J, int idx);
-static int jsL_checkint(js_State *J, int idx);
-static int64_t jsL_checkint64(js_State *J, int idx);
-
 // Return the index in opts of stack[idx] (or of def if undefined), else throws.
 static int checkopt(js_State *J, int idx, const char *def, const char *opts[],
                     const char *desc)
@@ -549,9 +596,10 @@ static void script__request_event(js_State *J)
     const char *event = js_tostring(J, 1);
     bool enable = js_toboolean(J, 2);
 
-    const char *name;
-    for (int n = 0; n < 256 && (name = mpv_event_name(n)); n++) {
-        if (strcmp(name, event) == 0) {
+    for (int n = 0; n < 256; n++) {
+        // some n's may be missing ("holes"), returning NULL
+        const char *name = mpv_event_name(n);
+        if (name && strcmp(name, event) == 0) {
             push_status(J, mpv_request_event(jclient(J), n, enable));
             return;
         }
@@ -562,9 +610,10 @@ static void script__request_event(js_State *J)
 static void script_enable_messages(js_State *J)
 {
     const char *level = js_tostring(J, 1);
-    if (mp_msg_find_level(level) < 0)
+    int e = mpv_request_log_messages(jclient(J), level);
+    if (e == MPV_ERROR_INVALID_PARAMETER)
         js_error(J, "Invalid log level '%s'", level);
-    push_status(J, mpv_request_log_messages(jclient(J), level));
+    push_status(J, e);
 }
 
 // args - command [with arguments] as string
@@ -635,6 +684,13 @@ static void script_get_property(js_State *J, void *af)
         js_pushstring(J, res);
 }
 
+// args: name
+static void script_del_property(js_State *J)
+{
+    int e = mpv_del_property(jclient(J), js_tostring(J, 1));
+    push_status(J, e);
+}
+
 // args: name [,def]
 static void script_get_property_bool(js_State *J)
 {
@@ -686,7 +742,7 @@ static void script__observe_property(js_State *J)
                              MPV_FORMAT_STRING, MPV_FORMAT_DOUBLE};
 
     mpv_format f = mf[checkopt(J, 3, "none", fmts, "observe type")];
-    int e = mpv_observe_property(jclient(J), js_tonumber(J, 1),
+    int e = mpv_observe_property(jclient(J), jsL_checkuint64(J, 1),
                                              js_tostring(J, 2),
                                              f);
     push_status(J, e);
@@ -695,7 +751,7 @@ static void script__observe_property(js_State *J)
 // args: id
 static void script__unobserve_property(js_State *J)
 {
-    int e = mpv_unobserve_property(jclient(J), js_tonumber(J, 1));
+    int e = mpv_unobserve_property(jclient(J), jsL_checkuint64(J, 1));
     push_status(J, e);
 }
 
@@ -710,21 +766,26 @@ static void script_command_native(js_State *J, void *af)
         pushnode(J, presult_node);
 }
 
+// args: async-command-id, native-command
+static void script__command_native_async(js_State *J, void *af)
+{
+    uint64_t id = jsL_checkuint64(J, 1);
+    struct mpv_node node;
+    makenode(af, &node, J, 2);
+    push_status(J, mpv_command_node_async(jclient(J), id, &node));
+}
+
+// args: async-command-id
+static void script__abort_async_command(js_State *J)
+{
+    mpv_abort_async_command(jclient(J), jsL_checkuint64(J, 1));
+    push_success(J);
+}
+
 // args: none, result in millisec
 static void script_get_time_ms(js_State *J)
 {
     js_pushnumber(J, mpv_get_time_us(jclient(J)) / (double)(1000));
-}
-
-static void script_set_osd_ass(js_State *J)
-{
-    struct script_ctx *ctx = jctx(J);
-    int res_x = js_tonumber(J, 1);
-    int res_y = js_tonumber(J, 2);
-    const char *text = js_tostring(J, 3);
-    osd_set_external(ctx->mpctx->osd, ctx->client, res_x, res_y, (char *)text);
-    mp_wakeup_core(ctx->mpctx);
-    push_success(J);
 }
 
 // push object with properties names (NULL terminated) with respective vals
@@ -738,42 +799,13 @@ static void push_nums_obj(js_State *J, const char * const names[],
     }
 }
 
-// args: none, return: object with properties width, height, aspect
-static void script_get_osd_size(js_State *J)
-{
-    struct mp_osd_res r = osd_get_vo_res(jctx(J)->mpctx->osd);
-    double ar = 1.0 * r.w / MPMAX(r.h, 1) / (r.display_par ? r.display_par : 1);
-    const char * const names[] = {"width", "height", "aspect", NULL};
-    const double vals[] = {r.w, r.h, ar};
-    push_nums_obj(J, names, vals);
-}
-
-// args: none, return: object with properties top, bottom, left, right
-static void script_get_osd_margins(js_State *J)
-{
-    struct mp_osd_res r = osd_get_vo_res(jctx(J)->mpctx->osd);
-    const char * const names[] = {"left", "top", "right", "bottom", NULL};
-    const double vals[] = {r.ml, r.mt, r.mr, r.mb};
-    push_nums_obj(J, names, vals);
-}
-
-// args: none, return: object with properties x, y
-static void script_get_mouse_pos(js_State *J)
-{
-    int x, y;
-    mp_input_get_mouse_pos(jctx(J)->mpctx->input, &x, &y);
-    const char * const names[] = {"x", "y", NULL};
-    const double vals[] = {x, y};
-    push_nums_obj(J, names, vals);
-}
-
 // args: input-section-name, x0, y0, x1, y1
 static void script_input_set_section_mouse_area(js_State *J)
 {
     char *section = (char *)js_tostring(J, 1);
     mp_input_set_section_mouse_area(jctx(J)->mpctx->input, section,
-        js_tonumber(J, 2), js_tonumber(J, 3),   // x0, y0
-        js_tonumber(J, 4), js_tonumber(J, 5));  // x1, y1
+        jsL_checkint(J, 2), jsL_checkint(J, 3),   // x0, y0
+        jsL_checkint(J, 4), jsL_checkint(J, 5));  // x1, y1
     push_success(J);
 }
 
@@ -799,14 +831,14 @@ static void script__hook_add(js_State *J)
 {
     const char *name = js_tostring(J, 1);
     int pri = jsL_checkint(J, 2);
-    uint64_t id = jsL_checkint64(J, 3);
+    uint64_t id = jsL_checkuint64(J, 3);
     push_status(J, mpv_hook_add(jclient(J), id, name, pri));
 }
 
 // args: id (uint)
 static void script__hook_continue(js_State *J)
 {
-    push_status(J, mpv_hook_continue(jclient(J), jsL_checkint64(J, 1)));
+    push_status(J, mpv_hook_continue(jclient(J), jsL_checkuint64(J, 1)));
 }
 
 /**********************************************************************
@@ -905,136 +937,31 @@ static void script_join_path(js_State *J, void *af)
     js_pushstring(J, mp_path_join(af, js_tostring(J, 1), js_tostring(J, 2)));
 }
 
-static void script_get_user_path(js_State *J, void *af)
-{
-    const char *path = js_tostring(J, 1);
-    js_pushstring(J, mp_get_user_path(af, jctx(J)->mpctx->global, path));
-}
-
-struct subprocess_cb_ctx {
-    struct mp_log *log;
-    void *talloc_ctx;
-    int64_t max_size;
-    bstr output;
-    bstr err;
-};
-
-static void subprocess_stdout(void *p, char *data, size_t size)
-{
-    struct subprocess_cb_ctx *ctx = p;
-    if (ctx->output.len < ctx->max_size)
-        bstr_xappend(ctx->talloc_ctx, &ctx->output, (bstr){data, size});
-}
-
-static void subprocess_stderr(void *p, char *data, size_t size)
-{
-    struct subprocess_cb_ctx *ctx = p;
-    if (ctx->err.len < ctx->max_size)
-        bstr_xappend(ctx->talloc_ctx, &ctx->err, (bstr){data, size});
-    MP_INFO(ctx, "%.*s", (int)size, data);
-}
-
-// args: client invocation args object. TODO: use common backend for js/lua
-static void af_subprocess_common(js_State *J, int detach, void *af)
-{
-    struct script_ctx *ctx = jctx(J);
-    if (!js_isobject(J, 1))
-        js_error(J, "argument must be an object");
-
-    js_getproperty(J, 1, "args"); // args
-    int num_args = js_getlength(J, -1);
-    if (!num_args) // not using js_isarray to also accept array-like objects
-        js_error(J, "args must be an non-empty array");
-    char *args[256];
-    if (num_args > MP_ARRAY_SIZE(args) - 1) // last needs to be NULL
-        js_error(J, "too many arguments");
-    if (num_args < 1)
-        js_error(J, "program name missing");
-
-    for (int n = 0; n < num_args; n++) {
-        js_getindex(J, -1, n);
-        if (js_isundefined(J, -1))
-            js_error(J, "program arguments must be strings");
-        args[n] = talloc_strdup(af, js_tostring(J, -1));
-        js_pop(J, 1); // args
-    }
-    args[num_args] = NULL;
-
-    if (detach) {
-        mp_subprocess_detached(ctx->log, args);
-        push_success(J);
-        return;
-    }
-
-    struct mp_cancel *cancel = NULL;
-    if (js_hasproperty(J, 1, "cancellable") ? js_toboolean(J, -1) : true)
-        cancel = ctx->mpctx->playback_abort;
-
-    int64_t max_size = js_hasproperty(J, 1, "max_size") ? js_tointeger(J, -1)
-                                                        : 16 * 1024 * 1024;
-    struct subprocess_cb_ctx cb_ctx = {
-        .log = ctx->log,
-        .talloc_ctx = af,
-        .max_size = max_size,
-    };
-
-    char *error = NULL;
-    int status = mp_subprocess(args, cancel, &cb_ctx, subprocess_stdout,
-                               subprocess_stderr, &error);
-
-    js_newobject(J); // res
-    if (error) {
-        js_pushstring(J, error); // res e
-        js_setproperty(J, -2, "error"); // res
-    }
-    js_pushnumber(J, status); // res s
-    js_setproperty(J, -2, "status"); // res
-    js_pushlstring(J, cb_ctx.output.start, cb_ctx.output.len); // res d
-    js_setproperty(J, -2, "stdout"); // res
-    js_pushlstring(J, cb_ctx.err.start, cb_ctx.err.len);
-    js_setproperty(J, -2, "stderr");
-    js_pushboolean(J, status == MP_SUBPROCESS_EKILLED_BY_US); // res b
-    js_setproperty(J, -2, "killed_by_us"); // res
-}
-
-// args: client invocation args object (same also for _detached)
-static void script_subprocess(js_State *J, void *af)
-{
-    af_subprocess_common(J, 0, af);
-}
-
-static void script_subprocess_detached(js_State *J, void *af)
-{
-    af_subprocess_common(J, 1, af);
-}
-
-// args: none
-static void script_getpid(js_State *J)
-{
-    js_pushnumber(J, mp_getpid());
-}
-
-// args: prefixed file name, data (c-str)
-static void script_write_file(js_State *J, void *af)
+// args: is_append, prefixed file name, data (c-str)
+static void script__write_file(js_State *J, void *af)
 {
     static const char *prefix = "file://";
-    const char *fname = js_tostring(J, 1);
-    const char *data = js_tostring(J, 2);
+    bool append = js_toboolean(J, 1);
+    const char *fname = js_tostring(J, 2);
+    const char *data = js_tostring(J, 3);
+    const char *opstr = append ? "append" : "write";
+
     if (strstr(fname, prefix) != fname)  // simple protection for incorrect use
         js_error(J, "File name must be prefixed with '%s'", prefix);
     fname += strlen(prefix);
     fname = mp_get_user_path(af, jctx(J)->mpctx->global, fname);
-    MP_VERBOSE(jctx(J), "Writing file '%s'\n", fname);
+    MP_VERBOSE(jctx(J), "%s file '%s'\n", opstr, fname);
 
-    FILE *f = fopen(fname, "wb");
+    FILE *f = fopen(fname, append ? "ab" : "wb");
     if (!f)
-        js_error(J, "Cannot open file for writing: '%s'", fname);
+        js_error(J, "Cannot open (%s) file: '%s'", opstr, fname);
     add_af_file(af, f);
 
     int len = strlen(data);  // limited by terminating null
     int wrote = fwrite(data, 1, len, f);
     if (len != wrote)
-        js_error(J, "Cannot write to file: '%s'", fname);
+        js_error(J, "Cannot %s to file: '%s'", opstr, fname);
+    js_pushboolean(J, 1);  // success. doesn't touch last_error
 }
 
 // args: env var name
@@ -1045,6 +972,16 @@ static void script_getenv(js_State *J)
         js_pushstring(J, v);
     } else {
         js_pushundefined(J);
+    }
+}
+
+// args: none
+static void script_get_env_list(js_State *J)
+{
+    js_newarray(J);
+    for (int n = 0; environ && environ[n]; n++) {
+        js_pushstring(J, environ[n]);
+        js_setindex(J, -2, n);
     }
 }
 
@@ -1075,6 +1012,9 @@ static void pushnode(js_State *J, mpv_node *node)
     case MPV_FORMAT_INT64:  js_pushnumber(J, node->u.int64); break;
     case MPV_FORMAT_DOUBLE: js_pushnumber(J, node->u.double_); break;
     case MPV_FORMAT_FLAG:   js_pushboolean(J, node->u.flag); break;
+    case MPV_FORMAT_BYTE_ARRAY:
+        js_pushlstring(J, node->u.ba->data, node->u.ba->size);
+        break;
     case MPV_FORMAT_NODE_ARRAY:
         js_newarray(J);
         len = node->u.list->num;
@@ -1117,22 +1057,22 @@ static int get_obj_properties(void *ta_ctx, char ***keys, js_State *J, int idx)
 static bool same_as_int64(double d)
 {
     // The range checks also validly filter inf and nan, so behavior is defined
-    return d >= INT64_MIN && d <= INT64_MAX && d == (int64_t)d;
+    return d >= INT64_MIN && d <= (double) INT64_MAX && d == (int64_t)d;
 }
 
 static int jsL_checkint(js_State *J, int idx)
 {
     double d = js_tonumber(J, idx);
     if (!(d >= INT_MIN && d <= INT_MAX))
-        js_error(J, "integer out of range at index %d", idx);
+        js_error(J, "int out of range at index %d", idx);
     return d;
 }
 
-static int64_t jsL_checkint64(js_State *J, int idx)
+static uint64_t jsL_checkuint64(js_State *J, int idx)
 {
     double d = js_tonumber(J, idx);
-    if (!(d >= INT64_MIN && d <= INT64_MAX))
-        js_error(J, "integer out of range at index %d", idx);
+    if (!(d >= 0 && d <= (double) UINT64_MAX))
+        js_error(J, "uint64 out of range at index %d", idx);
     return d;
 }
 
@@ -1190,102 +1130,14 @@ static void makenode(void *ta_ctx, mpv_node *dst, js_State *J, int idx)
 }
 
 // args: wait in secs (infinite if negative) if mpv doesn't send events earlier.
-static void script_wait_event(js_State *J)
+static void script_wait_event(js_State *J, void *af)
 {
-    int top = js_gettop(J);
     double timeout = js_isnumber(J, 1) ? js_tonumber(J, 1) : -1;
     mpv_event *event = mpv_wait_event(jclient(J), timeout);
 
-    js_newobject(J); // the reply
-    js_pushstring(J, mpv_event_name(event->event_id));
-    js_setproperty(J, -2, "event");  // reply.event (is an event name)
-
-    if (event->reply_userdata) {
-        js_pushnumber(J, event->reply_userdata);
-        js_setproperty(J, -2, "id");   // reply.id
-    }
-
-    if (event->error < 0) {
-        // TODO: untested
-        js_pushstring(J, mpv_error_string(event->error));
-        js_setproperty(J, -2, "error");  // reply.error
-    }
-
-    switch (event->event_id) {
-    case MPV_EVENT_LOG_MESSAGE: {
-        mpv_event_log_message *msg = event->data;
-
-        js_pushstring(J, msg->prefix);
-        js_setproperty(J, -2, "prefix");  // reply.prefix (e.g. "cplayer")
-        js_pushstring(J, msg->level);
-        js_setproperty(J, -2, "level");  // reply.level (e.g. "v" or "info")
-        js_pushstring(J, msg->text);
-        js_setproperty(J, -2, "text");  // reply.text
-        break;
-    }
-
-    case MPV_EVENT_CLIENT_MESSAGE: {
-        mpv_event_client_message *msg = event->data;
-
-        js_newarray(J);  // reply.args
-        for (int n = 0; n < msg->num_args; n++) {
-            js_pushstring(J, msg->args[n]);
-            js_setindex(J, -2, n);
-        }
-        js_setproperty(J, -2, "args");  // reply.args (is a strings array)
-        break;
-    }
-
-    case MPV_EVENT_END_FILE: {
-        mpv_event_end_file *eef = event->data;
-        const char *reason;
-
-        switch (eef->reason) {
-        case MPV_END_FILE_REASON_EOF: reason = "eof"; break;
-        case MPV_END_FILE_REASON_STOP: reason = "stop"; break;
-        case MPV_END_FILE_REASON_QUIT: reason = "quit"; break;
-        case MPV_END_FILE_REASON_ERROR: reason = "error"; break;
-        case MPV_END_FILE_REASON_REDIRECT: reason = "redirect"; break;
-        default:
-            reason = "unknown";
-        }
-        js_pushstring(J, reason);
-        js_setproperty(J, -2, "reason");  // reply.reason
-
-        if (eef->reason == MPV_END_FILE_REASON_ERROR) {
-            js_pushstring(J, mpv_error_string(eef->error));
-            js_setproperty(J, -2, "error");  // reply.error
-        }
-        break;
-    }
-
-    case MPV_EVENT_PROPERTY_CHANGE: {
-        mpv_event_property *prop = event->data;
-        js_pushstring(J, prop->name);
-        js_setproperty(J, -2, "name");  // reply.name (is a property name)
-
-        switch (prop->format) {
-        case MPV_FORMAT_NODE:   pushnode(J, prop->data); break;
-        case MPV_FORMAT_DOUBLE: js_pushnumber(J, *(double *)prop->data); break;
-        case MPV_FORMAT_INT64:  js_pushnumber(J, *(int64_t *)prop->data); break;
-        case MPV_FORMAT_FLAG:   js_pushboolean(J, *(int *)prop->data); break;
-        case MPV_FORMAT_STRING: js_pushstring(J, *(char **)prop->data); break;
-        default:
-            js_pushnull(J);  // also for FORMAT_NONE, e.g. observe type "none"
-        }
-        js_setproperty(J, -2, "data");  // reply.data (value as observed type)
-        break;
-    }
-
-    case MPV_EVENT_HOOK: {
-        mpv_event_hook *hook = event->data;
-        js_pushnumber(J, hook->id);
-        js_setproperty(J, -2, "hook_id");  // reply.hook_id (is a number)
-        break;
-    }
-    }  // switch (event->event_id)
-
-    assert(top == js_gettop(J) - 1);
+    mpv_node *rn = new_af_mpv_node(af);
+    mpv_event_to_node(rn, event);
+    pushnode(J, rn);
 }
 
 /**********************************************************************
@@ -1304,12 +1156,15 @@ struct fn_entry {
 // FN_ENTRY is a normal js C function, AF_ENTRY is an autofree js C function.
 static const struct fn_entry main_fns[] = {
     FN_ENTRY(log, 1),
-    FN_ENTRY(wait_event, 1),
+    AF_ENTRY(wait_event, 1),
     FN_ENTRY(_request_event, 2),
     AF_ENTRY(find_config_file, 1),
     FN_ENTRY(command, 1),
     FN_ENTRY(commandv, 0),
     AF_ENTRY(command_native, 2),
+    AF_ENTRY(_command_native_async, 2),
+    FN_ENTRY(_abort_async_command, 1),
+    FN_ENTRY(del_property, 1),
     FN_ENTRY(get_property_bool, 2),
     FN_ENTRY(get_property_number, 2),
     AF_ENTRY(get_property_native, 2),
@@ -1327,10 +1182,6 @@ static const struct fn_entry main_fns[] = {
     FN_ENTRY(get_wakeup_pipe, 0),
     FN_ENTRY(_hook_add, 3),
     FN_ENTRY(_hook_continue, 1),
-    FN_ENTRY(set_osd_ass, 3),
-    FN_ENTRY(get_osd_size, 0),
-    FN_ENTRY(get_osd_margins, 0),
-    FN_ENTRY(get_mouse_pos, 0),
     FN_ENTRY(input_set_section_mouse_area, 5),
     FN_ENTRY(last_error, 0),
     FN_ENTRY(_set_last_error, 1),
@@ -1342,13 +1193,10 @@ static const struct fn_entry utils_fns[] = {
     FN_ENTRY(file_info, 1),
     FN_ENTRY(split_path, 1),
     AF_ENTRY(join_path, 2),
-    AF_ENTRY(get_user_path, 1),
-    AF_ENTRY(subprocess, 1),
-    AF_ENTRY(subprocess_detached, 1),
-    FN_ENTRY(getpid, 0),
+    FN_ENTRY(get_env_list, 0),
 
     FN_ENTRY(read_file, 2),
-    AF_ENTRY(write_file, 2),
+    AF_ENTRY(_write_file, 3),
     FN_ENTRY(getenv, 1),
     FN_ENTRY(compile_js, 2),
     FN_ENTRY(_gc, 1),
@@ -1385,12 +1233,17 @@ static void add_functions(js_State *J, struct script_ctx *ctx)
     js_pushstring(J, ctx->filename);
     js_setproperty(J, -2, "script_file");
 
+    if (ctx->path) {
+        js_pushstring(J, ctx->path);
+        js_setproperty(J, -2, "script_path");
+    }
+
     js_pop(J, 2);  // leave the stack as we got it
 }
 
 // main export of this file, used by cplayer to load js scripts
 const struct mp_scripting mp_scripting_js = {
-    .name = "javascript",
+    .name = "js",
     .file_ext = "js",
     .load = s_load_javascript,
 };

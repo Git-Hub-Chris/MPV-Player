@@ -21,15 +21,14 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
-#ifndef EGL_VERSION_1_5
-#define EGL_CONTEXT_OPENGL_PROFILE_MASK         0x30FD
-#define EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT     0x00000001
-#endif
-
 #include "common/common.h"
+#include "video/out/present_sync.h"
 #include "video/out/x11_common.h"
 #include "context.h"
 #include "egl_helpers.h"
+#include "utils.h"
+
+#define EGL_PLATFORM_X11_EXT 0x31D5
 
 struct priv {
     GL gl;
@@ -43,12 +42,9 @@ static void mpegl_uninit(struct ra_ctx *ctx)
     struct priv *p = ctx->priv;
     ra_gl_ctx_uninit(ctx);
 
-    if (p->egl_context) {
-        eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                       EGL_NO_CONTEXT);
-        eglDestroyContext(p->egl_display, p->egl_context);
-    }
-    p->egl_context = EGL_NO_CONTEXT;
+    eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
+    eglTerminate(p->egl_display);
     vo_x11_uninit(ctx->vo);
 }
 
@@ -75,10 +71,25 @@ static int pick_xrgba_config(void *user_data, EGLConfig *configs, int num_config
     return 0;
 }
 
+static bool mpegl_check_visible(struct ra_ctx *ctx)
+{
+    return vo_x11_check_visible(ctx->vo);
+}
+
 static void mpegl_swap_buffers(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
+
     eglSwapBuffers(p->egl_display, p->egl_surface);
+    if (ctx->vo->x11->use_present)
+        present_sync_swap(ctx->vo->x11->present);
+}
+
+static void mpegl_get_vsync(struct ra_ctx *ctx, struct vo_vsync_info *info)
+{
+    struct vo_x11_state *x11 = ctx->vo->x11;
+    if (ctx->vo->x11->use_present)
+        present_sync_get_info(x11->present, info);
 }
 
 static bool mpegl_init(struct ra_ctx *ctx)
@@ -90,7 +101,9 @@ static bool mpegl_init(struct ra_ctx *ctx)
     if (!vo_x11_init(vo))
         goto uninit;
 
-    p->egl_display = eglGetDisplay(vo->x11->display);
+    p->egl_display = mpegl_get_display(EGL_PLATFORM_X11_EXT,
+                                       "EGL_EXT_platform_x11",
+                                        vo->x11->display);
     if (!eglInitialize(p->egl_display, NULL, NULL)) {
         MP_MSG(ctx, msgl, "Could not initialize EGL.\n");
         goto uninit;
@@ -105,9 +118,16 @@ static bool mpegl_init(struct ra_ctx *ctx)
     if (!mpegl_create_context_cb(ctx, p->egl_display, cb, &p->egl_context, &config))
         goto uninit;
 
-    int vID, n;
-    eglGetConfigAttrib(p->egl_display, config, EGL_NATIVE_VISUAL_ID, &vID);
-    MP_VERBOSE(ctx, "chose visual 0x%x\n", vID);
+    int cid, vID, n;
+    if (!eglGetConfigAttrib(p->egl_display, config, EGL_CONFIG_ID, &cid)) {
+        MP_FATAL(ctx, "Getting EGL_CONFIG_ID failed!\n");
+        goto uninit;
+    }
+    if (!eglGetConfigAttrib(p->egl_display, config, EGL_NATIVE_VISUAL_ID, &vID)) {
+        MP_FATAL(ctx, "Getting X visual ID failed!\n");
+        goto uninit;
+    }
+    MP_VERBOSE(ctx, "Choosing visual EGL config 0x%x, visual ID 0x%x\n", cid, vID);
     XVisualInfo template = {.visualid = vID};
     XVisualInfo *vi = XGetVisualInfo(vo->x11->display, VisualIDMask, &template, &n);
 
@@ -123,9 +143,12 @@ static bool mpegl_init(struct ra_ctx *ctx)
 
     XFree(vi);
 
-    p->egl_surface = eglCreateWindowSurface(p->egl_display, config,
-                                    (EGLNativeWindowType)vo->x11->window, NULL);
-
+    p->egl_surface = mpegl_create_window_surface(
+        p->egl_display, config, &vo->x11->window);
+    if (p->egl_surface == EGL_NO_SURFACE) {
+        p->egl_surface = eglCreateWindowSurface(
+            p->egl_display, config, (EGLNativeWindowType)vo->x11->window, NULL);
+    }
     if (p->egl_surface == EGL_NO_SURFACE) {
         MP_FATAL(ctx, "Could not create EGL surface!\n");
         goto uninit;
@@ -141,7 +164,9 @@ static bool mpegl_init(struct ra_ctx *ctx)
     mpegl_load_functions(&p->gl, ctx->log);
 
     struct ra_gl_ctx_params params = {
+        .check_visible = mpegl_check_visible,
         .swap_buffers = mpegl_swap_buffers,
+        .get_vsync    = mpegl_get_vsync,
     };
 
     if (!ra_gl_ctx_init(ctx, &p->gl, params))
@@ -182,14 +207,15 @@ static void mpegl_wakeup(struct ra_ctx *ctx)
     vo_x11_wakeup(ctx->vo);
 }
 
-static void mpegl_wait_events(struct ra_ctx *ctx, int64_t until_time_us)
+static void mpegl_wait_events(struct ra_ctx *ctx, int64_t until_time_ns)
 {
-    vo_x11_wait_events(ctx->vo, until_time_us);
+    vo_x11_wait_events(ctx->vo, until_time_ns);
 }
 
 const struct ra_ctx_fns ra_ctx_x11_egl = {
     .type           = "opengl",
     .name           = "x11egl",
+    .description    = "X11/EGL",
     .reconfig       = mpegl_reconfig,
     .control        = mpegl_control,
     .wakeup         = mpegl_wakeup,

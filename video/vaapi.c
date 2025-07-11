@@ -21,6 +21,7 @@
 
 #include "vaapi.h"
 #include "common/common.h"
+#include "common/global.h"
 #include "common/msg.h"
 #include "osdep/threads.h"
 #include "mp_image.h"
@@ -28,8 +29,27 @@
 #include "mp_image_pool.h"
 #include "options/m_config.h"
 
+#ifdef _WIN32
+#include "osdep/windows_utils.h"
+#include "out/d3d11/context.h"
+#include "out/gpu/d3d11_helpers.h"
+#endif
+
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vaapi.h>
+
+#ifdef _WIN32
+#define DEV_PATH_DEFAULT NULL
+#define DEV_PATH_VALIDATE mp_dxgi_validate_adapter
+#else
+#define DEV_PATH_DEFAULT "/dev/dri/renderD128"
+#define DEV_PATH_VALIDATE validate_path
+
+static inline OPT_STRING_VALIDATE_FUNC(validate_path)
+{
+    return (*value && **value) ? 0 : M_OPT_INVALID;
+}
+#endif
 
 struct vaapi_opts {
     char *path;
@@ -38,26 +58,25 @@ struct vaapi_opts {
 #define OPT_BASE_STRUCT struct vaapi_opts
 const struct m_sub_options vaapi_conf = {
     .opts = (const struct m_option[]) {
-        OPT_STRING("device", path, 0),
+        {"device", OPT_STRING_VALIDATE(path, DEV_PATH_VALIDATE)},
         {0},
     },
     .defaults = &(const struct vaapi_opts) {
-        .path = "/dev/dri/renderD128",
+        .path = DEV_PATH_DEFAULT,
     },
     .size = sizeof(struct vaapi_opts),
 };
 
-int va_get_colorspace_flag(enum mp_csp csp)
+int va_get_colorspace_flag(enum pl_color_system csp)
 {
     switch (csp) {
-    case MP_CSP_BT_601:         return VA_SRC_BT601;
-    case MP_CSP_BT_709:         return VA_SRC_BT709;
-    case MP_CSP_SMPTE_240M:     return VA_SRC_SMPTE_240;
+    case PL_COLOR_SYSTEM_BT_601:         return VA_SRC_BT601;
+    case PL_COLOR_SYSTEM_BT_709:         return VA_SRC_BT709;
+    case PL_COLOR_SYSTEM_SMPTE_240M:     return VA_SRC_SMPTE_240;
     }
     return 0;
 }
 
-#if VA_CHECK_VERSION(1, 0, 0)
 static void va_message_callback(void *context, const char *msg, int mp_level)
 {
     struct mp_vaapi_ctx *res = context;
@@ -73,46 +92,6 @@ static void va_info_callback(void *context, const char *msg)
 {
     va_message_callback(context, msg, MSGL_V);
 }
-#else
-// Pre-libva2 VA message callbacks are global and do not have a context
-// parameter, so it's impossible to know from which VADisplay they
-// originate.  Try to route them to existing mpv/libmpv instances within
-// this process.
-static pthread_mutex_t va_log_mutex = PTHREAD_MUTEX_INITIALIZER;
-static struct mp_vaapi_ctx **va_mpv_clients;
-static int num_va_mpv_clients;
-
-static void va_message_callback(const char *msg, int mp_level)
-{
-    pthread_mutex_lock(&va_log_mutex);
-
-    if (num_va_mpv_clients) {
-        struct mp_log *dst = va_mpv_clients[num_va_mpv_clients - 1]->log;
-        mp_msg(dst, mp_level, "libva: %s", msg);
-    } else {
-        // We can't get or call the original libva handler (vaSet... return
-        // them, but it might be from some other lib etc.). So just do what
-        // libva happened to do at the time of this writing.
-        if (mp_level <= MSGL_ERR) {
-            fprintf(stderr, "libva error: %s", msg);
-        } else {
-            fprintf(stderr, "libva info: %s", msg);
-        }
-    }
-
-    pthread_mutex_unlock(&va_log_mutex);
-}
-
-static void va_error_callback(const char *msg)
-{
-    va_message_callback(msg, MSGL_ERR);
-}
-
-static void va_info_callback(const char *msg)
-{
-    va_message_callback(msg, MSGL_V);
-}
-#endif
 
 static void free_device_ref(struct AVHWDeviceContext *hwctx)
 {
@@ -123,19 +102,6 @@ static void free_device_ref(struct AVHWDeviceContext *hwctx)
 
     if (ctx->destroy_native_ctx)
         ctx->destroy_native_ctx(ctx->native_ctx);
-
-#if !VA_CHECK_VERSION(1, 0, 0)
-    pthread_mutex_lock(&va_log_mutex);
-    for (int n = 0; n < num_va_mpv_clients; n++) {
-        if (va_mpv_clients[n] == ctx) {
-            MP_TARRAY_REMOVE_AT(va_mpv_clients, num_va_mpv_clients, n);
-            break;
-        }
-    }
-    if (num_va_mpv_clients == 0)
-        TA_FREEP(&va_mpv_clients); // avoid triggering leak detectors
-    pthread_mutex_unlock(&va_log_mutex);
-#endif
 
     talloc_free(ctx);
 }
@@ -163,21 +129,8 @@ struct mp_vaapi_ctx *va_initialize(VADisplay *display, struct mp_log *plog,
     hwctx->free = free_device_ref;
     hwctx->user_opaque = res;
 
-#if VA_CHECK_VERSION(1, 0, 0)
     vaSetErrorCallback(display, va_error_callback, res);
     vaSetInfoCallback(display,  va_info_callback,  res);
-#else
-    pthread_mutex_lock(&va_log_mutex);
-    MP_TARRAY_APPEND(NULL, va_mpv_clients, num_va_mpv_clients, res);
-    pthread_mutex_unlock(&va_log_mutex);
-
-    // Check some random symbol added after message callbacks.
-    // VA_MICRO_VERSION wasn't bumped at the time.
-#ifdef VA_FOURCC_I010
-    vaSetErrorCallback(va_error_callback);
-    vaSetInfoCallback(va_info_callback);
-#endif
-#endif
 
     int major, minor;
     int status = vaInitialize(display, &major, &minor);
@@ -233,8 +186,8 @@ bool va_guess_if_emulated(struct mp_vaapi_ctx *ctx)
 }
 
 struct va_native_display {
-    void (*create)(VADisplay **out_display, void **out_native_ctx,
-                   const char *path);
+    void (*create)(struct mp_log *log, VADisplay **out_display,
+                   void **out_native_ctx, const char *path);
     void (*destroy)(void *native_ctx);
 };
 
@@ -247,8 +200,8 @@ static void x11_destroy(void *native_ctx)
     XCloseDisplay(native_ctx);
 }
 
-static void x11_create(VADisplay **out_display, void **out_native_ctx,
-                       const char *path)
+static void x11_create(struct mp_log *log, VADisplay **out_display,
+                       void **out_native_ctx, const char *path)
 {
     void *native_display = XOpenDisplay(NULL);
     if (!native_display)
@@ -264,6 +217,31 @@ static void x11_create(VADisplay **out_display, void **out_native_ctx,
 static const struct va_native_display disp_x11 = {
     .create = x11_create,
     .destroy = x11_destroy,
+};
+#endif
+
+#if HAVE_VAAPI_WIN32
+#include <va/va_win32.h>
+
+static void win32_create(struct mp_log *log, VADisplay **out_display,
+                         void **out_native_ctx, const char *path)
+{
+    LUID *luid = NULL;
+    DXGI_ADAPTER_DESC1 desc = {0};
+    if (path && path[0]) {
+        IDXGIAdapter1 *adapter = mp_get_dxgi_adapter(log, bstr0(path), NULL);
+        if (!adapter || FAILED(IDXGIAdapter1_GetDesc1(adapter, &desc))) {
+            mp_err(log, "Failed to get adapter LUID for name: %s\n", path);
+        } else {
+            luid = &desc.AdapterLuid;
+        }
+        SAFE_RELEASE(adapter);
+    }
+    *out_display = vaGetDisplayWin32(luid);
+}
+
+static const struct va_native_display disp_win32 = {
+    .create = win32_create,
 };
 #endif
 
@@ -283,8 +261,8 @@ static void drm_destroy(void *native_ctx)
     talloc_free(ctx);
 }
 
-static void drm_create(VADisplay **out_display, void **out_native_ctx,
-                       const char *path)
+static void drm_create(struct mp_log *log, VADisplay **out_display,
+                       void **out_native_ctx, const char *path)
 {
     int drm_fd = open(path, O_RDWR);
     if (drm_fd < 0)
@@ -293,7 +271,7 @@ static void drm_create(VADisplay **out_display, void **out_native_ctx,
     struct va_native_display_drm *ctx = talloc_ptrtype(NULL, ctx);
     ctx->drm_fd = drm_fd;
     *out_display = vaGetDisplayDRM(drm_fd);
-    if (out_display) {
+    if (*out_display) {
         *out_native_ctx = ctx;
         return;
     }
@@ -312,6 +290,9 @@ static const struct va_native_display *const native_displays[] = {
 #if HAVE_VAAPI_DRM
     &disp_drm,
 #endif
+#if HAVE_VAAPI_WIN32
+    &disp_win32,
+#endif
 #if HAVE_VAAPI_X11
     &disp_x11,
 #endif
@@ -327,13 +308,14 @@ static struct AVBufferRef *va_create_standalone(struct mpv_global *global,
     for (int n = 0; native_displays[n]; n++) {
         VADisplay *display = NULL;
         void *native_ctx = NULL;
-        native_displays[n]->create(&display, &native_ctx, opts->path);
+        native_displays[n]->create(global->log, &display, &native_ctx, opts->path);
         if (display) {
             struct mp_vaapi_ctx *ctx =
                 va_initialize(display, log, params->probing);
             if (!ctx) {
                 vaTerminate(display);
-                native_displays[n]->destroy(native_ctx);
+                if (native_displays[n]->destroy)
+                    native_displays[n]->destroy(native_ctx);
                 goto end;
             }
             ctx->native_ctx = native_ctx;

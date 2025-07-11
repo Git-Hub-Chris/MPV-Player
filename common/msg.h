@@ -25,6 +25,8 @@
 
 #include "osdep/compiler.h"
 
+#define TERM_MSG_0 "\xFC"
+
 struct mp_log;
 
 // A mp_log instance that never outputs anything.
@@ -32,14 +34,15 @@ extern struct mp_log *const mp_null_log;
 
 // Verbosity levels.
 enum {
-    MSGL_FATAL,     // will exit/abort (note: msg.c doesn't exit or abort)
-    MSGL_ERR,       // continues
-    MSGL_WARN,      // only warning
-    MSGL_INFO,      // -quiet
-    MSGL_STATUS,    // exclusively for the playback status line
-    MSGL_V,         // -v
-    MSGL_DEBUG,     // -v -v
-    MSGL_TRACE,     // -v -v -v
+    MSGL_FATAL,     // only errors (difference to MSGL_ERR isn't too clear)
+    MSGL_ERR,       // only errors
+    MSGL_WARN,      // only warnings
+    MSGL_INFO,      // what you normally see on the terminal
+    MSGL_STATUS,    // exclusively for the playback status line (-quiet disables)
+    MSGL_V,         // -v | slightly more information than default
+    MSGL_DEBUG,     // -v -v | full debug information; this and numerically below
+                    // should not produce "per frame" output
+    MSGL_TRACE,     // -v -v -v | anything that might flood the terminal
     MSGL_STATS,     // dumping fine grained stats (--dump-stats)
 
     MSGL_MAX = MSGL_STATS,
@@ -50,9 +53,17 @@ struct mp_log *mp_log_new(void *talloc_ctx, struct mp_log *parent,
 
 void mp_msg(struct mp_log *log, int lev, const char *format, ...)
     PRINTF_ATTRIBUTE(3, 4);
-void mp_msg_va(struct mp_log *log, int lev, const char *format, va_list va);
+void mp_msg_va(struct mp_log *log, int lev, const char *format, va_list va)
+    PRINTF_ATTRIBUTE(3, 0);
 
-bool mp_msg_test(struct mp_log *log, int lev);
+int mp_msg_level(struct mp_log *log);
+
+static inline bool mp_msg_test(struct mp_log *log, int lev)
+{
+    return lev <= mp_msg_level(log);
+}
+
+void mp_msg_set_max_level(struct mp_log *log, int lev);
 
 // Convenience macros.
 #define mp_fatal(log, ...)      mp_msg(log, MSGL_FATAL, __VA_ARGS__)

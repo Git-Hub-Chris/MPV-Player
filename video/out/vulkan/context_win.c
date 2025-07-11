@@ -44,12 +44,14 @@ static bool win_init(struct ra_ctx *ctx)
     struct mpvk_ctx *vk = &p->vk;
     int msgl = ctx->opts.probing ? MSGL_V : MSGL_ERR;
 
-    if (!mpvk_instance_init(vk, ctx->log, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-                            ctx->opts.debug))
+    if (!mpvk_init(vk, ctx, VK_KHR_WIN32_SURFACE_EXTENSION_NAME))
         goto error;
 
     if (!vo_w32_init(ctx->vo))
         goto error;
+
+    if (ctx->opts.want_alpha)
+        vo_w32_set_transparency(ctx->vo, ctx->opts.want_alpha);
 
     VkWin32SurfaceCreateInfoKHR wininfo = {
          .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
@@ -57,14 +59,16 @@ static bool win_init(struct ra_ctx *ctx)
          .hwnd = vo_w32_hwnd(ctx->vo),
     };
 
-    VkResult res = vkCreateWin32SurfaceKHR(vk->inst, &wininfo, MPVK_ALLOCATOR,
-                                           &vk->surf);
+    struct ra_vk_ctx_params params = {0};
+
+    VkInstance inst = vk->vkinst->instance;
+    VkResult res = vkCreateWin32SurfaceKHR(inst, &wininfo, NULL, &vk->surface);
     if (res != VK_SUCCESS) {
-        MP_MSG(ctx, msgl, "Failed creating Windows surface: %s\n", vk_err(res));
+        MP_MSG(ctx, msgl, "Failed creating Windows surface\n");
         goto error;
     }
 
-    if (!ra_vk_ctx_init(ctx, vk, VK_PRESENT_MODE_FIFO_KHR))
+    if (!ra_vk_ctx_init(ctx, vk, params, VK_PRESENT_MODE_FIFO_KHR))
         goto error;
 
     return true;
@@ -76,7 +80,7 @@ error:
 
 static bool resize(struct ra_ctx *ctx)
 {
-    return ra_vk_ctx_resize(ctx->swapchain, ctx->vo->dwidth, ctx->vo->dheight);
+    return ra_vk_ctx_resize(ctx, ctx->vo->dwidth, ctx->vo->dheight);
 }
 
 static bool win_reconfig(struct ra_ctx *ctx)
@@ -95,11 +99,18 @@ static int win_control(struct ra_ctx *ctx, int *events, int request, void *arg)
     return ret;
 }
 
+static void win_update_render_opts(struct ra_ctx *ctx)
+{
+    vo_w32_set_transparency(ctx->vo, ctx->opts.want_alpha);
+}
+
 const struct ra_ctx_fns ra_ctx_vulkan_win = {
-    .type           = "vulkan",
-    .name           = "winvk",
-    .reconfig       = win_reconfig,
-    .control        = win_control,
-    .init           = win_init,
-    .uninit         = win_uninit,
+    .type               = "vulkan",
+    .name               = "winvk",
+    .description        = "Win32/Vulkan",
+    .reconfig           = win_reconfig,
+    .control            = win_control,
+    .update_render_opts = win_update_render_opts,
+    .init               = win_init,
+    .uninit             = win_uninit,
 };

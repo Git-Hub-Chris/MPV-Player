@@ -1,7 +1,6 @@
-#include "test_helpers.h"
-
 #include "common/common.h"
 #include "misc/linked_list.h"
+#include "test_utils.h"
 
 struct list_item {
     int v;
@@ -13,6 +12,12 @@ struct list_item {
 struct the_list {
     struct list_item *head, *tail;
 };
+
+// This serves to remove some -Waddress "always true" warnings.
+static struct list_item *STUPID_SHIT(struct list_item *item)
+{
+    return item;
+}
 
 static bool do_check_list(struct the_list *lst, int *c, int num_c)
 {
@@ -50,7 +55,7 @@ static bool do_check_list(struct the_list *lst, int *c, int num_c)
     return true;
 }
 
-static void test_linked_list(void **state)
+int main(void)
 {
     struct the_list lst = {0};
     struct list_item e1 = {1};
@@ -100,13 +105,13 @@ static void test_linked_list(void **state)
     LL_INSERT_BEFORE(list_node, &lst, (struct list_item *)NULL, &e2);
 
     check_list(6, 1, 2);
-    LL_INSERT_BEFORE(list_node, &lst, &e6, &e3);
+    LL_INSERT_BEFORE(list_node, &lst, STUPID_SHIT(&e6), &e3);
 
     check_list(3, 6, 1, 2);
-    LL_INSERT_BEFORE(list_node, &lst, &e6, &e5);
+    LL_INSERT_BEFORE(list_node, &lst, STUPID_SHIT(&e6), &e5);
 
     check_list(3, 5, 6, 1, 2);
-    LL_INSERT_BEFORE(list_node, &lst, &e2, &e4);
+    LL_INSERT_BEFORE(list_node, &lst, STUPID_SHIT(&e2), &e4);
 
     check_list(3, 5, 6, 1, 4, 2);
     LL_REMOVE(list_node, &lst, &e6);
@@ -142,21 +147,14 @@ static void test_linked_list(void **state)
     LL_INSERT_AFTER(list_node, &lst, (struct list_item *)NULL, &e3);
 
     check_list(3, 2, 1);
-    LL_INSERT_AFTER(list_node, &lst, &e3, &e4);
+    LL_INSERT_AFTER(list_node, &lst, STUPID_SHIT(&e3), &e4);
 
     check_list(3, 4, 2, 1);
-    LL_INSERT_AFTER(list_node, &lst, &e4, &e5);
+    LL_INSERT_AFTER(list_node, &lst, STUPID_SHIT(&e4), &e5);
 
     check_list(3, 4, 5, 2, 1);
-    LL_INSERT_AFTER(list_node, &lst, &e1, &e6);
+    LL_INSERT_AFTER(list_node, &lst, STUPID_SHIT(&e1), &e6);
 
     check_list(3, 4, 5, 2, 1, 6);
+    return 0;
 }
-
-int main(void) {
-    const struct CMUnitTest tests[] = {
-        cmocka_unit_test(test_linked_list),
-    };
-    return cmocka_run_group_tests(tests, NULL, NULL);
-}
-

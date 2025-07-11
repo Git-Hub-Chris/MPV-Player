@@ -31,9 +31,6 @@
 #include <limits.h>
 #include <assert.h>
 
-#include <libavutil/common.h>
-
-#include "config.h"
 #include "video/vdpau.h"
 #include "video/vdpau_mixer.h"
 #include "video/hwdec.h"
@@ -83,19 +80,18 @@ struct vdpctx {
 
     struct mp_image                   *current_image;
     int64_t                            current_pts;
-    int                                current_duration;
+    int64_t                            current_duration;
 
     int                                output_surface_w, output_surface_h;
     int                                rotation;
 
-    int                                force_yuv;
+    bool                               force_yuv;
     struct mp_vdpau_mixer             *video_mixer;
-    int                                deint;
-    int                                pullup;
+    bool                               pullup;
     float                              denoise;
     float                              sharpen;
     int                                hqscaling;
-    int                                chroma_deint;
+    bool                               chroma_deint;
     int                                flip_offset_window;
     int                                flip_offset_fs;
     int64_t                            flip_offset_us;
@@ -108,9 +104,9 @@ struct vdpctx {
     int                                surface_num; // indexes output_surfaces
     int                                query_surface_num;
     VdpTime                            recent_vsync_time;
-    float                              user_fps;
-    int                                composite_detect;
-    int                                vsync_interval;
+    double                             user_fps;
+    bool                               composite_detect;
+    int64_t                            vsync_interval;
     uint64_t                           last_queue_time;
     uint64_t                           queue_time[MAX_OUTPUT_SURFACES];
     uint64_t                           last_ideal_time;
@@ -283,7 +279,7 @@ static void resize(struct vo *vo)
     vc->flip_offset_us = vo->opts->fullscreen ?
                          1000LL * vc->flip_offset_fs :
                          1000LL * vc->flip_offset_window;
-    vo_set_queue_params(vo, vc->flip_offset_us, 1);
+    vo_set_queue_params(vo, vc->flip_offset_us * 1000, 1);
 
     if (vc->output_surface_w < vo->dwidth || vc->output_surface_h < vo->dheight ||
         vc->rotation != vo->params->rotate)
@@ -349,7 +345,7 @@ static int win_x11_init_vdpau_flip_queue(struct vo *vo)
                         "vdp_presentation_queue_target_create_x11");
     }
 
-    /* Emperically this seems to be the first call which fails when we
+    /* Empirically this seems to be the first call which fails when we
      * try to reinit after preemption while the user is still switched
      * from X to a virtual terminal (creating the vdp_device initially
      * succeeds, as does creating the flip_target above). This is
@@ -481,7 +477,17 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
     VdpStatus vdp_st;
 
     if (!check_preemption(vo))
-        return -1;
+    {
+        /*
+         * When prempted, leave the reconfig() immediately
+         * without reconfiguring the vo_window and without
+         * initializing the vdpau objects. When recovered
+         * from preemption, if there is a difference between
+         * the VD thread parameters and the VO thread parameters
+         * the reconfig() is triggered again.
+         */
+        return 0;
+    }
 
     VdpChromaType chroma_type = VDP_CHROMA_TYPE_420;
     mp_vdpau_get_format(params->imgfmt, &chroma_type, NULL);
@@ -589,11 +595,11 @@ static void generate_osd_part(struct vo *vo, struct sub_bitmaps *imgs)
     case SUBBITMAP_LIBASS:
         format = VDP_RGBA_FORMAT_A8;
         break;
-    case SUBBITMAP_RGBA:
+    case SUBBITMAP_BGRA:
         format = VDP_RGBA_FORMAT_B8G8R8A8;
         break;
     default:
-        abort();
+        MP_ASSERT_UNREACHABLE();
     };
 
     assert(imgs->packed);
@@ -680,7 +686,7 @@ static void draw_osd(struct vo *vo)
 
     bool formats[SUBBITMAP_COUNT] = {
         [SUBBITMAP_LIBASS] = vc->supports_a8,
-        [SUBBITMAP_RGBA] = true,
+        [SUBBITMAP_BGRA] = true,
     };
 
     double pts = vc->current_image ? vc->current_image->pts : 0;
@@ -715,12 +721,12 @@ static int update_presentation_queue_status(struct vo *vo)
             break;
         if (vc->vsync_interval > 1) {
             uint64_t qtime = vc->queue_time[vc->query_surface_num];
-            int diff = ((int64_t)vtime - (int64_t)qtime) / 1e6;
-            MP_TRACE(vo, "Queue time difference: %d ms\n", diff);
+            double diff = MP_TIME_NS_TO_MS((int64_t)vtime - (int64_t)qtime);
+            MP_TRACE(vo, "Queue time difference: %.4f ms\n", diff);
             if (vtime < qtime + vc->vsync_interval / 2)
-                MP_VERBOSE(vo, "Frame shown too early (%d ms)\n", diff);
+                MP_VERBOSE(vo, "Frame shown too early (%.4f ms)\n", diff);
             if (vtime > qtime + vc->vsync_interval)
-                MP_VERBOSE(vo, "Frame shown late (%d ms)\n", diff);
+                MP_VERBOSE(vo, "Frame shown late (%.4f ms)\n", diff);
         }
         vc->query_surface_num = WRAP_ADD(vc->query_surface_num, 1,
                                          vc->num_output_surfaces);
@@ -748,8 +754,8 @@ static void flip_page(struct vo *vo)
     struct vdp_functions *vdp = vc->vdp;
     VdpStatus vdp_st;
 
-    int64_t pts_us = vc->current_pts;
-    int duration = vc->current_duration;
+    int64_t pts_ns = vc->current_pts;
+    int64_t duration = vc->current_duration;
 
     vc->dropped_frame = true; // changed at end if false
 
@@ -760,14 +766,9 @@ static void flip_page(struct vo *vo)
     if (vc->user_fps > 0) {
         vc->vsync_interval = 1e9 / vc->user_fps;
     } else if (vc->user_fps == 0) {
-        vc->vsync_interval = vo_get_vsync_interval(vo) * 1000;
+        vc->vsync_interval = vo_get_vsync_interval(vo);
     }
     vc->vsync_interval = MPMAX(vc->vsync_interval, 1);
-
-    if (duration > INT_MAX / 1000)
-        duration = -1;
-    else
-        duration *= 1000;
 
     if (vc->vsync_interval == 1)
         duration = -1;  // Make sure drop logic is disabled
@@ -776,8 +777,8 @@ static void flip_page(struct vo *vo)
     vdp_st = vdp->presentation_queue_get_time(vc->flip_queue, &vdp_time);
     CHECK_VDP_WARNING(vo, "Error when calling vdp_presentation_queue_get_time");
 
-    int64_t rel_pts_ns = (pts_us - mp_time_us()) * 1000;
-    if (!pts_us || rel_pts_ns < 0)
+    int64_t rel_pts_ns = pts_ns - mp_time_ns();
+    if (!pts_ns || rel_pts_ns < 0)
         rel_pts_ns = 0;
 
     uint64_t now = vdp_time;
@@ -810,7 +811,7 @@ static void flip_page(struct vo *vo)
      * not make the target time in reality. Without this check we could drop
      * every frame, freezing the display completely if video lags behind.
      */
-    if (now > PREV_VSYNC(FFMAX(pts, vc->last_queue_time + vc->vsync_interval)))
+    if (now > PREV_VSYNC(MPMAX(pts, vc->last_queue_time + vc->vsync_interval)))
         npts = UINT64_MAX;
 
     /* Allow flipping a frame at a vsync if its presentation time is a
@@ -837,15 +838,15 @@ static void flip_page(struct vo *vo)
 
     vc->dropped_time = ideal_pts;
 
-    pts = FFMAX(pts, vc->last_queue_time + vc->vsync_interval);
-    pts = FFMAX(pts, now);
+    pts = MPMAX(pts, vc->last_queue_time + vc->vsync_interval);
+    pts = MPMAX(pts, now);
     if (npts < PREV_VSYNC(pts) + vc->vsync_interval)
         goto drop;
 
     int num_flips = update_presentation_queue_status(vo);
     vsync = vc->recent_vsync_time + num_flips * vc->vsync_interval;
-    pts = FFMAX(pts, now);
-    pts = FFMAX(pts, vsync + (vc->vsync_interval >> 2));
+    pts = MPMAX(pts, now);
+    pts = MPMAX(pts, vsync + (vc->vsync_interval >> 2));
     vsync = PREV_VSYNC(pts);
     if (npts < vsync + vc->vsync_interval)
         goto drop;
@@ -869,7 +870,7 @@ drop:
     vo_increment_drop_count(vo, 1);
 }
 
-static void draw_frame(struct vo *vo, struct vo_frame *frame)
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct vdpctx *vc = vo->priv;
 
@@ -892,6 +893,7 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
         video_to_output_surface(vo, vc->current_image);
         draw_osd(vo);
     }
+    return VO_TRUE;
 }
 
 // warning: the size and pixel format of surface must match that of the
@@ -1022,6 +1024,7 @@ static int preinit(struct vo *vo)
         vo_x11_uninit(vo);
         return -1;
     }
+    vc->mpvdp->hwctx.hw_imgfmt = IMGFMT_VDPAU;
 
     vo->hwdec_devs = hwdec_devices_create();
     hwdec_devices_add(vo->hwdec_devs, &vc->mpvdp->hwctx);
@@ -1046,6 +1049,11 @@ static int preinit(struct vo *vo)
     vc->vdp->bitmap_surface_query_capabilities(vc->vdp_device, VDP_RGBA_FORMAT_A8,
                             &vc->supports_a8, &(uint32_t){0}, &(uint32_t){0});
 
+    MP_WARN(vo, "Warning: this compatibility VO is low quality and may "
+                "have issues with OSD, scaling, screenshots and more.\n"
+                "vo=gpu is the preferred choice in any case and "
+                "includes VDPAU support via hwdec=vdpau or vdpau-copy.\n");
+
     return 0;
 }
 
@@ -1058,17 +1066,12 @@ static void checked_resize(struct vo *vo)
 
 static int control(struct vo *vo, uint32_t request, void *data)
 {
-    struct vdpctx *vc = vo->priv;
-
     check_preemption(vo);
 
     switch (request) {
     case VOCTRL_SET_PANSCAN:
         checked_resize(vo);
         return VO_TRUE;
-    case VOCTRL_SET_EQUALIZER:
-        vo->want_redraw = true;
-        return true;
     case VOCTRL_RESET:
         forget_frames(vo, true);
         return true;
@@ -1076,9 +1079,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
         if (!status_ok(vo))
             return false;
         *(struct mp_image **)data = get_window_screenshot(vo);
-        return true;
-    case VOCTRL_GET_PREF_DEINT:
-        *(int *)data = vc->deint;
         return true;
     }
 
@@ -1112,26 +1112,20 @@ const struct vo_driver video_out_vdpau = {
     .uninit = uninit,
     .priv_size = sizeof(struct vdpctx),
     .options = (const struct m_option []){
-        OPT_INTRANGE("deint", deint, 0, -4, 4),
-        OPT_FLAG("chroma-deint", chroma_deint, 0, OPTDEF_INT(1)),
-        OPT_FLAG("pullup", pullup, 0),
-        OPT_FLOATRANGE("denoise", denoise, 0, 0, 1),
-        OPT_FLOATRANGE("sharpen", sharpen, 0, -1, 1),
-        OPT_INTRANGE("hqscaling", hqscaling, 0, 0, 9),
-        OPT_FLOAT("fps", user_fps, 0),
-        OPT_FLAG("composite-detect", composite_detect, 0, OPTDEF_INT(1)),
-        OPT_INT("queuetime-windowed", flip_offset_window, 0, OPTDEF_INT(50)),
-        OPT_INT("queuetime-fs", flip_offset_fs, 0, OPTDEF_INT(50)),
-        OPT_INTRANGE("output-surfaces", num_output_surfaces, 0,
-                     2, MAX_OUTPUT_SURFACES, OPTDEF_INT(3)),
-        OPT_COLOR("colorkey", colorkey, 0,
-                  .defval = &(const struct m_color) {
-                      .r = 2, .g = 5, .b = 7, .a = 255,
-                  }),
-        OPT_FLAG("force-yuv", force_yuv, 0),
-        OPT_REPLACED("queuetime_windowed", "queuetime-windowed"),
-        OPT_REPLACED("queuetime_fs", "queuetime-fs"),
-        OPT_REPLACED("output_surfaces", "output-surfaces"),
+        {"chroma-deint", OPT_BOOL(chroma_deint), OPTDEF_INT(1)},
+        {"pullup", OPT_BOOL(pullup)},
+        {"denoise", OPT_FLOAT(denoise), M_RANGE(0, 1)},
+        {"sharpen", OPT_FLOAT(sharpen), M_RANGE(-1, 1)},
+        {"hqscaling", OPT_INT(hqscaling), M_RANGE(0, 9)},
+        {"fps", OPT_DOUBLE(user_fps)},
+        {"composite-detect", OPT_BOOL(composite_detect), OPTDEF_INT(1)},
+        {"queuetime-windowed", OPT_INT(flip_offset_window), OPTDEF_INT(50)},
+        {"queuetime-fs", OPT_INT(flip_offset_fs), OPTDEF_INT(50)},
+        {"output-surfaces", OPT_INT(num_output_surfaces),
+            M_RANGE(2, MAX_OUTPUT_SURFACES), OPTDEF_INT(3)},
+        {"colorkey", OPT_COLOR(colorkey),
+            .defval = &(const struct m_color){.r = 2, .g = 5, .b = 7, .a = 255}},
+        {"force-yuv", OPT_BOOL(force_yuv)},
         {NULL},
     },
     .options_prefix = "vo-vdpau",

@@ -46,12 +46,18 @@ struct sh_stream {
     bool default_track;         // container default track flag
     bool forced_track;          // container forced track flag
     bool dependent_track;       // container dependent track flag
-    bool still_image;           // video stream contains still images
+    bool visual_impaired_track; // container flag
+    bool hearing_impaired_track;// container flag
+    bool image;                 // video stream is an image
+    bool still_image;           // video consists of multiple sparse still images
     int hls_bitrate;
+    int program_id;
 
     struct mp_tags *tags;
 
     bool missing_timestamps;
+
+    double seek_preroll;
 
     // stream is a picture (such as album art)
     struct demux_packet *attached_picture;
@@ -66,13 +72,26 @@ struct mp_codec_params {
     // E.g. "h264" (usually corresponds to AVCodecDescriptor.name)
     const char *codec;
 
+    // Usually corresponds to AVCodecDescriptor.long_name
+    const char *codec_desc;
+
+    // Corresponding codec profile
+    const char *codec_profile;
+
+    // E.g. "h264" (usually corresponds to AVCodec.name)
+    const char *decoder;
+
+    // Usually corresponds to AVCodec.long_name
+    const char *decoder_desc;
+
     // Usually a FourCC, exact meaning depends on codec.
     unsigned int codec_tag;
 
     unsigned char *extradata;   // codec specific per-stream header
     int extradata_size;
 
-    // Codec specific header data (set by demux_lavf.c only)
+    // Codec specific header data (set by demux_{lavf,mkv,raw}, useful to pass
+    // through stream global side data)
     struct AVCodecParameters *lav_codecpar;
 
     // Timestamp granularity for converting double<->rational timestamps.
@@ -99,11 +118,17 @@ struct mp_codec_params {
     int disp_w, disp_h;   // display size
     int rotate;           // intended display rotation, in degrees, [0, 359]
     int stereo_mode;      // mp_stereo3d_mode (0 if none/unknown)
-    struct mp_colorspace color; // colorspace info where available
-    struct mp_spherical_params spherical;
+    struct pl_color_space color; // colorspace info where available
+    struct pl_color_repr repr;   // color representation info where available
+    struct mp_rect crop;         // crop to be applied
+
+    bool dovi;
+    uint8_t dv_profile;
+    uint8_t dv_level;
 
     // STREAM_VIDEO + STREAM_AUDIO
     int bits_per_coded_sample;
+    char *format_name;    // pixel format (video) or sample format (audio)
 
     // STREAM_SUB
     double frame_based;   // timestamps are frame-based (and this is the

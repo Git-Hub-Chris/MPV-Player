@@ -32,13 +32,13 @@ static const struct native_resource_entry native_resource_map[] = {
         .name = "wl",
         .size = 0,
     },
-    [MPV_RENDER_PARAM_DRM_DISPLAY] = {
-        .name = "drm_params",
-        .size = sizeof (mpv_opengl_drm_params),
+    [MPV_RENDER_PARAM_DRM_DRAW_SURFACE_SIZE] = {
+        .name = "drm_draw_surface_size",
+        .size = sizeof (mpv_opengl_drm_draw_surface_size),
     },
-    [MPV_RENDER_PARAM_DRM_OSD_SIZE] = {
-        .name = "drm_osd_size",
-        .size = sizeof (mpv_opengl_drm_osd_size),
+    [MPV_RENDER_PARAM_DRM_DISPLAY_V2] = {
+        .name = "drm_params_v2",
+        .size = sizeof (mpv_opengl_drm_params_v2),
     },
 };
 
@@ -65,7 +65,7 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     }
 
     if (!p->context)
-        return MPV_ERROR_INVALID_PARAMETER;
+        return MPV_ERROR_NOT_IMPLEMENTED;
 
     int err = p->context->fns->init(p->context, params);
     if (err < 0)
@@ -81,14 +81,14 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
             void *data = params[n].data;
             if (entry->size)
                 data = talloc_memdup(p, data, entry->size);
-            ra_add_native_resource(p->context->ra, entry->name, data);
+            ra_add_native_resource(p->context->ra_ctx->ra, entry->name, data);
         }
     }
 
-    p->renderer = gl_video_init(p->context->ra, ctx->log, ctx->global);
+    p->renderer = gl_video_init(p->context->ra_ctx->ra, ctx->log, ctx->global);
 
     ctx->hwdec_devs = hwdec_devices_create();
-    gl_video_load_hwdecs(p->renderer, ctx->hwdec_devs, true);
+    gl_video_init_hwdecs(p->renderer, p->context->ra_ctx, ctx->hwdec_devs, true);
     ctx->driver_caps = VO_CAP_ROTATE90;
     return 0;
 }
@@ -107,12 +107,14 @@ static int set_parameter(struct render_backend *ctx, mpv_render_param param)
     switch (param.type) {
     case MPV_RENDER_PARAM_ICC_PROFILE: {
         mpv_byte_array *data = param.data;
-        gl_video_set_icc_profile(p->renderer, (bstr){data->data, data->size});
+        gl_video_set_icc_profile(p->renderer, bstrdup(NULL, (bstr){data->data, data->size}));
         return 0;
     }
     case MPV_RENDER_PARAM_AMBIENT_LIGHT: {
+        MP_WARN(ctx, "MPV_RENDER_PARAM_AMBIENT_LIGHT is deprecated and might be "
+                     "removed in the future (replacement: gamma-auto.lua)\n");
         int lux = *(int *)param.data;
-        gl_video_set_ambient_lux(p->renderer, lux);
+        gl_video_set_ambient_lux(p->renderer, (double)lux);
         return 0;
     }
     default:
@@ -185,18 +187,18 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
                                              &(int){0});
 
     struct ra_fbo target = {.tex = tex, .flip = flip};
-    gl_video_render_frame(p->renderer, frame, target, RENDER_FRAME_DEF);
+    gl_video_render_frame(p->renderer, frame, &target, RENDER_FRAME_DEF);
     p->context->fns->done_frame(p->context, frame->display_synced);
 
     return 0;
 }
 
 static struct mp_image *get_image(struct render_backend *ctx, int imgfmt,
-                                  int w, int h, int stride_align)
+                                  int w, int h, int stride_align, int flags)
 {
     struct priv *p = ctx->priv;
 
-    return gl_video_get_image(p->renderer, imgfmt, w, h, stride_align);
+    return gl_video_get_image(p->renderer, imgfmt, w, h, stride_align, flags);
 }
 
 static void screenshot(struct render_backend *ctx, struct vo_frame *frame,
@@ -205,6 +207,14 @@ static void screenshot(struct render_backend *ctx, struct vo_frame *frame,
     struct priv *p = ctx->priv;
 
     gl_video_screenshot(p->renderer, frame, args);
+}
+
+static void perfdata(struct render_backend *ctx,
+                     struct voctrl_performance_data *out)
+{
+    struct priv *p = ctx->priv;
+
+    gl_video_perfdata(p->renderer, out);
 }
 
 static void destroy(struct render_backend *ctx)
@@ -235,5 +245,6 @@ const struct render_backend_fns render_backend_gpu = {
     .render = render,
     .get_image = get_image,
     .screenshot = screenshot,
+    .perfdata = perfdata,
     .destroy = destroy,
 };

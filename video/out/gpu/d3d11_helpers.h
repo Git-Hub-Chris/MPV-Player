@@ -22,11 +22,14 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dxgi1_6.h>
+#include <dxgidebug.h>
 
 #include "video/mp_image.h"
 
-#define D3D_FEATURE_LEVEL_12_0 (0xc000)
-#define D3D_FEATURE_LEVEL_12_1 (0xc100)
+#if !HAVE_DXGI_DEBUG_D3D11
+DEFINE_GUID(DXGI_DEBUG_D3D11, 0x4b99317b, 0xac39, 0x4aa6, 0xbb, 0xb, 0xba, 0xa0, 0x47, 0x84, 0x79, 0x8f);
+#endif
 
 struct d3d11_device_opts {
     // Enable the debug layer (D3D11_CREATE_DEVICE_DEBUG)
@@ -52,7 +55,24 @@ struct d3d11_device_opts {
     // not supported, device creation will fail.
     // If unset, defaults to D3D_FEATURE_LEVEL_9_1
     int min_feature_level;
+
+    // The adapter name to utilize if a specific adapter is required
+    // If unset, the default adapter will be utilized when creating
+    // a device.
+    char *adapter_name;
 };
+
+IDXGIAdapter1 *mp_get_dxgi_adapter(struct mp_log *log,
+                                   bstr requested_adapter_name,
+                                   bstr *listing);
+
+bool mp_get_dxgi_output_desc(IDXGISwapChain *swapchain, DXGI_OUTPUT_DESC1 *desc);
+
+OPT_STRING_VALIDATE_FUNC(mp_dxgi_validate_adapter);
+
+bool mp_dxgi_list_or_verify_adapters(struct mp_log *log,
+                                     bstr adapter_name,
+                                     bstr *listing);
 
 bool mp_d3d11_create_present_device(struct mp_log *log,
                                     struct d3d11_device_opts *opts,
@@ -62,6 +82,13 @@ struct d3d11_swapchain_opts {
     HWND window;
     int width;
     int height;
+    DXGI_FORMAT format;
+    DXGI_COLOR_SPACE_TYPE color_space;
+
+    // pl_color_space mapping of the configured swapchain colorspace
+    // shall be written into this memory location if configuration
+    // succeeds. Will be ignored if NULL.
+    struct pl_color_space *configured_csp;
 
     // Use DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL if possible
     bool flip;
@@ -77,5 +104,8 @@ struct d3d11_swapchain_opts {
 bool mp_d3d11_create_swapchain(ID3D11Device *dev, struct mp_log *log,
                                struct d3d11_swapchain_opts *opts,
                                IDXGISwapChain **swapchain_out);
+
+void mp_d3d11_get_debug_interfaces(struct mp_log *log, IDXGIDebug **debug,
+                                   IDXGIInfoQueue **iqueue);
 
 #endif

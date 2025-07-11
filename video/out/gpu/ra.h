@@ -26,6 +26,10 @@ struct ra {
     // time.
     size_t max_shmem;
 
+    // Maximum number of threads in a compute work group. Set by the RA backend
+    // at init time.
+    size_t max_compute_group_threads;
+
     // Maximum push constant size. Set by the RA backend at init time.
     size_t max_pushc_size;
 
@@ -47,8 +51,8 @@ struct ra {
 };
 
 // For passing through windowing system specific parameters and such. The
-// names are always internal (except for legacy opengl-cb uses; the libmpv
-// render API uses mpv_render_param_type and maps them to names internally).
+// names are always internal (the libmpv render API uses mpv_render_param_type
+// and maps them to names internally).
 // For example, a name="x11" entry has a X11 display as (Display*)data.
 struct ra_native_resource {
     const char *name;
@@ -76,6 +80,7 @@ enum {
     RA_CAP_FRAGCOORD      = 1 << 10, // supports reading from gl_FragCoord
     RA_CAP_PARALLEL_COMPUTE  = 1 << 11, // supports parallel compute shaders
     RA_CAP_NUM_GROUPS     = 1 << 12, // supports gl_NumWorkGroups
+    RA_CAP_SLOW_DR        = 1 << 13, // direct rendering is assumed to be slow
 };
 
 enum ra_ctype {
@@ -85,7 +90,7 @@ enum ra_ctype {
     RA_CTYPE_FLOAT,         // float formats (signed, any bit size)
 };
 
-// All formats must be useable as texture formats. All formats must be byte
+// All formats must be usable as texture formats. All formats must be byte
 // aligned (all pixels start and end on a byte boundary), at least as far CPU
 // transfers are concerned.
 struct ra_format {
@@ -107,6 +112,7 @@ struct ra_format {
                             // only applies to 2-component textures
     bool linear_filter;     // linear filtering available from shader
     bool renderable;        // can be used for render targets
+    bool storable;          // can be used for storage images
     bool dummy_format;      // is not a real ra_format but a fake one (e.g. FBO).
                             // dummy formats cannot be used to create textures
 
@@ -125,8 +131,8 @@ struct ra_tex_params {
     // Size of the texture. 1D textures require h=d=1, 2D textures require d=1.
     int w, h, d;
     const struct ra_format *format;
-    bool render_src;        // must be useable as source texture in a shader
-    bool render_dst;        // must be useable as target texture in a shader
+    bool render_src;        // must be usable as source texture in a shader
+    bool render_dst;        // must be usable as target texture in a shader
     bool storage_dst;       // must be usable as a storage image (RA_VARTYPE_IMG_W)
     bool blit_src;          // must be usable as a blit source
     bool blit_dst;          // must be usable as a blit destination
@@ -137,8 +143,8 @@ struct ra_tex_params {
                             // be true depends on ra_format.linear_filter)
     bool src_repeat;        // if false, clamp texture coordinates to edge
                             // if true, repeat texture coordinates
-    bool non_normalized;    // hack for GL_TEXTURE_RECTANGLE OSX idiocy
-                            // always set to false, except in OSX code
+    bool non_normalized;    // hack for GL_TEXTURE_RECTANGLE macOS idiocy
+                            // always set to false, except in macOS code
     bool external_oes;      // hack for GL_TEXTURE_EXTERNAL_OES idiocy
     // If non-NULL, the texture will be created with these contents. Using
     // this does *not* require setting host_mutable. Otherwise, the initial
@@ -188,6 +194,7 @@ enum ra_buf_type {
     RA_BUF_TYPE_SHADER_STORAGE, // shader buffer (SSBO), for RA_VARTYPE_BUF_RW
     RA_BUF_TYPE_UNIFORM,        // uniform buffer (UBO), for RA_VARTYPE_BUF_RO
     RA_BUF_TYPE_VERTEX,         // not publicly usable (RA-internal usage)
+    RA_BUF_TYPE_SHARED_MEMORY,  // device memory for sharing with external API
 };
 
 struct ra_buf_params {
@@ -401,7 +408,7 @@ struct ra_fns {
     void (*tex_destroy)(struct ra *ra, struct ra_tex *tex);
 
     // Upload data to a texture. This is an extremely common operation. When
-    // using a buffer, the contants of the buffer must exactly match the image
+    // using a buffer, the contents of the buffer must exactly match the image
     // - conversions between bit depth etc. are not supported. The buffer *may*
     // be marked as "in use" while this operation is going on, and the contents
     // must not be touched again by the API user until buf_poll returns true.
@@ -444,7 +451,7 @@ struct ra_fns {
     // Returns an abstract namespace index for a given renderpass input type.
     // This will always be a value >= 0 and < RA_VARTYPE_COUNT. This is used to
     // figure out which inputs may share the same value of `binding`.
-    int (*desc_namespace)(enum ra_vartype type);
+    int (*desc_namespace)(struct ra *ra, enum ra_vartype type);
 
     // Clear the dst with the given color (rgba) and within the given scissor.
     // dst must have dst->params.render_dst==true. Content outside of the
@@ -454,7 +461,7 @@ struct ra_fns {
 
     // Copy a sub-rectangle from one texture to another. The source/dest region
     // is always within the texture bounds. Areas outside the dest region are
-    // preserved. The formats of the textures must be losely compatible. The
+    // preserved. The formats of the textures must be loosely compatible. The
     // dst texture can be a swapchain framebuffer, but src can not. Only 2D
     // textures are supported.
     // The textures must have blit_src and blit_dst set, respectively.
@@ -486,7 +493,7 @@ struct ra_fns {
 
     // Start recording a timer. Note that valid usage requires you to pair
     // every start with a stop. Trying to start a timer twice, or trying to
-    // stop a timer before having started it, consistutes invalid usage.
+    // stop a timer before having started it, constitutes invalid usage.
     void (*timer_start)(struct ra *ra, ra_timer *timer);
 
     // Stop recording a timer. This also returns any results that have been
@@ -529,6 +536,8 @@ struct ra_imgfmt_desc {
     int component_bits;
     // Like mp_regular_imgfmt.component_pad.
     int component_pad;
+    // == planes[n].ctype (RA_CTYPE_UNKNOWN if not applicable)
+    enum ra_ctype component_type;
     // For each texture and each texture output (rgba order) describe what
     // component it returns.
     // The values are like the values in mp_regular_imgfmt_plane.components[].

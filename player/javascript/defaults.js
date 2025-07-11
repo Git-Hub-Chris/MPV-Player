@@ -17,7 +17,7 @@ function new_cache() {
 }
 
 /**********************************************************************
- *  event handlers, property observers, idle, client messages, hooks
+ *  event handlers, property observers, idle, client messages, hooks, async
  *********************************************************************/
 var ehandlers = new_cache() // items of event-name: array of {maybe cb: fn}
 
@@ -126,16 +126,117 @@ function dispatch_message(ev) {
 var hooks = [];  // array of callbacks, id is index+1
 
 function run_hook(ev) {
+    var state = 0;  // 0:initial, 1:deferred, 2:continued
+    function do_cont() { return state = 2, mp._hook_continue(ev.hook_id) }
+
+    function err() { return mp.msg.error("hook already continued"), undefined }
+    function usr_defer() { return state == 2 ? err() : (state = 1, true) }
+    function usr_cont()  { return state == 2 ? err() : do_cont() }
+
     var cb = ev.id > 0 && hooks[ev.id - 1];
     if (cb)
-        cb();
-    mp._hook_continue(ev.hook_id);
+        cb({ defer: usr_defer, cont: usr_cont });
+    return state == 0 ? do_cont() : true;
 }
 
 mp.add_hook = function add_hook(name, pri, fn) {
     hooks.push(fn);
     // 50 (scripting docs default priority) maps to 0 (default in C API docs)
     return mp._hook_add(name, pri - 50, hooks.length);
+}
+
+// ----- async commands -----
+var async_callbacks = new_cache();  // items of id: fn
+var async_next_id = 1;
+
+mp.command_native_async = function command_native_async(node, cb) {
+    var id = async_next_id++;
+    cb = cb || function dummy() {};
+    if (!mp._command_native_async(id, node)) {
+        var le = mp.last_error();
+        setTimeout(cb, 0, false, undefined, le);  /* callback async */
+        mp._set_last_error(le);
+        return undefined;
+    }
+    async_callbacks[id] = cb;
+    return id;
+}
+
+function async_command_handler(ev) {
+    var cb = async_callbacks[ev.id];
+    delete async_callbacks[ev.id];
+    if (ev.error)
+        cb(false, undefined, ev.error);
+    else
+        cb(true, ev.result, "");
+}
+
+mp.abort_async_command = function abort_async_command(id) {
+    // cb will be invoked regardless, possibly with the abort result
+    if (async_callbacks[id])
+        mp._abort_async_command(id);
+}
+
+// osd-ass
+var next_assid = 1;
+mp.create_osd_overlay = function create_osd_overlay(format) {
+    return {
+        format: format || "ass-events",
+        id: next_assid++,
+        data: "",
+        res_x: 0,
+        res_y: 720,
+        z: 0,
+
+        update: function ass_update() {
+            var cmd = {};  // shallow clone of `this', excluding methods
+            for (var k in this) {
+                if (typeof this[k] != "function")
+                    cmd[k] = this[k];
+            }
+
+            cmd.name = "osd-overlay";
+            cmd.res_x = Math.round(this.res_x);
+            cmd.res_y = Math.round(this.res_y);
+
+            return mp.command_native(cmd);
+        },
+
+        remove: function ass_remove() {
+            mp.command_native({
+                name: "osd-overlay",
+                id: this.id,
+                format: "none",
+                data: "",
+            });
+            return mp.last_error() ? undefined : true;
+        },
+    };
+}
+
+// osd-ass legacy API
+mp.set_osd_ass = function set_osd_ass(res_x, res_y, data) {
+    if (!mp._legacy_overlay)
+        mp._legacy_overlay = mp.create_osd_overlay("ass-events");
+
+    var lo = mp._legacy_overlay;
+    if (lo.res_x == res_x && lo.res_y == res_y && lo.data == data)
+        return true;
+
+    mp._legacy_overlay.res_x = res_x;
+    mp._legacy_overlay.res_y = res_y;
+    mp._legacy_overlay.data = data;
+    return mp._legacy_overlay.update();
+}
+
+// the following return undefined on error, null passthrough, or legacy object
+mp.get_osd_size = function get_osd_size() {
+    var d = mp.get_property_native("osd-dimensions");
+    return d && {width: d.w, height: d.h, aspect: d.aspect};
+}
+mp.get_osd_margins = function get_osd_margins() {
+    var d = mp.get_property_native("osd-dimensions");
+    return d && {left: d.ml, right: d.mr, top: d.mt, bottom: d.mb};
 }
 
 /**********************************************************************
@@ -145,16 +246,26 @@ mp.add_hook = function add_hook(name, pri, fn) {
 // {cb: fn, forced: bool, maybe input: str, repeatable: bool, complex: bool}
 var binds = new_cache();
 
-function dispatch_key_binding(name, state) {
+function dispatch_key_binding(name, state, key_name, key_text, scale, arg) {
     var cb = binds[name] ? binds[name].cb : false;
     if (cb)  // "script-binding [<script_name>/]<name>" command was invoked
-        cb(state);
+        cb(state, key_name, key_text, scale, arg);
 }
 
-function update_input_sections() {
+var binds_tid = 0;  // flush timer id. actual id's are always true-thy
+mp.flush_key_bindings = function flush_key_bindings() {
+    function prioritized_inputs(arr) {
+        return arr.sort(function(a, b) { return a.id - b.id })
+                  .map(function(bind) { return bind.input });
+    }
+
     var def = [], forced = [];
-    for (var n in binds)  // Array.join() will later skip undefined .input
-        (binds[n].forced ? forced : def).push(binds[n].input);
+    for (var n in binds)
+        if (binds[n].input)
+            (binds[n].forced ? forced : def).push(binds[n]);
+    // newer bindings for the same key override/hide older ones
+    def = prioritized_inputs(def);
+    forced = prioritized_inputs(forced);
 
     var sect = "input_" + mp.script_name;
     mp.commandv("define-section", sect, def.join("\n"), "default");
@@ -163,6 +274,14 @@ function update_input_sections() {
     sect = "input_forced_" + mp.script_name;
     mp.commandv("define-section", sect, forced.join("\n"), "force");
     mp.commandv("enable-section", sect, "allow-hide-cursor+allow-vo-dragging");
+
+    clearTimeout(binds_tid);  // cancel future flush if called directly
+    binds_tid = 0;
+}
+
+function sched_bindings_flush() {
+    if (!binds_tid)
+        binds_tid = setTimeout(mp.flush_key_bindings, 0);  // fires on idle
 }
 
 // name/opts maybe omitted. opts: object with optional bool members: repeatable,
@@ -172,23 +291,31 @@ function add_binding(forced, key, name, fn, opts) {
     if (typeof name == "function") {  // as if "name" is not part of the args
         opts = fn;
         fn = name;
-        name = "__keybinding" + next_bid++;  // new unique binding name
+        name = false;
     }
     var key_data = {forced: forced};
     switch (typeof opts) {  // merge opts into key_data
         case "string": key_data[opts] = true; break;
         case "object": for (var o in opts) key_data[o] = opts[o];
     }
+    key_data.id = next_bid++;
+    if (!name)
+        name = "__keybinding" + key_data.id;  // new unique binding name
 
     if (key_data.complex) {
         mp.register_script_message(name, function msg_cb() {
             fn({event: "press", is_mouse: false});
         });
         var KEY_STATES = { u: "up", d: "down", r: "repeat", p: "press" };
-        key_data.cb = function key_cb(state) {
+        key_data.cb = function key_cb(state, key_name, key_text, scale, arg) {
             fn({
                 event: KEY_STATES[state[0]] || "unknown",
-                is_mouse: state[1] == "m"
+                is_mouse: state[1] == "m",
+                canceled: state[2] == "c",
+                key_name: key_name || undefined,
+                key_text: key_text || undefined,
+                scale: scale ? parseFloat(scale) : 1.0,
+                arg: arg,
             });
         }
     } else {
@@ -197,16 +324,20 @@ function add_binding(forced, key, name, fn, opts) {
             // Emulate the semantics at input.c: mouse emits on up, kb on down.
             // Also, key repeat triggers the binding again.
             var e = state[0],
-                emit = (state[1] == "m") ? (e == "u") : (e == "d");
+                emit = (state[1] == "m") ? (e == "u") : (e == "d"),
+                canceled = state[2] == "c";
+            if (canceled)
+                return;
             if (emit || e == "p" || e == "r" && key_data.repeatable)
                 fn();
         }
     }
 
+    var prefix = key_data.scalable ? "" : " nonscalable";
     if (key)
-        key_data.input = key + " script-binding " + mp.script_name + "/" + name;
+        key_data.input = key + prefix + " script-binding " + mp.script_name + "/" + name;
     binds[name] = key_data;  // used by user and/or our (key) script-binding
-    update_input_sections();
+    sched_bindings_flush();
 }
 
 mp.add_key_binding = add_binding.bind(null, false);
@@ -215,7 +346,7 @@ mp.add_forced_key_binding = add_binding.bind(null, true);
 mp.remove_key_binding = function(name) {
     mp.unregister_script_message(name);
     delete binds[name];
-    update_input_sections();
+    sched_bindings_flush();
 }
 
 /**********************************************************************
@@ -340,6 +471,10 @@ function process_timers() {
  - Module id supports mpv path enhancements, e.g. ~/foo, ~~/bar, ~~desktop/baz
  *********************************************************************/
 
+mp.module_paths = [];  // global modules search paths
+if (mp.script_path !== undefined)  // loaded as a directory
+    mp.module_paths.push(mp.utils.join_path(mp.script_path, "modules"));
+
 // Internal meta top-dirs. Users should not rely on these names.
 var MODULES_META = "~~modules",
     SCRIPTDIR_META = "~~scriptdir",  // relative script path -> meta absolute id
@@ -354,10 +489,14 @@ function resolve_module_file(id) {
         return mp.utils.join_path(main_script[0], rest);
 
     if (base == MODULES_META) {
-        var path = mp.find_config_file("scripts/modules.js/" + rest);
-        if (!path)
-            throw(Error("Cannot find module file '" + rest + "'"));
-        return path;
+        for (var i = 0; i < mp.module_paths.length; i++) {
+            try {
+                var f = mp.utils.join_path(mp.module_paths[i], rest);
+                mp.utils.read_file(f, 1);  // throws on any error
+                return f;
+            } catch (e) {}
+        }
+        throw(Error("Cannot find module file '" + rest + "'"));
     }
 
     return id + ".js";
@@ -448,13 +587,13 @@ g.require = new_require(SCRIPTDIR_META + "/" + main_script[1]);
 /**********************************************************************
  *  mp.options
  *********************************************************************/
-function read_options(opts, id) {
-    id = String(typeof id != "undefined" ? id : mp.get_script_name());
+function read_options(opts, id, on_update, conf_override) {
+    id = String(id ? id : mp.get_script_name());
     mp.msg.debug("reading options for " + id);
 
     var conf, fname = "~~/script-opts/" + id + ".conf";
     try {
-        conf = mp.utils.read_file(fname);
+        conf = arguments.length > 3 ? conf_override : mp.utils.read_file(fname);
     } catch (e) {
         mp.msg.verbose(fname + " not found.");
     }
@@ -493,9 +632,71 @@ function read_options(opts, id) {
         else
             mp.msg.error(info, "Error: can't convert '" + val + "' to " + type);
     });
+
+    if (on_update) {
+        mp.observe_property("options/script-opts", "native", function(_n, _v) {
+            var saved = JSON.parse(JSON.stringify(opts));  // clone
+            var changelist = {}, changed = false;
+            read_options(opts, id, 0, conf);  // re-apply orig-file + script-opts
+            for (var key in opts) {
+                if (opts[key] != saved[key])  // type always stays the same
+                    changelist[key] = changed = true;
+            }
+            if (changed)
+                on_update(changelist);
+        });
+    }
 }
 
 mp.options = { read_options: read_options };
+
+/**********************************************************************
+*  input
+*********************************************************************/
+function register_event_handler(t) {
+    mp.register_script_message("input-event", function (type, args) {
+        if (t[type]) {
+            args = args ? JSON.parse(args) : [];
+            var result = t[type].apply(null, args);
+
+            if (type == "complete" && result) {
+                mp.commandv("script-message-to", "console", "complete",
+                            JSON.stringify(result[0]), result[1]);
+            }
+        }
+
+        if (type == "closed")
+            mp.unregister_script_message("input-event");
+    })
+}
+
+mp.input = {
+    get: function(t) {
+        mp.commandv("script-message-to", "console", "get-input", mp.script_name,
+                    JSON.stringify(t));
+
+        register_event_handler(t)
+    },
+    terminate: function () {
+        mp.commandv("script-message-to", "console", "disable");
+    },
+    log: function (message, style, terminal_style) {
+        mp.commandv("script-message-to", "console", "log", JSON.stringify({
+                        text: message,
+                        style: style,
+                        terminal_style: terminal_style,
+                   }));
+    },
+    log_error: function (message) {
+        mp.commandv("script-message-to", "console", "log",
+                    JSON.stringify({ text: message, error: true }));
+    },
+    set_log: function (log) {
+        mp.commandv("script-message-to", "console", "set-log",
+                    JSON.stringify(log));
+    }
+}
+mp.input.select = mp.input.get
 
 /**********************************************************************
  *  various
@@ -503,8 +704,15 @@ mp.options = { read_options: read_options };
 g.print = mp.msg.info;  // convenient alias
 mp.get_script_name = function() { return mp.script_name };
 mp.get_script_file = function() { return mp.script_file };
+mp.get_script_directory = function() { return mp.script_path };
 mp.get_time = function() { return mp.get_time_ms() / 1000 };
 mp.utils.getcwd = function() { return mp.get_property("working-directory") };
+mp.utils.getpid = function() { return mp.get_property_number("pid") }
+mp.utils.get_user_path =
+    function(p) { return mp.command_native(["expand-path", String(p)]) };
+mp.get_mouse_pos = function() { return mp.get_property_native("mouse-pos") };
+mp.utils.write_file = mp.utils._write_file.bind(null, false);
+mp.utils.append_file = mp.utils._write_file.bind(null, true);
 mp.dispatch_event = dispatch_event;
 mp.process_timers = process_timers;
 mp.notify_idle_observers = notify_idle_observers;
@@ -518,6 +726,25 @@ mp.get_opt = function(key, def) {
 mp.osd_message = function osd_message(text, duration) {
     mp.commandv("show_text", text, Math.round(1000 * (duration || -1)));
 }
+
+mp.utils.subprocess = function subprocess(t) {
+    var cmd = { name: "subprocess", capture_stdout: true };
+    var new_names = { cancellable: "playback_only", max_size: "capture_size" };
+    for (var k in t)
+        cmd[new_names[k] || k] = t[k];
+
+    var rv = mp.command_native(cmd);
+    if (mp.last_error())  /* typically on missing/incorrect args */
+        rv = { error_string: mp.last_error(), status: -1 };
+    if (rv.error_string)
+        rv.error = rv.error_string;
+    return rv;
+}
+
+mp.utils.subprocess_detached = function subprocess_detached(t) {
+    return mp.commandv.apply(null, ["run"].concat(t.args));
+}
+
 
 // ----- dump: like print, but expands objects/arrays recursively -----
 function replacer(k, v) {
@@ -557,6 +784,7 @@ g.exit = function() { mp.keep_running = false };  // user-facing too
 mp.register_event("shutdown", g.exit);
 mp.register_event("property-change", notify_observer);
 mp.register_event("hook", run_hook);
+mp.register_event("command-reply", async_command_handler);
 mp.register_event("client-message", dispatch_message);
 mp.register_script_message("key-binding", dispatch_key_binding);
 
@@ -569,12 +797,20 @@ g.mp_event_loop = function mp_event_loop() {
             wait = 0;  // poll the next one
         } else {
             wait = process_timers() / 1000;
-            if (wait != 0) {
+            if (wait != 0 && iobservers.length) {
                 notify_idle_observers();  // can add timers -> recalculate wait
                 wait = peek_timers_wait() / 1000;
             }
         }
     } while (mp.keep_running);
 };
+
+
+// let the user extend us, e.g. by adding items to mp.module_paths
+var initjs = mp.find_config_file("init.js");  // ~~/init.js
+if (initjs)
+    require(initjs.slice(0, -3));  // remove ".js"
+else if ((initjs = mp.find_config_file(".init.js")))
+    mp.msg.warn("Use init.js instead of .init.js (ignoring " + initjs + ")");
 
 })(this)

@@ -22,7 +22,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <string.h>
 #include <time.h>
 #include <errno.h>
@@ -34,6 +33,7 @@
 #include "input/keycodes.h"
 #include "input/input.h"
 #include "common/msg.h"
+#include "options/m_config.h"
 #include "options/options.h"
 
 #include "osdep/timer.h"
@@ -43,7 +43,6 @@
 #include "video/mp_image.h"
 
 #include "win_state.h"
-#include "config.h"
 #include "vo.h"
 
 struct formatmap_entry {
@@ -61,7 +60,7 @@ const struct formatmap_entry formats[] = {
     {SDL_PIXELFORMAT_RGBX8888, IMGFMT_RGB0, 0}, // has no alpha -> bad for OSD
     {SDL_PIXELFORMAT_BGR888, IMGFMT_0BGR, 0}, // BGR888 means XBGR8888
     {SDL_PIXELFORMAT_BGRX8888, IMGFMT_BGR0, 0}, // has no alpha -> bad for OSD
-    {SDL_PIXELFORMAT_ARGB8888, IMGFMT_ARGB, 1}, // matches SUBBITMAP_RGBA
+    {SDL_PIXELFORMAT_ARGB8888, IMGFMT_ARGB, 1}, // matches SUBBITMAP_BGRA
     {SDL_PIXELFORMAT_RGBA8888, IMGFMT_RGBA, 1},
     {SDL_PIXELFORMAT_ABGR8888, IMGFMT_ABGR, 1},
     {SDL_PIXELFORMAT_BGRA8888, IMGFMT_BGRA, 1},
@@ -70,7 +69,7 @@ const struct formatmap_entry formats[] = {
     {SDL_PIXELFORMAT_RGBX8888, IMGFMT_0BGR, 0}, // has no alpha -> bad for OSD
     {SDL_PIXELFORMAT_BGR888, IMGFMT_RGB0, 0}, // BGR888 means XBGR8888
     {SDL_PIXELFORMAT_BGRX8888, IMGFMT_0RGB, 0}, // has no alpha -> bad for OSD
-    {SDL_PIXELFORMAT_ARGB8888, IMGFMT_BGRA, 1}, // matches SUBBITMAP_RGBA
+    {SDL_PIXELFORMAT_ARGB8888, IMGFMT_BGRA, 1}, // matches SUBBITMAP_BGRA
     {SDL_PIXELFORMAT_RGBA8888, IMGFMT_ABGR, 1},
     {SDL_PIXELFORMAT_ABGR8888, IMGFMT_RGBA, 1},
     {SDL_PIXELFORMAT_BGRA8888, IMGFMT_ARGB, 1},
@@ -101,6 +100,10 @@ const struct keymap_entry keys[] = {
     {SDLK_LEFT, MP_KEY_LEFT},
     {SDLK_DOWN, MP_KEY_DOWN},
     {SDLK_UP, MP_KEY_UP},
+    {SDLK_KP_PLUS, MP_KEY_KPADD},
+    {SDLK_KP_MINUS, MP_KEY_KPSUBTRACT},
+    {SDLK_KP_MULTIPLY, MP_KEY_KPMULTIPLY},
+    {SDLK_KP_DIVIDE, MP_KEY_KPDIVIDE},
     {SDLK_KP_ENTER, MP_KEY_KPENTER},
     {SDLK_KP_1, MP_KEY_KP1},
     {SDLK_KP_2, MP_KEY_KP2},
@@ -151,8 +154,19 @@ const struct keymap_entry keys[] = {
     {SDLK_F24, MP_KEY_F + 24}
 };
 
+struct mousemap_entry {
+    Uint8 sdl;
+    int mpv;
+};
+const struct mousemap_entry mousebtns[] = {
+    {SDL_BUTTON_LEFT, MP_MBTN_LEFT},
+    {SDL_BUTTON_MIDDLE, MP_MBTN_MID},
+    {SDL_BUTTON_RIGHT, MP_MBTN_RIGHT},
+    {SDL_BUTTON_X1, MP_MBTN_BACK},
+    {SDL_BUTTON_X2, MP_MBTN_FORWARD},
+};
+
 struct priv {
-    bool reinit_renderer;
     SDL_Window *window;
     SDL_Renderer *renderer;
     int renderer_index;
@@ -176,15 +190,14 @@ struct priv {
         int targets_size;
     } osd_surfaces[MAX_OSD_PARTS];
     double osd_pts;
-    int mouse_hidden;
-    int brightness, contrast;
-    char *window_title;
     Uint32 wakeup_event;
+    bool screensaver_enabled;
+    struct m_config_cache *opts_cache;
 
     // options
-    int allow_sw;
-    int switch_mode;
-    int vsync;
+    bool allow_sw;
+    bool switch_mode;
+    bool vsync;
 };
 
 static bool lock_texture(struct vo *vo, struct mp_image *texmpi)
@@ -230,7 +243,7 @@ static bool lock_texture(struct vo *vo, struct mp_image *texmpi)
 }
 
 static bool is_good_renderer(SDL_RendererInfo *ri,
-                             const char *driver_name_wanted, int allow_sw,
+                             const char *driver_name_wanted, bool allow_sw,
                              struct formatmap_entry *osd_format)
 {
     if (driver_name_wanted && driver_name_wanted[0])
@@ -282,15 +295,9 @@ static void destroy_renderer(struct vo *vo)
         SDL_DestroyRenderer(vc->renderer);
         vc->renderer = NULL;
     }
-
-    if (vc->window) {
-        SDL_DestroyWindow(vc->window);
-        vc->window = NULL;
-    }
 }
 
-static bool try_create_renderer(struct vo *vo, int i, const char *driver,
-                                struct mp_rect *rc, int flags)
+static bool try_create_renderer(struct vo *vo, int i, const char *driver)
 {
     struct priv *vc = vo->priv;
 
@@ -301,24 +308,9 @@ static bool try_create_renderer(struct vo *vo, int i, const char *driver,
     if (!is_good_renderer(&ri, driver, vc->allow_sw, NULL))
         return false;
 
-    bool xy_valid = flags & VO_WIN_FORCE_POS;
-
-    // then actually try
-    vc->window = SDL_CreateWindow("MPV",
-                                  xy_valid ? rc->x0 : SDL_WINDOWPOS_UNDEFINED,
-                                  xy_valid ? rc->y0 : SDL_WINDOWPOS_UNDEFINED,
-                                  rc->x1 - rc->x0, rc->y1 - rc->y0,
-                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
-    if (!vc->window) {
-        MP_ERR(vo, "SDL_CreateWindow failed\n");
-        destroy_renderer(vo);
-        return false;
-    }
-
     vc->renderer = SDL_CreateRenderer(vc->window, i, 0);
     if (!vc->renderer) {
         MP_ERR(vo, "SDL_CreateRenderer failed\n");
-        destroy_renderer(vo);
         return false;
     }
 
@@ -342,14 +334,10 @@ static bool try_create_renderer(struct vo *vo, int i, const char *driver,
         vc->renderer_index = i;
     }
 
-    if (vc->window_title)
-        SDL_SetWindowTitle(vc->window, vc->window_title);
-
     return true;
 }
 
-// flags: VO_WIN_* bits
-static int init_renderer(struct vo *vo, struct mp_rect *rc, int flags)
+static int init_renderer(struct vo *vo)
 {
     struct priv *vc = vo->priv;
 
@@ -357,16 +345,15 @@ static int init_renderer(struct vo *vo, struct mp_rect *rc, int flags)
     int i;
 
     if (vc->renderer_index >= 0)
-        if (try_create_renderer(vo, vc->renderer_index, NULL, rc, flags))
+        if (try_create_renderer(vo, vc->renderer_index, NULL))
             return 0;
 
     for (i = 0; i < n; ++i)
-        if (try_create_renderer(vo, i, SDL_GetHint(SDL_HINT_RENDER_DRIVER),
-                                rc, flags))
+        if (try_create_renderer(vo, i, SDL_GetHint(SDL_HINT_RENDER_DRIVER)))
             return 0;
 
     for (i = 0; i < n; ++i)
-        if (try_create_renderer(vo, i, NULL, rc, flags))
+        if (try_create_renderer(vo, i, NULL))
             return 0;
 
     MP_ERR(vo, "No supported renderer\n");
@@ -402,10 +389,23 @@ static void check_resize(struct vo *vo)
         resize(vo, w, h);
 }
 
+static inline void set_screensaver(bool enabled)
+{
+    if (!!enabled == !!SDL_IsScreenSaverEnabled())
+        return;
+
+    if (enabled)
+        SDL_EnableScreenSaver();
+    else
+        SDL_DisableScreenSaver();
+}
+
 static void set_fullscreen(struct vo *vo)
 {
     struct priv *vc = vo->priv;
-    int fs = vo->opts->fullscreen;
+    struct mp_vo_opts *opts = vc->opts_cache->opts;
+    int fs = opts->fullscreen;
+    SDL_bool prev_screensaver_state = SDL_IsScreenSaverEnabled();
 
     Uint32 fs_flag;
     if (vc->switch_mode)
@@ -428,7 +428,7 @@ static void set_fullscreen(struct vo *vo)
     }
 
     // toggling fullscreen might recreate the window, so better guard for this
-    SDL_DisableScreenSaver();
+    set_screensaver(prev_screensaver_state);
 
     force_resize(vo);
 }
@@ -453,23 +453,15 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
     struct mp_rect screenrc;
 
     update_screeninfo(vo, &screenrc);
-    vo_calc_window_geometry(vo, &screenrc, &geo);
+    vo_calc_window_geometry(vo, &screenrc, &screenrc, 1.0, false, &geo);
     vo_apply_window_geometry(vo, &geo);
 
     int win_w = vo->dwidth;
     int win_h = vo->dheight;
 
-    if (vc->reinit_renderer) {
-        destroy_renderer(vo);
-        vc->reinit_renderer = false;
-    }
-
-    if (vc->window)
-        SDL_SetWindowSize(vc->window, win_w, win_h);
-    else {
-        if (init_renderer(vo, &geo.win, geo.flags) != 0)
-            return -1;
-    }
+    SDL_SetWindowSize(vc->window, win_w, win_h);
+    if (geo.flags & VO_WIN_FORCE_POS)
+        SDL_SetWindowPosition(vc->window, geo.win.x0, geo.win.y0);
 
     if (vc->tex)
         SDL_DestroyTexture(vc->tex);
@@ -507,8 +499,7 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
 
     resize(vo, win_w, win_h);
 
-    SDL_DisableScreenSaver();
-
+    set_screensaver(vc->screensaver_enabled);
     set_fullscreen(vo);
 
     SDL_ShowWindow(vc->window);
@@ -532,10 +523,13 @@ static void wakeup(struct vo *vo)
     SDL_PushEvent(&event);
 }
 
-static void wait_events(struct vo *vo, int64_t until_time_us)
+static void wait_events(struct vo *vo, int64_t until_time_ns)
 {
-    int64_t wait_us = until_time_us - mp_time_us();
-    int timeout_ms = MPCLAMP((wait_us + 500) / 1000, 0, 10000);
+    int64_t wait_ns = until_time_ns - mp_time_ns();
+    // Round-up to 1ms for short timeouts (100us, 1000us]
+    if (wait_ns > MP_TIME_US_TO_NS(100))
+        wait_ns = MPMAX(wait_ns, MP_TIME_MS_TO_NS(1));
+    int timeout_ms = MPCLAMP(wait_ns / MP_TIME_MS_TO_NS(1), 0, 10000);
     SDL_Event ev;
 
     while (SDL_WaitEventTimeout(&ev, timeout_ms)) {
@@ -549,6 +543,16 @@ static void wait_events(struct vo *vo, int64_t until_time_us)
             case SDL_WINDOWEVENT_SIZE_CHANGED:
                 check_resize(vo);
                 vo_event(vo, VO_EVENT_RESIZE);
+                break;
+            case SDL_WINDOWEVENT_ENTER:
+                mp_input_put_key(vo->input_ctx, MP_KEY_MOUSE_ENTER);
+                break;
+            case SDL_WINDOWEVENT_LEAVE:
+                mp_input_put_key(vo->input_ctx, MP_KEY_MOUSE_LEAVE);
+                break;
+            case SDL_WINDOWEVENT_FOCUS_LOST:
+            case SDL_WINDOWEVENT_FOCUS_GAINED:
+                vo_event(vo, VO_EVENT_FOCUS);
                 break;
             }
             break;
@@ -606,16 +610,36 @@ static void wait_events(struct vo *vo, int64_t until_time_us)
         case SDL_MOUSEMOTION:
             mp_input_set_mouse_pos(vo->input_ctx, ev.motion.x, ev.motion.y);
             break;
-        case SDL_MOUSEBUTTONDOWN:
-            mp_input_put_key(vo->input_ctx,
-                (MP_MBTN_BASE + ev.button.button - 1) | MP_KEY_STATE_DOWN);
+        case SDL_MOUSEBUTTONDOWN: {
+            int i;
+            for (i = 0; i < sizeof(mousebtns) / sizeof(mousebtns[0]); ++i)
+                if (mousebtns[i].sdl == ev.button.button) {
+                    mp_input_put_key(vo->input_ctx, mousebtns[i].mpv | MP_KEY_STATE_DOWN);
+                    break;
+                }
             break;
-        case SDL_MOUSEBUTTONUP:
-            mp_input_put_key(vo->input_ctx,
-                (MP_MBTN_BASE + ev.button.button - 1) | MP_KEY_STATE_UP);
+        }
+        case SDL_MOUSEBUTTONUP: {
+            int i;
+            for (i = 0; i < sizeof(mousebtns) / sizeof(mousebtns[0]); ++i)
+                if (mousebtns[i].sdl == ev.button.button) {
+                    mp_input_put_key(vo->input_ctx, mousebtns[i].mpv | MP_KEY_STATE_UP);
+                    break;
+                }
             break;
-        case SDL_MOUSEWHEEL:
+        }
+        case SDL_MOUSEWHEEL: {
+#if SDL_VERSION_ATLEAST(2, 0, 4)
+            double multiplier = ev.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+#else
+            double multiplier = 1;
+#endif
+            int y_code = ev.wheel.y > 0 ? MP_WHEEL_UP : MP_WHEEL_DOWN;
+            mp_input_put_wheel(vo->input_ctx, y_code, abs(ev.wheel.y) * multiplier);
+            int x_code = ev.wheel.x > 0 ? MP_WHEEL_RIGHT : MP_WHEEL_LEFT;
+            mp_input_put_wheel(vo->input_ctx, x_code, abs(ev.wheel.x) * multiplier);
             break;
+        }
         }
     }
 }
@@ -624,6 +648,8 @@ static void uninit(struct vo *vo)
 {
     struct priv *vc = vo->priv;
     destroy_renderer(vo);
+    SDL_DestroyWindow(vc->window);
+    vc->window = NULL;
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
     talloc_free(vc);
 }
@@ -783,7 +809,7 @@ static void draw_osd(struct vo *vo)
     struct priv *vc = vo->priv;
 
     static const bool osdformats[SUBBITMAP_COUNT] = {
-        [SUBBITMAP_RGBA] = true,
+        [SUBBITMAP_BGRA] = true,
     };
 
     osd_draw(vo->osd, vc->osd_res, vc->osd_pts, 0, osdformats, draw_osd_cb, vo);
@@ -793,10 +819,12 @@ static int preinit(struct vo *vo)
 {
     struct priv *vc = vo->priv;
 
-    if (SDL_WasInit(SDL_INIT_VIDEO)) {
-        MP_ERR(vo, "already initialized\n");
+    if (SDL_WasInit(SDL_INIT_EVENTS)) {
+        MP_ERR(vo, "Another component is using SDL already.\n");
         return -1;
     }
+
+    vc->opts_cache = m_config_cache_alloc(vc, vo->global, &vo_sub_opts);
 
     // predefine SDL defaults (SDL env vars shall override)
     SDL_SetHintWithPriority(SDL_HINT_RENDER_SCALE_QUALITY, "1",
@@ -813,17 +841,28 @@ static int preinit(struct vo *vo)
         return -1;
     }
 
+    // then actually try
+    vc->window = SDL_CreateWindow("MPV", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                  640, 480, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
+    if (!vc->window) {
+        MP_ERR(vo, "SDL_CreateWindow failed\n");
+        return -1;
+    }
+
     // try creating a renderer (this also gets the renderer_info data
     // for query_format to use!)
-    if (init_renderer(vo, &(struct mp_rect){.x1 = 640, .y1 = 480}, 0) != 0)
+    if (init_renderer(vo) != 0) {
+        SDL_DestroyWindow(vc->window);
+        vc->window = NULL;
         return -1;
-
-    // please reinitialize the renderer to proper size on config()
-    vc->reinit_renderer = true;
+    }
 
     vc->wakeup_event = SDL_RegisterEvents(1);
     if (vc->wakeup_event == (Uint32)-1)
         MP_ERR(vo, "SDL_RegisterEvents() failed.\n");
+
+    MP_WARN(vo, "Warning: this legacy VO has bad performance. Consider fixing "
+                "your graphics drivers, or not forcing the sdl VO.\n");
 
     return 0;
 }
@@ -840,7 +879,7 @@ static int query_format(struct vo *vo, int format)
     return 0;
 }
 
-static void draw_image(struct vo *vo, mp_image_t *mpi)
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *vc = vo->priv;
 
@@ -850,20 +889,16 @@ static void draw_image(struct vo *vo, mp_image_t *mpi)
 
     SDL_SetTextureBlendMode(vc->tex, SDL_BLENDMODE_NONE);
 
-    if (mpi) {
-        vc->osd_pts = mpi->pts;
+    if (frame->current) {
+        vc->osd_pts = frame->current->pts;
 
         mp_image_t texmpi;
-        if (!lock_texture(vo, &texmpi)) {
-            talloc_free(mpi);
-            return;
-        }
+        if (!lock_texture(vo, &texmpi))
+            goto done;
 
-        mp_image_copy(&texmpi, mpi);
+        mp_image_copy(&texmpi, frame->current);
 
         SDL_UnlockTexture(vc->tex);
-
-        talloc_free(mpi);
     }
 
     SDL_Rect src, dst;
@@ -879,6 +914,9 @@ static void draw_image(struct vo *vo, mp_image_t *mpi)
     SDL_RenderCopy(vc->renderer, vc->tex, &src, &dst);
 
     draw_osd(vo);
+
+done:
+    return VO_TRUE;
 }
 
 static struct mp_image *get_window_screenshot(struct vo *vo)
@@ -902,12 +940,15 @@ static int control(struct vo *vo, uint32_t request, void *data)
     struct priv *vc = vo->priv;
 
     switch (request) {
-    case VOCTRL_FULLSCREEN:
-        set_fullscreen(vo);
+    case VOCTRL_VO_OPTS_CHANGED: {
+        void *opt;
+        while (m_config_cache_get_next_changed(vc->opts_cache, &opt)) {
+            struct mp_vo_opts *opts = vc->opts_cache->opts;
+            if (&opts->fullscreen == opt)
+                set_fullscreen(vo);
+        }
         return 1;
-    case VOCTRL_REDRAW_FRAME:
-        draw_image(vo, NULL);
-        return 1;
+    }
     case VOCTRL_SET_PANSCAN:
         force_resize(vo);
         return VO_TRUE;
@@ -917,12 +958,20 @@ static int control(struct vo *vo, uint32_t request, void *data)
     case VOCTRL_SET_CURSOR_VISIBILITY:
         SDL_ShowCursor(*(bool *)data);
         return true;
+    case VOCTRL_KILL_SCREENSAVER:
+        vc->screensaver_enabled = false;
+        set_screensaver(vc->screensaver_enabled);
+        return VO_TRUE;
+    case VOCTRL_RESTORE_SCREENSAVER:
+        vc->screensaver_enabled = true;
+        set_screensaver(vc->screensaver_enabled);
+        return VO_TRUE;
     case VOCTRL_UPDATE_WINDOW_TITLE:
-        talloc_free(vc->window_title);
-        vc->window_title = talloc_strdup(vc, (char *)data);
-        if (vc->window && vc->window_title)
-            SDL_SetWindowTitle(vc->window, vc->window_title);
+        SDL_SetWindowTitle(vc->window, (char *)data);
         return true;
+    case VOCTRL_GET_FOCUSED:
+        *(bool *)data = SDL_GetWindowFlags(vc->window) & SDL_WINDOW_INPUT_FOCUS;
+        return VO_TRUE;
     }
     return VO_NOTIMPL;
 }
@@ -935,19 +984,19 @@ const struct vo_driver video_out_sdl = {
     .priv_size = sizeof(struct priv),
     .priv_defaults = &(const struct priv) {
         .renderer_index = -1,
-        .vsync = 1,
+        .vsync = true,
     },
     .options = (const struct m_option []){
-        OPT_FLAG("sw", allow_sw, 0),
-        OPT_FLAG("switch-mode", switch_mode, 0),
-        OPT_FLAG("vsync", vsync, 0),
+        {"sw", OPT_BOOL(allow_sw)},
+        {"switch-mode", OPT_BOOL(switch_mode)},
+        {"vsync", OPT_BOOL(vsync)},
         {NULL}
     },
     .preinit = preinit,
     .query_format = query_format,
     .reconfig = reconfig,
     .control = control,
-    .draw_image = draw_image,
+    .draw_frame = draw_frame,
     .uninit = uninit,
     .flip_page = flip_page,
     .wait_events = wait_events,

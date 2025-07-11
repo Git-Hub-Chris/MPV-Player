@@ -21,41 +21,44 @@
 #include <signal.h>
 #include <string.h>
 #include <poll.h>
-#include <time.h>
 #include <unistd.h>
 
 #include <gbm.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <drm_fourcc.h>
 
 #include "libmpv/render_gl.h"
-#include "video/out/drm_common.h"
 #include "common/common.h"
 #include "osdep/timer.h"
+#include "video/out/drm_atomic.h"
+#include "video/out/drm_common.h"
+#include "video/out/present_sync.h"
 
 #include "egl_helpers.h"
 #include "common.h"
 #include "context.h"
 
-#define USE_MASTER 0
+#ifndef EGL_PLATFORM_GBM_MESA
+#define EGL_PLATFORM_GBM_MESA 0x31D7
+#endif
 
-struct framebuffer
-{
-    int fd;
-    uint32_t width, height;
-    uint32_t id;
+#ifndef EGL_PLATFORM_GBM_KHR
+#define EGL_PLATFORM_GBM_KHR 0x31D7
+#endif
+
+struct gbm_frame {
+    struct gbm_bo *bo;
 };
 
-struct gbm
-{
+struct gbm {
     struct gbm_surface *surface;
     struct gbm_device *device;
-    struct gbm_bo *bo;
-    struct gbm_bo *next_bo;
+    struct gbm_frame **bo_queue;
+    unsigned int num_bos;
 };
 
-struct egl
-{
+struct egl {
     EGLDisplay display;
     EGLContext context;
     EGLSurface surface;
@@ -63,25 +66,19 @@ struct egl
 
 struct priv {
     GL gl;
-    struct kms *kms;
-
-    drmEventContext ev;
-    drmModeCrtc *old_crtc;
 
     struct egl egl;
     struct gbm gbm;
-    struct framebuffer *fb;
+
+    GLsync *vsync_fences;
+    unsigned int num_vsync_fences;
 
     uint32_t gbm_format;
+    uint64_t *gbm_modifiers;
+    unsigned int num_gbm_modifiers;
 
-    bool active;
-    bool waiting_for_flip;
-
-    bool vt_switcher_active;
-    struct vt_switcher vt_switcher;
-
-    struct mpv_opengl_drm_params drm_params;
-    struct mpv_opengl_drm_osd_size osd_size;
+    struct mpv_opengl_drm_params_v2 drm_params;
+    struct mpv_opengl_drm_draw_surface_size draw_surface_size;
 };
 
 // Not general. Limited to only the formats being used in this module
@@ -92,10 +89,18 @@ static const char *gbm_format_to_string(uint32_t format)
         return "GBM_FORMAT_XRGB8888";
     case GBM_FORMAT_ARGB8888:
         return "GBM_FORMAT_ARGB8888";
+    case GBM_FORMAT_XBGR8888:
+        return "GBM_FORMAT_XBGR8888";
+    case GBM_FORMAT_ABGR8888:
+        return "GBM_FORMAT_ABGR8888";
     case GBM_FORMAT_XRGB2101010:
         return "GBM_FORMAT_XRGB2101010";
     case GBM_FORMAT_ARGB2101010:
         return "GBM_FORMAT_ARGB2101010";
+    case GBM_FORMAT_XBGR2101010:
+        return "GBM_FORMAT_XBGR2101010";
+    case GBM_FORMAT_ABGR2101010:
+        return "GBM_FORMAT_ABGR2101010";
     default:
         return "UNKNOWN";
     }
@@ -103,7 +108,7 @@ static const char *gbm_format_to_string(uint32_t format)
 
 // Allow falling back to an ARGB EGLConfig when we have an XRGB framebuffer.
 // Also allow falling back to an XRGB EGLConfig for ARGB framebuffers, since
-// this seems neccessary to work with broken Mali drivers that don't report
+// this seems necessary to work with broken Mali drivers that don't report
 // their EGLConfigs as supporting alpha properly.
 static uint32_t fallback_format_for(uint32_t format)
 {
@@ -112,10 +117,18 @@ static uint32_t fallback_format_for(uint32_t format)
         return GBM_FORMAT_ARGB8888;
     case GBM_FORMAT_ARGB8888:
         return GBM_FORMAT_XRGB8888;
+    case GBM_FORMAT_XBGR8888:
+        return GBM_FORMAT_ABGR8888;
+    case GBM_FORMAT_ABGR8888:
+        return GBM_FORMAT_XBGR8888;
     case GBM_FORMAT_XRGB2101010:
         return GBM_FORMAT_ARGB2101010;
     case GBM_FORMAT_ARGB2101010:
         return GBM_FORMAT_XRGB2101010;
+    case GBM_FORMAT_XBGR2101010:
+        return GBM_FORMAT_ABGR2101010;
+    case GBM_FORMAT_ABGR2101010:
+        return GBM_FORMAT_XBGR2101010;
     default:
         return 0;
     }
@@ -154,11 +167,27 @@ static int match_config_to_visual(void *user_data, EGLConfig *configs, int num_c
     return -1;
 }
 
+static EGLDisplay egl_get_display(struct gbm_device *gbm_device)
+{
+    EGLDisplay ret;
+
+    ret = mpegl_get_display(EGL_PLATFORM_GBM_MESA, "EGL_MESA_platform_gbm", gbm_device);
+    if (ret != EGL_NO_DISPLAY)
+        return ret;
+
+    ret = mpegl_get_display(EGL_PLATFORM_GBM_KHR, "EGL_KHR_platform_gbm", gbm_device);
+    if (ret != EGL_NO_DISPLAY)
+        return ret;
+
+    return eglGetDisplay(gbm_device);
+}
+
 static bool init_egl(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
     MP_VERBOSE(ctx, "Initializing EGL\n");
-    p->egl.display = eglGetDisplay(p->gbm.device);
+    p->egl.display = egl_get_display(p->gbm.device);
+
     if (p->egl.display == EGL_NO_DISPLAY) {
         MP_ERR(ctx, "Failed to get EGL display.\n");
         return false;
@@ -174,9 +203,14 @@ static bool init_egl(struct ra_ctx *ctx)
                                  &p->egl.context,
                                  &config))
         return false;
+
     MP_VERBOSE(ctx, "Initializing EGL surface\n");
-    p->egl.surface
-        = eglCreateWindowSurface(p->egl.display, config, p->gbm.surface, NULL);
+    p->egl.surface = mpegl_create_window_surface(
+        p->egl.display, config, p->gbm.surface);
+    if (p->egl.surface == EGL_NO_SURFACE) {
+        p->egl.surface = eglCreateWindowSurface(
+            p->egl.display, config, p->gbm.surface, NULL);
+    }
     if (p->egl.surface == EGL_NO_SURFACE) {
         MP_ERR(ctx, "Failed to create EGL surface.\n");
         return false;
@@ -187,21 +221,32 @@ static bool init_egl(struct ra_ctx *ctx)
 static bool init_gbm(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
+    struct vo_drm_state *drm = ctx->vo->drm;
     MP_VERBOSE(ctx->vo, "Creating GBM device\n");
-    p->gbm.device = gbm_create_device(p->kms->fd);
+    p->gbm.device = gbm_create_device(drm->fd);
     if (!p->gbm.device) {
         MP_ERR(ctx->vo, "Failed to create GBM device.\n");
         return false;
     }
 
     MP_VERBOSE(ctx->vo, "Initializing GBM surface (%d x %d)\n",
-        p->osd_size.width, p->osd_size.height);
-    p->gbm.surface = gbm_surface_create(
-        p->gbm.device,
-        p->osd_size.width,
-        p->osd_size.height,
-        p->gbm_format,
-        GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+        p->draw_surface_size.width, p->draw_surface_size.height);
+    if (p->num_gbm_modifiers == 0) {
+        p->gbm.surface = gbm_surface_create(
+            p->gbm.device,
+            p->draw_surface_size.width,
+            p->draw_surface_size.height,
+            p->gbm_format,
+            GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+    } else {
+        p->gbm.surface = gbm_surface_create_with_modifiers(
+            p->gbm.device,
+            p->draw_surface_size.width,
+            p->draw_surface_size.height,
+            p->gbm_format,
+            p->gbm_modifiers,
+            p->num_gbm_modifiers);
+    }
     if (!p->gbm.surface) {
         MP_ERR(ctx->vo, "Failed to create GBM surface.\n");
         return false;
@@ -220,330 +265,239 @@ static void framebuffer_destroy_callback(struct gbm_bo *bo, void *data)
 static void update_framebuffer_from_bo(struct ra_ctx *ctx, struct gbm_bo *bo)
 {
     struct priv *p = ctx->priv;
+    struct vo_drm_state *drm = ctx->vo->drm;
     struct framebuffer *fb = gbm_bo_get_user_data(bo);
     if (fb) {
-        p->fb = fb;
+        drm->fb = fb;
         return;
     }
 
     fb = talloc_zero(ctx, struct framebuffer);
-    fb->fd     = p->kms->fd;
+    fb->fd     = drm->fd;
     fb->width  = gbm_bo_get_width(bo);
     fb->height = gbm_bo_get_height(bo);
-    uint32_t stride = gbm_bo_get_stride(bo);
-    uint32_t handle = gbm_bo_get_handle(bo).u32;
+    uint64_t modifier = gbm_bo_get_modifier(bo);
 
-    int ret = drmModeAddFB2(fb->fd, fb->width, fb->height,
-                            p->gbm_format,
-                            (uint32_t[4]){handle, 0, 0, 0},
-                            (uint32_t[4]){stride, 0, 0, 0},
-                            (uint32_t[4]){0, 0, 0, 0},
-                            &fb->id, 0);
+    uint32_t handles[4] = {0};
+    uint32_t strides[4] = {0};
+    uint32_t offsets[4] = {0};
+    uint64_t modifiers[4] = {0};
+    uint32_t flags = 0;
 
+    const int num_planes = gbm_bo_get_plane_count(bo);
+    for (int i = 0; i < num_planes; ++i) {
+        handles[i] = gbm_bo_get_handle_for_plane(bo, i).u32;
+        strides[i] = gbm_bo_get_stride_for_plane(bo, i);
+        offsets[i] = gbm_bo_get_offset(bo, i);
+        modifiers[i] = modifier;
+    }
+
+    if (modifier && modifier != DRM_FORMAT_MOD_INVALID) {
+        MP_VERBOSE(ctx, "GBM surface using modifier 0x%"PRIX64"\n", modifier);
+        flags = DRM_MODE_FB_MODIFIERS;
+    }
+
+    int ret = drmModeAddFB2WithModifiers(fb->fd, fb->width, fb->height,
+                                         p->gbm_format,
+                                         handles, strides, offsets, modifiers,
+                                         &fb->id, flags);
+    if (ret) {
+        ret = drmModeAddFB2(fb->fd, fb->width, fb->height, p->gbm_format,
+                            handles, strides, offsets, &fb->id, 0);
+    }
     if (ret) {
         MP_ERR(ctx->vo, "Failed to create framebuffer: %s\n", mp_strerror(errno));
     }
     gbm_bo_set_user_data(bo, fb, framebuffer_destroy_callback);
-    p->fb = fb;
+    drm->fb = fb;
 }
 
-static bool crtc_setup_atomic(struct ra_ctx *ctx)
+static void queue_flip(struct ra_ctx *ctx, struct gbm_frame *frame)
 {
-    struct priv *p = ctx->priv;
-    struct drm_atomic_context *atomic_ctx = p->kms->atomic_context;
+    struct vo_drm_state *drm = ctx->vo->drm;
 
-    drmModeAtomicReqPtr request = drmModeAtomicAlloc();
-    if (request) {
-        if (drm_object_set_property(request, atomic_ctx->connector, "CRTC_ID", p->kms->crtc_id) < 0) {
-            MP_ERR(ctx->vo, "Could not set CRTC_ID on connector\n");
-            return false;
-        }
+    update_framebuffer_from_bo(ctx, frame->bo);
 
-        uint32_t blob_id;
-        if (drmModeCreatePropertyBlob(p->kms->fd, &p->kms->mode, sizeof(drmModeModeInfo),
-                                      &blob_id) != 0) {
-            MP_ERR(ctx->vo, "Failed to create DRM mode blob\n");
-            return false;
-        }
-        if (drm_object_set_property(request, atomic_ctx->crtc, "MODE_ID", blob_id) < 0) {
-            MP_ERR(ctx->vo, "Could not set MODE_ID on crtc\n");
-            return false;
-        }
-        if (drm_object_set_property(request, atomic_ctx->crtc, "ACTIVE", 1) < 0) {
-            MP_ERR(ctx->vo, "Could not set ACTIVE on crtc\n");
-            return false;
-        }
+    struct drm_atomic_context *atomic_ctx = drm->atomic_context;
+    int flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
+    drm_object_set_property(atomic_ctx->request, atomic_ctx->draw_plane, "FB_ID", drm->fb->id);
+    drm_object_set_property(atomic_ctx->request, atomic_ctx->draw_plane, "CRTC_ID", atomic_ctx->crtc->id);
+    drm_object_set_property(atomic_ctx->request, atomic_ctx->draw_plane, "ZPOS", 1);
 
-        drm_object_set_property(request, atomic_ctx->osd_plane, "FB_ID", p->fb->id);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "CRTC_ID", p->kms->crtc_id);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "SRC_X",   0);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "SRC_Y",   0);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "SRC_W",   p->osd_size.width << 16);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "SRC_H",   p->osd_size.height << 16);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "CRTC_X",  0);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "CRTC_Y",  0);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "CRTC_W",  p->kms->mode.hdisplay);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "CRTC_H",  p->kms->mode.vdisplay);
+    if (vo_drm_set_hdr_metadata(ctx->vo, false))
+        flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
 
-        int ret = drmModeAtomicCommit(p->kms->fd, request, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
-        if (ret) {
-           MP_ERR(ctx->vo, "Failed to commit ModeSetting atomic request (%d)\n", ret);
-           drmModeAtomicFree(request);
-           return false;
-        }
+    int ret = drmModeAtomicCommit(drm->fd, atomic_ctx->request, flags, drm);
 
-        drmModeAtomicFree(request);
+    if (ret)
+        MP_WARN(ctx->vo, "Failed to commit atomic request: %s\n", mp_strerror(ret));
+    drm->waiting_for_flip = !ret;
 
-        return ret == 0;
-    } else {
-        MP_ERR(ctx->vo, "Failed to allocate drm atomic request\n");
-    }
-
-    return false;
+    drmModeAtomicFree(atomic_ctx->request);
+    atomic_ctx->request = drmModeAtomicAlloc();
 }
 
-static bool crtc_release_atomic(struct ra_ctx *ctx)
+static void enqueue_bo(struct ra_ctx *ctx, struct gbm_bo *bo)
 {
     struct priv *p = ctx->priv;
 
-    struct drm_atomic_context *atomic_ctx = p->kms->atomic_context;
-    drmModeAtomicReqPtr request = drmModeAtomicAlloc();
-    if (request) {
-        drm_object_set_property(request, atomic_ctx->connector, "CRTC_ID", p->old_crtc->crtc_id);
-
-        uint32_t blob_id;
-        if (drmModeCreatePropertyBlob(p->kms->fd, &p->old_crtc->mode, sizeof(drmModeModeInfo),
-                                      &blob_id) != 0) {
-            MP_ERR(ctx->vo, "Failed to create DRM mode blob\n");
-            return false;
-        }
-        drm_object_set_property(request, atomic_ctx->crtc, "MODE_ID", blob_id);
-        drm_object_set_property(request, atomic_ctx->crtc, "ACTIVE", 1);
-        drm_object_set_property(request, atomic_ctx->osd_plane, "FB_ID", p->old_crtc->buffer_id);
-
-        int ret = drmModeAtomicCommit(p->kms->fd, request, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
-
-        if (ret)
-           MP_WARN(ctx->vo, "Failed to commit ModeSetting atomic request (%d)\n", ret);
-
-        drmModeAtomicFree(request);
-
-        return ret == 0;
-    } else {
-        MP_ERR(ctx->vo, "Failed to allocate drm atomic request\n");
-    }
-
-    return false;
+    struct gbm_frame *new_frame = talloc(p, struct gbm_frame);
+    new_frame->bo = bo;
+    MP_TARRAY_APPEND(p, p->gbm.bo_queue, p->gbm.num_bos, new_frame);
 }
 
-static bool crtc_setup(struct ra_ctx *ctx)
-{
-    struct priv *p = ctx->priv;
-    if (p->active)
-        return true;
-    p->old_crtc = drmModeGetCrtc(p->kms->fd, p->kms->crtc_id);
-
-    if (p->kms->atomic_context) {
-        int ret = crtc_setup_atomic(ctx);
-        p->active = true;
-        return ret;
-    } else {
-        int ret = drmModeSetCrtc(p->kms->fd, p->kms->crtc_id, p->fb->id,
-                                 0, 0, &p->kms->connector->connector_id, 1,
-                                 &p->kms->mode);
-        p->active = true;
-        return ret == 0;
-    }
-}
-
-static void crtc_release(struct ra_ctx *ctx)
+static void dequeue_bo(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
 
-    if (!p->active)
+    talloc_free(p->gbm.bo_queue[0]);
+    MP_TARRAY_REMOVE_AT(p->gbm.bo_queue, p->gbm.num_bos, 0);
+}
+
+static void swapchain_step(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+
+    if (!(p->gbm.num_bos > 0))
         return;
-    p->active = false;
 
-    // wait for current page flip
-    while (p->waiting_for_flip) {
-        int ret = drmHandleEvent(p->kms->fd, &p->ev);
-        if (ret) {
-            MP_ERR(ctx->vo, "drmHandleEvent failed: %i\n", ret);
-            break;
-        }
-    }
-
-    if (p->old_crtc) {
-        if (p->kms->atomic_context) {
-            if (!crtc_release_atomic(ctx))
-                MP_ERR(ctx->vo, "Failed to restore previous mode\n");
-        } else {
-            drmModeSetCrtc(p->kms->fd,
-                           p->old_crtc->crtc_id, p->old_crtc->buffer_id,
-                           p->old_crtc->x, p->old_crtc->y,
-                           &p->kms->connector->connector_id, 1,
-                           &p->old_crtc->mode);
-        }
-        drmModeFreeCrtc(p->old_crtc);
-        p->old_crtc = NULL;
-    }
+    if (p->gbm.bo_queue[0]->bo)
+        gbm_surface_release_buffer(p->gbm.surface, p->gbm.bo_queue[0]->bo);
+    dequeue_bo(ctx);
 }
 
-static void release_vt(void *data)
-{
-    struct ra_ctx *ctx = data;
-    MP_VERBOSE(ctx->vo, "Releasing VT\n");
-    crtc_release(ctx);
-    if (USE_MASTER) {
-        //this function enables support for switching to x, weston etc.
-        //however, for whatever reason, it can be called only by root users.
-        //until things change, this is commented.
-        struct priv *p = ctx->priv;
-        if (drmDropMaster(p->kms->fd)) {
-            MP_WARN(ctx->vo, "Failed to drop DRM master: %s\n",
-                    mp_strerror(errno));
-        }
-    }
-}
-
-static void acquire_vt(void *data)
-{
-    struct ra_ctx *ctx = data;
-    MP_VERBOSE(ctx->vo, "Acquiring VT\n");
-    if (USE_MASTER) {
-        struct priv *p = ctx->priv;
-        if (drmSetMaster(p->kms->fd)) {
-            MP_WARN(ctx->vo, "Failed to acquire DRM master: %s\n",
-                    mp_strerror(errno));
-        }
-    }
-
-    crtc_setup(ctx);
-}
-
-static bool drm_atomic_egl_start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
-{
-    struct priv *p = sw->ctx->priv;
-    if (p->kms->atomic_context) {
-        if (!p->kms->atomic_context->request) {
-            p->kms->atomic_context->request = drmModeAtomicAlloc();
-            p->drm_params.atomic_request_ptr = &p->kms->atomic_context->request;
-        }
-        return ra_gl_ctx_start_frame(sw, out_fbo);
-    }
-    return false;
-}
-
-static const struct ra_swapchain_fns drm_atomic_swapchain = {
-    .start_frame   = drm_atomic_egl_start_frame,
-};
-
-static void drm_egl_swap_buffers(struct ra_ctx *ctx)
+static void new_fence(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
-    struct drm_atomic_context *atomic_ctx = p->kms->atomic_context;
-    int ret;
 
-    if (!p->active)
+    if (p->gl.FenceSync) {
+        GLsync fence = p->gl.FenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (fence)
+            MP_TARRAY_APPEND(p, p->vsync_fences, p->num_vsync_fences, fence);
+    }
+}
+
+static void wait_fence(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+
+    while (p->num_vsync_fences && (p->num_vsync_fences >= p->gbm.num_bos)) {
+        p->gl.ClientWaitSync(p->vsync_fences[0], GL_SYNC_FLUSH_COMMANDS_BIT, 1e9);
+        p->gl.DeleteSync(p->vsync_fences[0]);
+        MP_TARRAY_REMOVE_AT(p->vsync_fences, p->num_vsync_fences, 0);
+    }
+}
+
+static bool drm_egl_start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
+{
+    struct ra_ctx *ctx = sw->ctx;
+    struct priv *p = ctx->priv;
+    struct vo_drm_state *drm = ctx->vo->drm;
+
+    if (!drm->atomic_context->request) {
+        drm->atomic_context->request = drmModeAtomicAlloc();
+        p->drm_params.atomic_request_ptr = &drm->atomic_context->request;
+    }
+
+    return ra_gl_ctx_start_frame(sw, out_fbo);
+}
+
+static bool drm_egl_submit_frame(struct ra_swapchain *sw, const struct vo_frame *frame)
+{
+    struct ra_ctx *ctx = sw->ctx;
+    struct vo_drm_state *drm = ctx->vo->drm;
+
+    drm->still = frame->still;
+
+    return ra_gl_ctx_submit_frame(sw, frame);
+}
+
+static void drm_egl_swap_buffers(struct ra_swapchain *sw)
+{
+    struct ra_ctx *ctx = sw->ctx;
+    struct priv *p = ctx->priv;
+    struct vo_drm_state *drm = ctx->vo->drm;
+    const bool drain = drm->paused || drm->still;  // True when we need to drain the swapchain
+
+    if (!drm->active)
         return;
+
+    wait_fence(ctx);
 
     eglSwapBuffers(p->egl.display, p->egl.surface);
-    p->gbm.next_bo = gbm_surface_lock_front_buffer(p->gbm.surface);
-    p->waiting_for_flip = true;
-    update_framebuffer_from_bo(ctx, p->gbm.next_bo);
 
-    if (atomic_ctx) {
-        drm_object_set_property(atomic_ctx->request, atomic_ctx->osd_plane, "FB_ID", p->fb->id);
-        drm_object_set_property(atomic_ctx->request, atomic_ctx->osd_plane, "CRTC_ID", atomic_ctx->crtc->id);
-        drm_object_set_property(atomic_ctx->request, atomic_ctx->osd_plane, "ZPOS", 1);
+    struct gbm_bo *new_bo = gbm_surface_lock_front_buffer(p->gbm.surface);
+    if (!new_bo) {
+        MP_ERR(ctx->vo, "Couldn't lock front buffer\n");
+        return;
+    }
+    enqueue_bo(ctx, new_bo);
+    new_fence(ctx);
 
-        ret = drmModeAtomicCommit(p->kms->fd, atomic_ctx->request,
-                                  DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL);
-        if (ret)
-            MP_WARN(ctx->vo, "Failed to commit atomic request (%d)\n", ret);
-    } else {
-        ret = drmModePageFlip(p->kms->fd, p->kms->crtc_id, p->fb->id,
-                                  DRM_MODE_PAGE_FLIP_EVENT, p);
-        if (ret) {
-            MP_WARN(ctx->vo, "Failed to queue page flip: %s\n", mp_strerror(errno));
+    while (drain || p->gbm.num_bos > ctx->vo->opts->swapchain_depth ||
+           !gbm_surface_has_free_buffers(p->gbm.surface)) {
+        if (drm->waiting_for_flip) {
+            vo_drm_wait_on_flip(drm);
+            swapchain_step(ctx);
         }
-    }
-
-    // poll page flip finish event
-    const int timeout_ms = 3000;
-    struct pollfd fds[1] = { { .events = POLLIN, .fd = p->kms->fd } };
-    poll(fds, 1, timeout_ms);
-    if (fds[0].revents & POLLIN) {
-        ret = drmHandleEvent(p->kms->fd, &p->ev);
-        if (ret != 0) {
-            MP_ERR(ctx->vo, "drmHandleEvent failed: %i\n", ret);
-            p->waiting_for_flip = false;
-            return;
+        if (p->gbm.num_bos <= 1)
+            break;
+        if (!p->gbm.bo_queue[1] || !p->gbm.bo_queue[1]->bo) {
+            MP_ERR(ctx->vo, "Hole in swapchain?\n");
+            swapchain_step(ctx);
+            continue;
         }
+        queue_flip(ctx, p->gbm.bo_queue[1]);
     }
-    p->waiting_for_flip = false;
-
-    if (atomic_ctx) {
-        drmModeAtomicFree(atomic_ctx->request);
-        atomic_ctx->request = drmModeAtomicAlloc();
-    }
-
-    gbm_surface_release_buffer(p->gbm.surface, p->gbm.bo);
-    p->gbm.bo = p->gbm.next_bo;
 }
+
+static const struct ra_swapchain_fns drm_egl_swapchain = {
+    .start_frame   = drm_egl_start_frame,
+    .submit_frame  = drm_egl_submit_frame,
+    .swap_buffers  = drm_egl_swap_buffers,
+};
 
 static void drm_egl_uninit(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
-    struct drm_atomic_context *atomic_ctx = p->kms->atomic_context;
-
-    if (atomic_ctx) {
-        int ret = drmModeAtomicCommit(p->kms->fd, atomic_ctx->request, 0, NULL);
-        if (ret)
-            MP_ERR(ctx->vo, "Failed to commit atomic request (%d)\n", ret);
-        drmModeAtomicFree(atomic_ctx->request);
-    }
-
     ra_gl_ctx_uninit(ctx);
+    vo_drm_uninit(ctx->vo);
 
-    crtc_release(ctx);
-    if (p->vt_switcher_active)
-        vt_switcher_destroy(&p->vt_switcher);
+    if (p) {
+        // According to GBM documentation all BO:s must be released
+        // before gbm_surface_destroy can be called on the surface.
+        while (p->gbm.num_bos) {
+            swapchain_step(ctx);
+        }
 
-    eglMakeCurrent(p->egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                   EGL_NO_CONTEXT);
-    eglDestroyContext(p->egl.display, p->egl.context);
-    eglDestroySurface(p->egl.display, p->egl.surface);
-    gbm_surface_destroy(p->gbm.surface);
-    eglTerminate(p->egl.display);
-    gbm_device_destroy(p->gbm.device);
-    p->egl.context = EGL_NO_CONTEXT;
-    eglDestroyContext(p->egl.display, p->egl.context);
+        eglMakeCurrent(p->egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
+        if (p->egl.display != EGL_NO_DISPLAY) {
+            eglDestroySurface(p->egl.display, p->egl.surface);
+            eglDestroyContext(p->egl.display, p->egl.context);
+        }
+        if (p->gbm.surface)
+            gbm_surface_destroy(p->gbm.surface);
+        eglTerminate(p->egl.display);
+        if (p->gbm.device)
+            gbm_device_destroy(p->gbm.device);
 
-    if (p->kms) {
-        kms_destroy(p->kms);
-        p->kms = 0;
+        if (p->drm_params.render_fd != -1)
+            close(p->drm_params.render_fd);
     }
 }
 
-// If the OSD plane supports ARGB we want to use that, but if it doesn't we fall
-// back on XRGB. If the driver does not support atomic there is no particular
-// reason to be using ARGB (drmprime hwdec will not work without atomic,
-// anyway), so we fall back to XRGB (another reason is that we do not have the
-// convenient atomic_ctx and its convenient plane fields).
+// If the draw plane supports ARGB we want to use that, but if it doesn't we
+// fall back on XRGB. If we do not have atomic there is no particular reason to
+// be using ARGB (drmprime hwdec will not work without atomic, anyway), so we
+// fall back to XRGB (another reason is that we do not have the convenient
+// atomic_ctx and its convenient plane fields).
 static bool probe_gbm_format(struct ra_ctx *ctx, uint32_t argb_format, uint32_t xrgb_format)
 {
     struct priv *p = ctx->priv;
+    struct vo_drm_state *drm = ctx->vo->drm;
 
-    if (!p->kms->atomic_context) {
-        p->gbm_format = xrgb_format;
-        MP_VERBOSE(ctx->vo, "Not using DRM Atomic: Use %s for OSD plane.\n",
-                   gbm_format_to_string(xrgb_format));
-        return true;
-    }
-
-    drmModePlane *drmplane =
-        drmModeGetPlane(p->kms->fd, p->kms->atomic_context->osd_plane->id);
+    drmModePlane *drmplane = drmModeGetPlane(drm->fd, drm->atomic_context->draw_plane->id);
     bool have_argb = false;
     bool have_xrgb = false;
     bool result = false;
@@ -557,11 +511,11 @@ static bool probe_gbm_format(struct ra_ctx *ctx, uint32_t argb_format, uint32_t 
 
     if (have_argb) {
         p->gbm_format = argb_format;
-        MP_VERBOSE(ctx->vo, "%s supported by OSD plane.\n", gbm_format_to_string(argb_format));
+        MP_VERBOSE(ctx->vo, "%s supported by draw plane.\n", gbm_format_to_string(argb_format));
         result = true;
     } else if (have_xrgb) {
         p->gbm_format = xrgb_format;
-        MP_VERBOSE(ctx->vo, "%s not supported by OSD plane: Falling back to %s.\n",
+        MP_VERBOSE(ctx->vo, "%s not supported by draw plane: Falling back to %s.\n",
                    gbm_format_to_string(argb_format), gbm_format_to_string(xrgb_format));
         result = true;
     }
@@ -570,78 +524,119 @@ static bool probe_gbm_format(struct ra_ctx *ctx, uint32_t argb_format, uint32_t 
     return result;
 }
 
+static bool probe_gbm_modifiers(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct vo_drm_state *drm = ctx->vo->drm;
+
+    drmModePropertyBlobPtr blob =  drm_object_get_property_blob(drm->atomic_context->draw_plane,
+                                                                "IN_FORMATS");
+    if (!blob) {
+        MP_VERBOSE(ctx->vo, "Failed to find IN_FORMATS property\n");
+        return false;
+    }
+
+    struct drm_format_modifier_blob *data = blob->data;
+    uint32_t *fmts = (uint32_t *)((char *)data + data->formats_offset);
+    struct drm_format_modifier *mods =
+        (struct drm_format_modifier *)((char *)data + data->modifiers_offset);
+
+    for (unsigned int j = 0; j < data->count_modifiers; ++j) {
+        struct drm_format_modifier *mod = &mods[j];
+        for (uint64_t k = 0; k < 64; ++k) {
+            if (mod->formats & (1ull << k)) {
+                uint32_t fmt = fmts[k + mod->offset];
+                if (fmt == p->gbm_format) {
+                    MP_TARRAY_APPEND(p, p->gbm_modifiers,
+                                        p->num_gbm_modifiers, mod->modifier);
+                    MP_VERBOSE(ctx->vo, "Supported modifier: 0x%"PRIX64"\n",
+                                (uint64_t)mod->modifier);
+                    break;
+                }
+            }
+        }
+    }
+    drmModeFreePropertyBlob(blob);
+
+    if (p->num_gbm_modifiers == 0) {
+        MP_VERBOSE(ctx->vo, "No supported DRM modifiers found.\n");
+    }
+    return true;
+}
+
+static void drm_egl_get_vsync(struct ra_ctx *ctx, struct vo_vsync_info *info)
+{
+    struct vo_drm_state *drm = ctx->vo->drm;
+    present_sync_get_info(drm->present, info);
+}
+
 static bool drm_egl_init(struct ra_ctx *ctx)
 {
-    if (ctx->opts.probing) {
-        MP_VERBOSE(ctx, "DRM EGL backend can be activated only manually.\n");
-        return false;
-    }
+    if (!vo_drm_init(ctx->vo))
+        goto err;
 
     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
-    p->ev.version = DRM_EVENT_CONTEXT_VERSION;
+    struct vo_drm_state *drm = ctx->vo->drm;
 
-    p->vt_switcher_active = vt_switcher_init(&p->vt_switcher, ctx->vo->log);
-    if (p->vt_switcher_active) {
-        vt_switcher_acquire(&p->vt_switcher, acquire_vt, ctx);
-        vt_switcher_release(&p->vt_switcher, release_vt, ctx);
+    if (ctx->vo->drm->opts->draw_surface_size.wh_valid) {
+        p->draw_surface_size.width = ctx->vo->drm->opts->draw_surface_size.w;
+        p->draw_surface_size.height = ctx->vo->drm->opts->draw_surface_size.h;
     } else {
-        MP_WARN(ctx, "Failed to set up VT switcher. Terminal switching will be unavailable.\n");
+        p->draw_surface_size.width = drm->mode.mode.hdisplay;
+        p->draw_surface_size.height = drm->mode.mode.vdisplay;
     }
 
-    MP_VERBOSE(ctx, "Initializing KMS\n");
-    p->kms = kms_create(ctx->log, ctx->vo->opts->drm_opts->drm_connector_spec,
-                        ctx->vo->opts->drm_opts->drm_mode_id,
-                        ctx->vo->opts->drm_opts->drm_osd_plane_id,
-                        ctx->vo->opts->drm_opts->drm_video_plane_id);
-    if (!p->kms) {
-        MP_ERR(ctx, "Failed to create KMS.\n");
-        return false;
-    }
-
-    if (ctx->vo->opts->drm_opts->drm_osd_size.wh_valid) {
-        if (p->kms->atomic_context) {
-            p->osd_size.width = ctx->vo->opts->drm_opts->drm_osd_size.w;
-            p->osd_size.height = ctx->vo->opts->drm_opts->drm_osd_size.h;
-        } else {
-            p->osd_size.width = p->kms->mode.hdisplay;
-            p->osd_size.height = p->kms->mode.vdisplay;
-            MP_WARN(ctx, "Setting OSD size is only available with DRM atomic, defaulting to screen resolution\n");
-        }
-    } else {
-        p->osd_size.width = p->kms->mode.hdisplay;
-        p->osd_size.height = p->kms->mode.vdisplay;
-    }
+    drm->width = p->draw_surface_size.width;
+    drm->height = p->draw_surface_size.height;
 
     uint32_t argb_format;
     uint32_t xrgb_format;
-    if (DRM_OPTS_FORMAT_XRGB2101010 == ctx->vo->opts->drm_opts->drm_format) {
+    switch (ctx->vo->drm->opts->drm_format) {
+    case DRM_OPTS_FORMAT_XRGB2101010:
         argb_format = GBM_FORMAT_ARGB2101010;
         xrgb_format = GBM_FORMAT_XRGB2101010;
-    } else {
+        break;
+    case DRM_OPTS_FORMAT_XBGR2101010:
+        argb_format = GBM_FORMAT_ABGR2101010;
+        xrgb_format = GBM_FORMAT_XBGR2101010;
+        break;
+    case DRM_OPTS_FORMAT_XBGR8888:
+        argb_format = GBM_FORMAT_ABGR8888;
+        xrgb_format = GBM_FORMAT_XBGR8888;
+        break;
+    default:
+        if (drm->opts->drm_format != DRM_OPTS_FORMAT_XRGB8888) {
+            MP_VERBOSE(ctx->vo, "Requested format not supported by context, "
+                       "falling back to xrgb8888\n");
+        }
         argb_format = GBM_FORMAT_ARGB8888;
         xrgb_format = GBM_FORMAT_XRGB8888;
+        break;
     }
 
     if (!probe_gbm_format(ctx, argb_format, xrgb_format)) {
-        MP_ERR(ctx->vo, "No suitable format found on DRM primary plane (tried: %s and %s).\n",
+        MP_ERR(ctx->vo, "No suitable format found on draw plane (tried: %s and %s).\n",
                gbm_format_to_string(argb_format), gbm_format_to_string(xrgb_format));
-        return false;
+        goto err;
     }
+
+    // It is not fatal if this fails. We'll just try without modifiers.
+    probe_gbm_modifiers(ctx);
 
     if (!init_gbm(ctx)) {
         MP_ERR(ctx->vo, "Failed to setup GBM.\n");
-        return false;
+        goto err;
     }
 
     if (!init_egl(ctx)) {
         MP_ERR(ctx->vo, "Failed to setup EGL.\n");
-        return false;
+        goto err;
     }
 
     if (!eglMakeCurrent(p->egl.display, p->egl.surface, p->egl.surface,
                         p->egl.context)) {
         MP_ERR(ctx->vo, "Failed to make context current.\n");
-        return false;
+        goto err;
     }
 
     mpegl_load_functions(&p->gl, ctx->vo->log);
@@ -649,93 +644,101 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     eglSwapBuffers(p->egl.display, p->egl.surface);
 
     MP_VERBOSE(ctx, "Preparing framebuffer\n");
-    p->gbm.bo = gbm_surface_lock_front_buffer(p->gbm.surface);
-    if (!p->gbm.bo) {
+    struct gbm_bo *new_bo = gbm_surface_lock_front_buffer(p->gbm.surface);
+    if (!new_bo) {
         MP_ERR(ctx, "Failed to lock GBM surface.\n");
-        return false;
+        goto err;
     }
-    update_framebuffer_from_bo(ctx, p->gbm.bo);
-    if (!p->fb || !p->fb->id) {
+
+    enqueue_bo(ctx, new_bo);
+    update_framebuffer_from_bo(ctx, new_bo);
+    if (!drm->fb || !drm->fb->id) {
         MP_ERR(ctx, "Failed to create framebuffer.\n");
-        return false;
+        goto err;
     }
 
-    if (!crtc_setup(ctx)) {
+    if (!vo_drm_acquire_crtc(ctx->vo->drm)) {
         MP_ERR(ctx, "Failed to set CRTC for connector %u: %s\n",
-               p->kms->connector->connector_id, mp_strerror(errno));
-        return false;
+               drm->connector->connector_id, mp_strerror(errno));
+        goto err;
     }
 
-    p->drm_params.fd = p->kms->fd;
-    p->drm_params.crtc_id = p->kms->crtc_id;
-    p->drm_params.connector_id = p->kms->connector->connector_id;
-    if (p->kms->atomic_context)
-        p->drm_params.atomic_request_ptr = &p->kms->atomic_context->request;
+    vo_drm_set_monitor_par(ctx->vo);
+
+    p->drm_params.fd = drm->fd;
+    p->drm_params.crtc_id = drm->crtc_id;
+    p->drm_params.connector_id = drm->connector->connector_id;
+    p->drm_params.atomic_request_ptr = &drm->atomic_context->request;
+    char *rendernode_path = drmGetRenderDeviceNameFromFd(drm->fd);
+    if (rendernode_path) {
+        MP_VERBOSE(ctx, "Opening render node \"%s\"\n", rendernode_path);
+        p->drm_params.render_fd = open(rendernode_path, O_RDWR | O_CLOEXEC);
+        if (p->drm_params.render_fd == -1) {
+            MP_WARN(ctx, "Cannot open render node: %s\n", mp_strerror(errno));
+        }
+        free(rendernode_path);
+    } else {
+        p->drm_params.render_fd = -1;
+        MP_VERBOSE(ctx, "Could not find path to render node.\n");
+    }
+
     struct ra_gl_ctx_params params = {
-        .swap_buffers = drm_egl_swap_buffers,
-        .external_swapchain = p->kms->atomic_context ? &drm_atomic_swapchain :
-                                                       NULL,
+        .external_swapchain = &drm_egl_swapchain,
+        .get_vsync          = &drm_egl_get_vsync,
     };
     if (!ra_gl_ctx_init(ctx, &p->gl, params))
-        return false;
+        goto err;
 
-    ra_add_native_resource(ctx->ra, "drm_params", &p->drm_params);
-    ra_add_native_resource(ctx->ra, "drm_osd_size", &p->osd_size);
+    ra_add_native_resource(ctx->ra, "drm_params_v2", &p->drm_params);
+    ra_add_native_resource(ctx->ra, "drm_draw_surface_size", &p->draw_surface_size);
 
     return true;
+
+err:
+    drm_egl_uninit(ctx);
+    return false;
 }
 
 static bool drm_egl_reconfig(struct ra_ctx *ctx)
 {
-    struct priv *p = ctx->priv;
-    ctx->vo->dwidth  = p->fb->width;
-    ctx->vo->dheight = p->fb->height;
-    ra_gl_ctx_resize(ctx->swapchain, p->fb->width, p->fb->height, 0);
+    struct vo_drm_state *drm = ctx->vo->drm;
+    ctx->vo->dwidth  = drm->fb->width;
+    ctx->vo->dheight = drm->fb->height;
+    ra_gl_ctx_resize(ctx->swapchain, drm->fb->width, drm->fb->height, 0);
     return true;
+}
+
+static bool drm_egl_pass_colorspace(struct ra_ctx *ctx)
+{
+    return ctx->vo->drm->supported_colorspace;
 }
 
 static int drm_egl_control(struct ra_ctx *ctx, int *events, int request,
                            void *arg)
 {
-    struct priv *p = ctx->priv;
-    switch (request) {
-    case VOCTRL_GET_DISPLAY_FPS: {
-        double fps = kms_get_display_fps(p->kms);
-        if (fps <= 0)
-            break;
-        *(double*)arg = fps;
-        return VO_TRUE;
-    }
-    }
-    return VO_NOTIMPL;
+    int ret = vo_drm_control(ctx->vo, events, request, arg);
+    return ret;
 }
 
-static void wait_events(struct ra_ctx *ctx, int64_t until_time_us)
+static void drm_egl_wait_events(struct ra_ctx *ctx, int64_t until_time_ns)
 {
-    struct priv *p = ctx->priv;
-    if (p->vt_switcher_active) {
-        int64_t wait_us = until_time_us - mp_time_us();
-        int timeout_ms = MPCLAMP((wait_us + 500) / 1000, 0, 10000);
-        vt_switcher_poll(&p->vt_switcher, timeout_ms);
-    } else {
-        vo_wait_default(ctx->vo, until_time_us);
-    }
+    vo_drm_wait_events(ctx->vo, until_time_ns);
 }
 
-static void wakeup(struct ra_ctx *ctx)
+static void drm_egl_wakeup(struct ra_ctx *ctx)
 {
-    struct priv *p = ctx->priv;
-    if (p->vt_switcher_active)
-        vt_switcher_interrupt_poll(&p->vt_switcher);
+    vo_drm_wakeup(ctx->vo);
 }
 
 const struct ra_ctx_fns ra_ctx_drm_egl = {
-    .type           = "opengl",
-    .name           = "drm",
-    .reconfig       = drm_egl_reconfig,
-    .control        = drm_egl_control,
-    .init           = drm_egl_init,
-    .uninit         = drm_egl_uninit,
-    .wait_events    = wait_events,
-    .wakeup         = wakeup,
+    .type            = "opengl",
+    .name            = "drm",
+    .description     = "DRM/EGL",
+    .reconfig        = drm_egl_reconfig,
+    .pass_colorspace = drm_egl_pass_colorspace,
+    .control         = drm_egl_control,
+    .init            = drm_egl_init,
+    .uninit          = drm_egl_uninit,
+    .wait_events     = drm_egl_wait_events,
+    .wakeup          = drm_egl_wakeup,
 };

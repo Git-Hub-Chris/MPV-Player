@@ -21,7 +21,6 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <string.h>
-#include <strings.h>
 #include <errno.h>
 #include <assert.h>
 
@@ -41,6 +40,7 @@
 
 #include "audio/chmap_avchannel.h"
 
+#include "common/common.h"
 #include "common/msg.h"
 #include "common/tags.h"
 #include "common/av_common.h"
@@ -54,13 +54,6 @@
 #include "options/m_config.h"
 #include "options/m_option.h"
 #include "options/path.h"
-
-#ifndef AV_DISPOSITION_TIMED_THUMBNAILS
-#define AV_DISPOSITION_TIMED_THUMBNAILS 0
-#endif
-#ifndef AV_DISPOSITION_STILL_IMAGE
-#define AV_DISPOSITION_STILL_IMAGE 0
-#endif
 
 #define INITIAL_PROBE_SIZE STREAM_BUFFER_SIZE
 #define PROBE_BUF_SIZE (10 * 1024 * 1024)
@@ -152,6 +145,7 @@ struct format_hack {
     bool no_pcm_seek : 1;
     bool no_seek_on_no_duration : 1;
     bool readall_on_no_streamseek : 1;
+    bool first_frame_only : 1;
 };
 
 #define BLACKLIST(fmt) {fmt, .ignore = true}
@@ -184,10 +178,15 @@ static const struct format_hack format_hacks[] = {
     // In theory, such streams might contain timestamps, but virtually none do.
     {"h264", .if_flags = AVFMT_NOTIMESTAMPS },
     {"hevc", .if_flags = AVFMT_NOTIMESTAMPS },
+    {"vvc", .if_flags = AVFMT_NOTIMESTAMPS },
 
     // Some Ogg shoutcast streams are essentially concatenated OGG files. They
     // reset timestamps, which causes all sorts of problems.
     {"ogg", .linearize_audio_ts = true, .use_stream_ids = true},
+
+    // Ignore additional metadata as frames from some single frame JPEGs
+    // (e.g. gain map)
+    {"jpeg_pipe", .first_frame_only = true},
 
     // At some point, FFmpeg lost the ability to read gif from unseekable
     // streams.
@@ -222,12 +221,6 @@ struct stream_info {
     double ts_offset;
 };
 
-#if LIBAVFORMAT_VERSION_INT >= AV_VERSION_INT(59, 10, 100)
-    #define HAVE_IO_CLOSE2 1
-#else
-    #define HAVE_IO_CLOSE2 0
-#endif
-
 typedef struct lavf_priv {
     struct stream *stream;
     bool own_stream;
@@ -260,11 +253,7 @@ typedef struct lavf_priv {
     int num_nested;
     int (*default_io_open)(struct AVFormatContext *s, AVIOContext **pb,
                            const char *url, int flags, AVDictionary **options);
-#if HAVE_IO_CLOSE2
     int (*default_io_close2)(struct AVFormatContext *s, AVIOContext *pb);
-#else
-    void (*default_io_close)(struct AVFormatContext *s, AVIOContext *pb);
-#endif
 } lavf_priv_t;
 
 static void update_read_stats(struct demuxer *demuxer)
@@ -604,56 +593,57 @@ static void select_tracks(struct demuxer *demuxer, int start)
     }
 }
 
+static inline const uint8_t *mp_av_stream_get_side_data(const AVStream *st,
+                                                        enum AVPacketSideDataType type)
+{
+    const AVPacketSideData *sd;
+    sd = av_packet_side_data_get(st->codecpar->coded_side_data,
+                                 st->codecpar->nb_coded_side_data,
+                                 type);
+    return sd ? sd->data : NULL;
+}
+
 static void export_replaygain(demuxer_t *demuxer, struct sh_stream *sh,
                               AVStream *st)
 {
-#if LIBAVFORMAT_VERSION_INT >= AV_VERSION_INT(60, 15, 100)
-    AVPacketSideData *side_data = st->codecpar->coded_side_data;
-    int nb_side_data = st->codecpar->nb_coded_side_data;
-#else
-    AVPacketSideData *side_data = st->side_data;
-    int nb_side_data = st->nb_side_data;
-#endif
-    for (int i = 0; i < nb_side_data; i++) {
-        AVReplayGain *av_rgain;
-        struct replaygain_data *rgain;
-        AVPacketSideData *src_sd = &side_data[i];
+    const AVReplayGain *av_rgain =
+        (const AVReplayGain *)mp_av_stream_get_side_data(st, AV_PKT_DATA_REPLAYGAIN);
+    if (!av_rgain)
+        return;
 
-        if (src_sd->type != AV_PKT_DATA_REPLAYGAIN)
-            continue;
+    bool track_data_available =
+        av_rgain->track_gain != INT32_MIN && av_rgain->track_peak != 0;
+    bool album_data_available =
+        av_rgain->album_gain != INT32_MIN && av_rgain->album_peak != 0;
 
-        av_rgain = (AVReplayGain*)src_sd->data;
-        rgain    = talloc_ptrtype(demuxer, rgain);
-        rgain->track_gain = rgain->album_gain = 0;
-        rgain->track_peak = rgain->album_peak = 1;
+    if (!track_data_available && !album_data_available)
+        return;
 
-        // Set values in *rgain, using track gain as a fallback for album gain
-        // if the latter is not present. This behavior matches that in
-        // demux/demux.c's decode_rgain; if you change this, please make
-        // equivalent changes there too.
-        if (av_rgain->track_gain != INT32_MIN && av_rgain->track_peak != 0.0) {
-            // Track gain is defined.
-            rgain->track_gain = av_rgain->track_gain / 100000.0f;
-            rgain->track_peak = av_rgain->track_peak / 100000.0f;
+    struct replaygain_data *rgain = talloc_ptrtype(demuxer, rgain);
+    rgain->track_gain = rgain->album_gain = 0;
+    rgain->track_peak = rgain->album_peak = 1;
 
-            if (av_rgain->album_gain != INT32_MIN &&
-                av_rgain->album_peak != 0.0)
-            {
-                // Album gain is also defined.
-                rgain->album_gain = av_rgain->album_gain / 100000.0f;
-                rgain->album_peak = av_rgain->album_peak / 100000.0f;
-            } else {
-                // Album gain is undefined; fall back to track gain.
-                rgain->album_gain = rgain->track_gain;
-                rgain->album_peak = rgain->track_peak;
-            }
-        }
-
-        // This must be run only before the stream was added, otherwise there
-        // will be race conditions with accesses from the user thread.
-        assert(!sh->ds);
-        sh->codec->replaygain_data = rgain;
+    // Set values in *rgain, using track gain as a fallback for album gain
+    // if the latter is not present. This behavior matches that in
+    // demux/demux.c's decode_rgain; if you change this, please make
+    // equivalent changes there too.
+    if (track_data_available) {
+        rgain->track_gain = rgain->album_gain =
+            av_rgain->track_gain / 100000.0f;
+        rgain->track_peak = rgain->album_peak =
+            av_rgain->track_peak / 100000.0f;
     }
+
+    // If album data is actually available, fill it in with proper values.
+    if (album_data_available) {
+        rgain->album_gain = av_rgain->album_gain / 100000.0f;
+        rgain->album_peak = av_rgain->album_peak / 100000.0f;
+    }
+
+    // This must be run only before the stream was added, otherwise there
+    // will be race conditions with accesses from the user thread.
+    assert(!sh->ds);
+    sh->codec->replaygain_data = rgain;
 }
 
 // Return a dictionary entry as (decimal) integer.
@@ -678,23 +668,11 @@ static bool is_image(AVStream *st, bool attached_picture, const AVInputFormat *a
         strcmp(avif->name, "gif") == 0 ||
         strcmp(avif->name, "ico") == 0 ||
         strcmp(avif->name, "image2pipe") == 0 ||
-        (st->codecpar->codec_id == AV_CODEC_ID_AV1 && st->nb_frames == 1)
+        ((st->codecpar->codec_id == AV_CODEC_ID_HEVC ||
+          st->codecpar->codec_id == AV_CODEC_ID_AV1)
+         && st->nb_frames == 1)
     );
 }
-
-#if LIBAVFORMAT_VERSION_INT >= AV_VERSION_INT(60, 15, 100)
-static inline const uint8_t *mp_av_stream_get_side_data(const AVStream *st,
-                                                        enum AVPacketSideDataType type)
-{
-    const AVPacketSideData *sd;
-    sd = av_packet_side_data_get(st->codecpar->coded_side_data,
-                                 st->codecpar->nb_coded_side_data,
-                                 type);
-    return sd ? sd->data : NULL;
-}
-#else
-#define mp_av_stream_get_side_data(st, type) av_stream_get_side_data(st, type, NULL)
-#endif
 
 static void handle_new_stream(demuxer_t *demuxer, int i)
 {
@@ -708,13 +686,6 @@ static void handle_new_stream(demuxer_t *demuxer, int i)
     switch (codec->codec_type) {
     case AVMEDIA_TYPE_AUDIO: {
         sh = demux_alloc_sh_stream(STREAM_AUDIO);
-
-#if !HAVE_AV_CHANNEL_LAYOUT
-        // probably unneeded
-        mp_chmap_set_unknown(&sh->codec->channels, codec->channels);
-        if (codec->channel_layout)
-            mp_chmap_from_lavc(&sh->codec->channels, codec->channel_layout);
-#else
         if (!mp_chmap_from_av_layout(&sh->codec->channels, &codec->ch_layout)) {
             char layout[128] = {0};
             MP_WARN(demuxer,
@@ -723,7 +694,6 @@ static void handle_new_stream(demuxer_t *demuxer, int i)
                                                layout, 128) < 0 ?
                     "undefined" : layout);
         }
-#endif
 
         sh->codec->samplerate = codec->sample_rate;
         sh->codec->bitrate = codec->bit_rate;
@@ -788,7 +758,9 @@ static void handle_new_stream(demuxer_t *demuxer, int i)
             const AVDOVIDecoderConfigurationRecord *cfg = (void *) sd;
             MP_VERBOSE(demuxer, "Found Dolby Vision config record: profile "
                        "%d level %d\n", cfg->dv_profile, cfg->dv_level);
-            av_format_inject_global_side_data(avfc);
+            sh->codec->dovi = true;
+            sh->codec->dv_profile = cfg->dv_profile;
+            sh->codec->dv_level = cfg->dv_level;
         }
 
         // This also applies to vfw-muxed mkv, but we can't detect these easily.
@@ -941,7 +913,7 @@ static int nested_io_open(struct AVFormatContext *s, AVIOContext **pb,
     struct demuxer *demuxer = s->opaque;
     lavf_priv_t *priv = demuxer->priv;
 
-    if (priv->opts->propagate_opts) {
+    if (options && priv->opts->propagate_opts) {
         // Copy av_opts to options, but only entries that are not present in
         // options. (Hope this will break less by not overwriting important
         // settings.)
@@ -970,11 +942,7 @@ static int nested_io_open(struct AVFormatContext *s, AVIOContext **pb,
     return r;
 }
 
-#if HAVE_IO_CLOSE2
 static int nested_io_close2(struct AVFormatContext *s, AVIOContext *pb)
-#else
-static void nested_io_close(struct AVFormatContext *s, AVIOContext *pb)
-#endif
 {
     struct demuxer *demuxer = s->opaque;
     lavf_priv_t *priv = demuxer->priv;
@@ -986,11 +954,7 @@ static void nested_io_close(struct AVFormatContext *s, AVIOContext *pb)
         }
     }
 
-#if HAVE_IO_CLOSE2
     return priv->default_io_close2(s, pb);
-#else
-    priv->default_io_close(s, pb);
-#endif
 }
 
 static int demux_open_lavf(demuxer_t *demuxer, enum demux_check check)
@@ -1080,13 +1044,8 @@ static int demux_open_lavf(demuxer_t *demuxer, enum demux_check check)
     if (demuxer->access_references) {
         priv->default_io_open = avfc->io_open;
         avfc->io_open = nested_io_open;
-#if HAVE_IO_CLOSE2
         priv->default_io_close2 = avfc->io_close2;
         avfc->io_close2 = nested_io_close2;
-#else
-        priv->default_io_close = avfc->io_close;
-        avfc->io_close = nested_io_close;
-#endif
     } else {
         avfc->io_open = block_io_open;
     }
@@ -1254,6 +1213,12 @@ static bool demux_lavf_read_packet(struct demuxer *demux,
     if (!demux_stream_is_selected(stream)) {
         av_packet_unref(pkt);
         return true; // don't signal EOF if skipping a packet
+    }
+
+    // Never send additional frames for streams that are a single frame.
+    if (stream->image && priv->format_hack.first_frame_only && pkt->pos != 0) {
+        av_packet_unref(pkt);
+        return true;
     }
 
     struct demux_packet *dp = new_demux_packet_from_avpacket(pkt);

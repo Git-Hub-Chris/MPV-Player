@@ -47,7 +47,8 @@ See `COMMAND INTERFACE`_ and `Key names`_ sections for more details on
 configuring keybindings.
 
 See also ``--input-test`` for interactive binding details by key, and the
-`stats`_ built-in script for key bindings list (including print to terminal).
+`stats`_ built-in script for key bindings list (including print to terminal). By
+default, the ? key toggles the display of this list.
 
 Keyboard Control
 ----------------
@@ -65,7 +66,7 @@ Ctrl+LEFT and Ctrl+RIGHT
     might not always work; see ``sub-seek`` command.
 
 Ctrl+Shift+LEFT and Ctrl+Shift+RIGHT
-    Adjust subtitle delay so that the next or previous subtitle is displayed
+    Adjust subtitle delay so that the previous or next subtitle is displayed
     now. This is especially useful to sync subtitles to audio.
 
 [ and ]
@@ -116,6 +117,9 @@ Q
 / and *
     Decrease/increase volume.
 
+KP_DIVIDE and KP_MULTIPLY
+    Decrease/increase volume.
+
 9 and 0
     Decrease/increase volume.
 
@@ -157,7 +161,7 @@ j and J
     Cycle through the available subtitles.
 
 z and Z
-    Adjust subtitle delay by +/- 0.1 seconds. The ``x`` key does the same as
+    Adjust subtitle delay by -/+ 0.1 seconds. The ``x`` key does the same as
     ``Z`` currently, but use is discouraged.
 
 l
@@ -169,7 +173,10 @@ L
 Ctrl++ and Ctrl+-
     Adjust audio delay (A/V sync) by +/- 0.1 seconds.
 
-Shift+g and Shift+f
+Ctrl+KP_ADD and Ctrl+KP_SUBTRACT
+    Adjust audio delay (A/V sync) by +/- 0.1 seconds.
+
+G and F
     Adjust subtitle font size by +/- 10%.
 
 u
@@ -178,8 +185,8 @@ u
     style. See ``--sub-ass-override`` for more info.
 
 V
-    Toggle subtitle VSFilter aspect compatibility mode. See
-    ``--sub-ass-vsfilter-aspect-compat`` for more info.
+    Cycle through which video data gets used for ASS rendering.
+    See ``--sub-ass-use-video-data`` for more info.
 
 r and R
     Move subtitles up/down. The ``t`` key does the same as ``R`` currently, but
@@ -223,6 +230,9 @@ Alt+LEFT, Alt+RIGHT, Alt+UP, Alt+DOWN
 Alt++ and Alt+-
     Change video zoom.
 
+Alt+KP_ADD and Alt+KP_SUBTRACT
+    Change video zoom.
+
 Alt+BACKSPACE
     Reset the pan/zoom settings.
 
@@ -232,10 +242,19 @@ F8
 F9
     Show the list of audio and subtitle streams.
 
+Ctrl+v
+    Append the file or URL in the clipboard to the playlist. If nothing is
+    currently playing, it is played immediately. Only works on platforms that
+    support the ``clipboard`` property.
+
 i and I
     Show/toggle an overlay displaying statistics about the currently playing
     file such as codec, framerate, number of dropped frames and so on. See
     `STATS`_ for more information.
+
+?
+    Toggle an overlay displaying the active key bindings. See `STATS`_ for more
+    information.
 
 DEL
     Cycle OSC visibility between never / auto (mouse-move) / always
@@ -269,6 +288,56 @@ Alt+2 (and Command+2 on macOS)
 
 Command + f (macOS only)
     Toggle fullscreen (see also ``--fs``).
+
+(The following keybindings open a selector in the console that lets you choose
+from a list of items by typing part of the desired item, by clicking the desired
+item, or by navigating them with keybindings: ``Down`` and ``Ctrl+n`` go down,
+``Up`` and ``Ctrl+p`` go up, ``Page down`` and ``Ctrl+f`` scroll down one page,
+and ``Page up`` and ``Ctrl+b`` scroll up one page.)
+
+In track selectors, selecting the current tracks disables it.
+
+g-p
+    Select a playlist entry.
+
+g-s
+    Select a subtitle track.
+
+g-S
+    Select a secondary subtitle track.
+
+g-a
+    Select an audio track.
+
+g-v
+    Select a video track.
+
+g-t
+    Select a track of any type.
+
+g-c
+    Select a chapter.
+
+g-e
+    Select an MKV edition or DVD/Blu-ray title.
+
+g-l
+    Select a subtitle line to seek to. This currently requires ``ffmpeg`` in
+    ``PATH``, or in the same folder as mpv on Windows.
+
+g-d
+    Select an audio device.
+
+g-w
+    Select a file from watch later config files (see `RESUMING PLAYBACK`_) to
+    resume playing. Requires ``--write-filename-in-watch-later-config``. This
+    doesn't work with ``--ignore-path-in-watch-later-config``.
+
+g-b
+    Select a defined input binding.
+
+g-r
+    Show the values of all properties.
 
 (The following keys are valid if you have a keyboard with multimedia keys.)
 
@@ -451,41 +520,62 @@ console controls. (Which makes it suitable for playing data piped to stdin.)
 The special argument ``--`` can be used to stop mpv from interpreting the
 following arguments as options.
 
-When using the client API, you should strictly avoid using ``mpv_command_string``
+For paths passed to mpv suboptions (options that have multiple `:` and
+`,`-separated values), the situation is further complicated by the need to
+escape special characters. To work around this, the path can instead be wrapped
+in the "fixed-length" syntax, e.g. ``%n%string_of_length_n`` (see above).
+
+When using the libmpv API, you should strictly avoid using ``mpv_command_string``
 for invoking the ``loadfile`` command, and instead prefer e.g. ``mpv_command``
 to avoid the need for filename escaping.
 
-For paths passed to suboptions, the situation is further complicated by the
-need to escape special characters. To work this around, the path can be
-additionally wrapped in the fixed-length syntax, e.g. ``%n%string_of_length_n``
-(see above).
+The same applies when you're using the scripting API, where you should avoid using
+``mp.command``, and instead prefer using "separate parameter" APIs, such as
+``mp.commandv`` and ``mp.command_native``.
 
-Some mpv options interpret paths starting with ``~``.
-Currently, the prefix ``~~home/`` expands to the mpv configuration directory
-(usually ``~/.config/mpv/``).
-``~/`` expands to the user's home directory. (The trailing ``/`` is always
-required.) The following paths are currently recognized:
+Some mpv options will interpret special meanings for paths starting with ``~``,
+making it easy to dynamically find special directories, such as referring to the
+current user's home directory or the mpv configuration directory.
+
+When using the special ``~`` prefix, there must always be a trailing ``/`` after
+the special path prefix. In other words, ``~`` doesn't work, but ``~/`` will work.
+
+The following special paths/keywords are currently recognized:
+
+.. warning::
+
+    Beware that if ``--no-config`` is used, all of the "config directory"-based
+    paths (``~~/``, ``~~home/`` and ``~~global/``) will be empty strings.
+
+    This means that ``~~home/`` would expand to an empty string, and that
+    sub-paths such as ``~~home/foo/bar"`` would expand to a relative path
+    (``foo/bar``), which may not be what you expected.
+
+    Furthermore, any commands that search in config directories will fail
+    to find anything, since there won't be any directories to search in.
+
+    Be sure that your scripts can handle these "no config" scenarios.
 
 ================ ===============================================================
 Name             Meaning
 ================ ===============================================================
-``~~/``          If the subpath exists in any of the mpv's config directories
+``~/``           The current user's home directory (equivalent to ``~/`` and
+                 ``$HOME/`` in terminal environments).
+``~~/``          If the sub-path exists in any of mpv's config directories, then
                  the path of the existing file/dir is returned. Otherwise this
                  is equivalent to ``~~home/``.
-                 Note that if --no-config is used ``~~/foobar`` will resolve to
-                 ``foobar`` which can be unexpected.
-``~/``           user home directory root (similar to shell, ``$HOME``)
-``~~home/``      mpv config dir (for example ``~/.config/mpv/``)
-``~~global/``    the global config path, if available (not on win32)
-``~~osxbundle/`` the macOS bundle resource path (macOS only)
-``~~desktop/``   the path to the desktop (win32, macOS)
-``~~exe_dir/``   win32 only: the path to the directory containing the exe (for
-                 config file purposes; ``$MPV_HOME`` overrides it)
-``~~cache/``     the path to application cache data (``~/.cache/mpv/``)
+``~~home/``      mpv's config dir (for example ``~/.config/mpv/``).
+``~~global/``    The global config path (such as ``/etc/mpv``), if available
+                 (not on win32).
+``~~osxbundle/`` The macOS bundle resource path (macOS only).
+``~~desktop/``   The path to the desktop (win32, macOS).
+``~~exe_dir/``   The path to the directory containing ``mpv.exe`` (for config
+                 file purposes, ``$MPV_HOME`` will override this) (win32 only).
+``~~cache/``     The path to application cache data (``~/.cache/mpv/``).
                  On some platforms, this will be the same as ``~~home/``.
-``~~state/``     the path to application state data (``~/.local/state/mpv/``)
+``~~state/``     The path to application state data (``~/.local/state/mpv/``).
                  On some platforms, this will be the same as ``~~home/``.
-``~~old_home/``  do not use
+``~~old_home/``  Do not use.
 ================ ===============================================================
 
 
@@ -557,7 +647,7 @@ Suffix        Meaning
 -pre          Prepend 1 or more items (same syntax as -set)
 -clr          Clear the option (remove all items)
 -remove       Delete item if present (does not interpret escapes)
--toggle       Append an item, or remove if if it already exists (no escapes)
+-toggle       Append an item, or remove it if it already exists (no escapes)
 ============= ===============================================
 
 ``-append`` is meant as a simple way to append a single item without having
@@ -591,23 +681,24 @@ appropriate structured data type.
 
 Prior to mpv 0.33, ``:`` was also recognized as separator by ``-set``.
 
-Filter options
-~~~~~~~~~~~~~~
+Object settings list options
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This is a very complex option type for the ``--af`` and ``--vf`` options only.
-They often require complicated escaping. See `VIDEO FILTERS`_ for details. They
-support the following operations:
+This is a very complex option type for some options, such as ``--af`` and ``--vf``.
+They often require complicated escaping. See `VIDEO FILTERS`_ for details.
+
+They support the following operations:
 
 ============= ===============================================
 Suffix        Meaning
 ============= ===============================================
--set          Set a list of filters (using ``,`` as separator)
--append       Append single filter
--add          Append 1 or more filters (same syntax as -set)
--pre          Prepend 1 or more filters (same syntax as -set)
--clr          Clear the option (remove all filters)
--remove       Delete filter if present
--toggle       Append a filter, or remove if if it already exists
+-set          Set a list of items (using ``,`` as separator)
+-append       Append single item
+-add          Append 1 or more items (same syntax as -set)
+-pre          Prepend 1 or more items (same syntax as -set)
+-clr          Clear the option (remove all items)
+-remove       Delete item if present
+-toggle       Append an item, or remove it if it already exists
 -help         Pseudo operation that prints a help text to the terminal
 ============= ===============================================
 
@@ -629,6 +720,8 @@ aliases for the proper option with ``-append`` action. For example,
 Options of this type can be changed at runtime using the ``change-list``
 command, which takes the suffix (without the ``-``) as separate operation
 parameter.
+
+An object settings list can hold up to 100 elements.
 
 CONFIGURATION FILES
 ===================
@@ -991,17 +1084,17 @@ There are three choices for using mpv from other programs or scripts:
 
        Your code should work even if you pass ``--terminal=no``. Do not attempt
        to simulate user input by sending terminal control codes to mpv's stdin.
-       If you need interactive control, using ``--input-ipc-server`` is
-       recommended. This gives you access to the `JSON IPC`_  over unix domain
-       sockets (or named pipes on Windows).
+       If you need interactive control, using ``--input-ipc-server`` or
+       ``--input-ipc-client`` is recommended. This gives you access to the
+       `JSON IPC`_  over unix domain sockets (or named pipes on Windows).
 
        Depending on what you do, passing ``--no-config`` or ``--config-dir`` may
        be a good idea to avoid conflicts with the normal mpv user configuration
        intended for CLI playback.
 
-       Using ``--input-ipc-server`` is also suitable for purposes like remote
-       control (however, the IPC protocol itself is not "secure" and not
-       intended to be so).
+       Using ``--input-ipc-server`` or ``--input-ipc-client`` is also suitable for
+       purposes like remote control (however, the IPC protocol itself is not
+       "secure" and not intended to be so).
 
     2. Using libmpv. This is generally recommended when mpv is used as playback
        backend for a completely different application. The provided C API is
@@ -1553,6 +1646,8 @@ FILES
 Note that this section assumes Linux/BSD. On other platforms the paths may be different.
 For Windows-specifics, see `FILES ON WINDOWS`_ section.
 
+All configuration files should be encoded in UTF-8.
+
 ``/usr/local/etc/mpv/mpv.conf``
     mpv system-wide settings (depends on ``--prefix`` passed to configure - mpv
     in default configuration will use ``/usr/local/etc/mpv/`` as config
@@ -1697,5 +1792,5 @@ FILES ON MACOS
 
 On macOS the watch later directory is located at ``~/.config/mpv/watch_later/``
 and the cache directory is set to ``~/Library/Caches/io.mpv/``. These directories
-can't be overwritten by enviroment variables.
+can't be overwritten by environment variables.
 Everything else is the same as `FILES`_.

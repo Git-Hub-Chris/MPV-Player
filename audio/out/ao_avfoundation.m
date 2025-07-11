@@ -76,11 +76,14 @@ static void feed(struct ao *ao)
     int64_t cur_time_mp = mp_time_ns();
     int64_t end_time_av = MPMAX(p->end_time_av, cur_time_av);
     int64_t time_delta = CMTimeGetNanoseconds(CMTimeMake(request_sample_count, samplerate));
-    int real_sample_count = ao_read_data_nonblocking(ao, data, request_sample_count, end_time_av - cur_time_av + cur_time_mp + time_delta);
+    bool eof;
+    int real_sample_count = ao_read_data(ao, data, request_sample_count, end_time_av - cur_time_av + cur_time_mp + time_delta, &eof, false, true);
+    if (eof) {
+        [p->renderer stopRequestingMediaData];
+        ao_stop_streaming(ao);
+    }
     if (real_sample_count == 0) {
-        // avoid spinning by blocking the thread
-        mp_sleep_ns(10000000);
-        goto finish;
+        return;
     }
 
     if ((err = CMBlockBufferCreateWithMemoryBlock(
@@ -251,9 +254,11 @@ static int init(struct ao *ao)
     }
 
     [p->synchronizer addRenderer:p->renderer];
+#if HAVE_MACOS_11_3_FEATURES
     if (@available(tvOS 14.5, iOS 14.5, macOS 11.3, *)) {
         [p->synchronizer setDelaysRateChangeUntilHasSufficientMediaData:NO];
     }
+#endif
 
     if (af_fmt_is_spdif(ao->format)) {
         MP_FATAL(ao, "avfoundation does not support SPDIF\n");
@@ -272,22 +277,8 @@ static int init(struct ao *ao)
 
     AudioStreamBasicDescription asbd;
     ca_fill_asbd(ao, &asbd);
-    size_t layout_size = sizeof(AudioChannelLayout)
-                         + (ao->channels.num - 1) * sizeof(AudioChannelDescription);
-    layout = talloc_size(ao, layout_size);
-    layout->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions;
-    layout->mNumberChannelDescriptions = ao->channels.num;
-    for (int i = 0; i < ao->channels.num; ++i) {
-        AudioChannelDescription *desc = layout->mChannelDescriptions + i;
-        desc->mChannelFlags = kAudioChannelFlags_AllOff;
-        desc->mChannelLabel = mp_speaker_id_to_ca_label(ao->channels.speaker[i]);
-    }
-
-    void *talloc_ctx = talloc_new(NULL);
-    AudioChannelLayout *std_layout = ca_find_standard_layout(talloc_ctx, layout);
-    memmove(layout, std_layout, sizeof(AudioChannelLayout));
-    talloc_free(talloc_ctx);
-    ca_log_layout(ao, MSGL_V, layout);
+    size_t layout_size;
+    layout = ca_get_acl(ao, &layout_size);
 
     OSStatus err;
     if ((err = CMAudioFormatDescriptionCreate(
@@ -312,7 +303,11 @@ static int init(struct ao *ao)
 
     p->observer = [[AVObserver alloc] initWithAO:ao];
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-    [center addObserver:p->observer selector:@selector(handleRestartNotification:) name:AVSampleBufferAudioRendererOutputConfigurationDidChangeNotification object:p->renderer];
+#if HAVE_MACOS_12_FEATURES
+    if (@available(tvOS 15.0, iOS 15.0, macOS 12.0, *)) {
+        [center addObserver:p->observer selector:@selector(handleRestartNotification:) name:AVSampleBufferAudioRendererOutputConfigurationDidChangeNotification object:p->renderer];
+    }
+#endif
     [center addObserver:p->observer selector:@selector(handleRestartNotification:) name:AVSampleBufferAudioRendererWasFlushedAutomaticallyNotification object:p->renderer];
 
     return CONTROL_OK;

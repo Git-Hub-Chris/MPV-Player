@@ -40,7 +40,7 @@ class CocoaCB: Common, EventSubscriber {
     }
 
     func preinit(_ vo: UnsafeMutablePointer<vo>) {
-        self.vo = vo
+        eventsLock.withLock { self.vo = vo }
         input = InputHelper(vo.pointee.input_ctx, option)
 
         if backendState == .uninitialized {
@@ -57,12 +57,13 @@ class CocoaCB: Common, EventSubscriber {
     }
 
     func uninit() {
+        eventsLock.withLock { self.vo = nil }
         window?.orderOut(nil)
         window?.close()
     }
 
     func reconfig(_ vo: UnsafeMutablePointer<vo>) {
-        self.vo = vo
+        eventsLock.withLock { self.vo = vo }
         if backendState == .needsInit {
             DispatchQueue.main.sync { self.initBackend(vo) }
         } else if option.vo.auto_window_resize {
@@ -87,13 +88,12 @@ class CocoaCB: Common, EventSubscriber {
     }
 
     func updateWindowSize(_ vo: UnsafeMutablePointer<vo>) {
-        guard let targetScreen = getTargetScreen(forFullscreen: false) ?? NSScreen.main else
-        {
+        guard let targetScreen = getTargetScreen(forFullscreen: false) ?? NSScreen.main else {
             log.warning("Couldn't update Window size, no Screen available")
             return
         }
 
-        let wr = getWindowGeometry(forScreen: targetScreen, videoOut: vo)
+        let (wr, _) = getWindowGeometry(forScreen: targetScreen, videoOut: vo)
         if !(window?.isVisible ?? false) && !(window?.isMiniaturized ?? false) && !NSApp.isHidden {
             window?.makeKeyAndOrderFront(nil)
         }
@@ -102,17 +102,12 @@ class CocoaCB: Common, EventSubscriber {
     }
 
     override func displayLinkCallback(_ displayLink: CVDisplayLink,
-                                            _ inNow: UnsafePointer<CVTimeStamp>,
-                                     _ inOutputTime: UnsafePointer<CVTimeStamp>,
-                                          _ flagsIn: CVOptionFlags,
-                                         _ flagsOut: UnsafeMutablePointer<CVOptionFlags>) -> CVReturn
-    {
+                                      _ inNow: UnsafePointer<CVTimeStamp>,
+                                      _ inOutputTime: UnsafePointer<CVTimeStamp>,
+                                      _ flagsIn: CVOptionFlags,
+                                      _ flagsOut: UnsafeMutablePointer<CVOptionFlags>) -> CVReturn {
         libmpv.reportRenderFlip()
         return kCVReturnSuccess
-    }
-
-    override func lightSensorUpdate() {
-        libmpv.setRenderLux(lmuToLux(lastLmu))
     }
 
     override func updateICCProfile() {
@@ -122,7 +117,65 @@ class CocoaCB: Common, EventSubscriber {
         }
 
         libmpv.setRenderICCProfile(colorSpace)
-        layer?.colorspace = colorSpace.cgColorSpace
+        let (isEdr, colorspace) = getColorSpace()
+        layer?.colorspace = colorspace
+        layer?.wantsExtendedDynamicRangeContent = isEdr
+    }
+
+    func getColorSpace() -> (Bool, CGColorSpace?) {
+        guard let colorSpace = window?.screen?.colorSpace?.cgColorSpace else {
+            log.warning("Couldn't retrieve ICC Profile, no color space available")
+            return (false, nil)
+        }
+
+        let outputCsp = Int(option.mac.cocoa_cb_output_csp)
+
+        switch outputCsp {
+        case MAC_CSP_AUTO: return (false, colorSpace)
+        case MAC_CSP_DISPLAY_P3: return (true, CGColorSpace(name: CGColorSpace.displayP3))
+        case MAC_CSP_DISPLAY_P3_HLG: return (true, CGColorSpace(name: CGColorSpace.displayP3_HLG))
+        case MAC_CSP_DCI_P3: return (true, CGColorSpace(name: CGColorSpace.dcip3))
+        case MAC_CSP_BT_2020: return (true, CGColorSpace(name: CGColorSpace.itur_2020))
+        case MAC_CSP_BT_709: return (false, CGColorSpace(name: CGColorSpace.itur_709))
+        case MAC_CSP_SRGB: return (false, CGColorSpace(name: CGColorSpace.sRGB))
+        case MAC_CSP_SRGB_LINEAR: return (false, CGColorSpace(name: CGColorSpace.linearSRGB))
+        case MAC_CSP_RGB_LINEAR: return (false, CGColorSpace(name: CGColorSpace.genericRGBLinear))
+        case MAC_CSP_ADOBE: return (false, CGColorSpace(name: CGColorSpace.adobeRGB1998))
+        default: break
+        }
+
+#if HAVE_MACOS_10_15_4_FEATURES
+        if #available(macOS 10.15.4, *) {
+            switch outputCsp {
+            case MAC_CSP_DISPLAY_P3_PQ: return (true, CGColorSpace(name: CGColorSpace.displayP3_PQ))
+            default: break
+            }
+        }
+#endif
+
+#if HAVE_MACOS_11_FEATURES
+        if #available(macOS 11.0, *) {
+            switch outputCsp {
+            case MAC_CSP_BT_2100_HLG: return (true, CGColorSpace(name: CGColorSpace.itur_2100_HLG))
+            case MAC_CSP_BT_2100_PQ: return (true, CGColorSpace(name: CGColorSpace.itur_2100_PQ))
+            default: break
+            }
+        }
+#endif
+
+#if HAVE_MACOS_12_FEATURES
+        if #available(macOS 12.0, *) {
+            switch outputCsp {
+            case MAC_CSP_DISPLAY_P3_LINEAR: return (true, CGColorSpace(name: CGColorSpace.linearDisplayP3))
+            case MAC_CSP_BT_2020_LINEAR: return (true, CGColorSpace(name: CGColorSpace.linearITUR_2020))
+            default: break
+            }
+        }
+#endif
+
+        log.warning("Couldn't retrieve configured color space, falling back to auto")
+
+        return (false, colorSpace)
     }
 
     override func windowDidEndAnimation() {
@@ -169,6 +222,7 @@ class CocoaCB: Common, EventSubscriber {
     var controlCallback: mp_render_cb_control_fn = { ( v, ctx, e, request, data ) -> Int32 in
         let ccb = unsafeBitCast(ctx, to: CocoaCB.self)
 
+
         guard let vo = v, let events = e else {
             ccb.log.warning("Unexpected nil value in Control Callback")
             return VO_FALSE
@@ -178,10 +232,7 @@ class CocoaCB: Common, EventSubscriber {
     }
 
     override func control(_ vo: UnsafeMutablePointer<vo>,
-                    events: UnsafeMutablePointer<Int32>,
-                    request: UInt32,
-                    data: UnsafeMutableRawPointer?) -> Int32
-    {
+
         switch mp_voctrl(request) {
         case VOCTRL_PREINIT:
             DispatchQueue.main.sync { self.preinit(vo) }
@@ -209,6 +260,7 @@ class CocoaCB: Common, EventSubscriber {
 
         uninit()
         uninitCommon()
+        window = nil
 
         layer?.lockCglContext()
         libmpv.uninit()

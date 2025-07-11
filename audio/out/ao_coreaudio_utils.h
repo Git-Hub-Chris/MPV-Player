@@ -28,11 +28,12 @@
 #include "audio/out/ao.h"
 #include "internal.h"
 #include "osdep/utils-mac.h"
+#include "osdep/threads.h"
 
-#if HAVE_AVFOUNDATION || HAVE_AUDIOUNIT
-#undef HAVE_COREAUDIO
-#define HAVE_COREAUDIO 1
-#endif
+struct coreaudio_cb_sem {
+    mp_mutex mutex;
+    mp_cond cond;
+};
 
 bool check_ca_st(struct ao *ao, int level, OSStatus code, const char *message);
 
@@ -52,7 +53,7 @@ bool check_ca_st(struct ao *ao, int level, OSStatus code, const char *message);
     } while (0)
 
 void ca_get_device_list(struct ao *ao, struct ao_device_list *list);
-#if HAVE_COREAUDIO
+#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
 OSStatus ca_select_device(struct ao *ao, char* name, AudioDeviceID *device);
 #endif
 
@@ -70,7 +71,7 @@ bool ca_asbd_is_better(AudioStreamBasicDescription *req,
 int64_t ca_frames_to_ns(struct ao *ao, uint32_t frames);
 int64_t ca_get_latency(const AudioTimeStamp *ts);
 
-#if HAVE_COREAUDIO
+#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
 bool ca_stream_supports_compressed(struct ao *ao, AudioStreamID stream);
 OSStatus ca_lock_device(AudioDeviceID device, pid_t *pid);
 OSStatus ca_unlock_device(AudioDeviceID device, pid_t *pid);

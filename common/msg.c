@@ -22,18 +22,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "mpv_talloc.h"
 
-#include "misc/bstr.h"
 #include "common/common.h"
 #include "common/global.h"
-#include "misc/bstr.h"
+#include "misc/codepoint_width.h"
 #include "options/options.h"
 #include "options/path.h"
-#include "osdep/terminal.h"
 #include "osdep/io.h"
+#include "osdep/terminal.h"
 #include "osdep/threads.h"
 #include "osdep/timer.h"
 
@@ -195,8 +193,23 @@ int mp_msg_level(struct mp_log *log)
 
 static inline int term_msg_fileno(struct mp_log_root *root, int lev)
 {
-    return (root->force_stderr || lev == MSGL_STATUS || lev == MSGL_FATAL ||
-            lev == MSGL_ERR || lev == MSGL_WARN) ? STDERR_FILENO : STDOUT_FILENO;
+    return root->force_stderr ? STDERR_FILENO : STDOUT_FILENO;
+}
+
+static inline FILE *term_msg_fp(struct mp_log_root *root, int lev)
+{
+    return term_msg_fileno(root, lev) == STDERR_FILENO ? stderr : stdout;
+}
+
+static inline bool is_status_output(struct mp_log_root *root, int lev)
+{
+    if (lev == MSGL_STATUS)
+        return true;
+    int msg_out = term_msg_fileno(root, lev);
+    int status_out = term_msg_fileno(root, MSGL_STATUS);
+    if (msg_out != status_out && root->isatty[msg_out] != root->isatty[status_out])
+        return false;
+    return true;
 }
 
 // Reposition cursor and clear lines for outputting the status line. In certain
@@ -206,6 +219,9 @@ static void prepare_prefix(struct mp_log_root *root, bstr *out, int lev, int ter
 {
     int new_lines = lev == MSGL_STATUS ? term_lines : 0;
     out->len = 0;
+
+    if (!is_status_output(root, lev))
+        return;
 
     if (!root->isatty[term_msg_fileno(root, lev)]) {
         if (root->status_lines)
@@ -243,33 +259,39 @@ static void prepare_prefix(struct mp_log_root *root, bstr *out, int lev, int ter
     root->blank_lines += root->status_lines;
 }
 
+static void msg_flush_status_line(struct mp_log_root *root, bool clear)
+{
+    if (!root->status_lines)
+        goto done;
+
+    FILE *fp = term_msg_fp(root, MSGL_STATUS);
+    if (!clear) {
+        if (root->isatty[term_msg_fileno(root, MSGL_STATUS)])
+            fprintf(fp, TERM_ESC_RESTORE_CURSOR);
+        fprintf(fp, "\n");
+        root->blank_lines = 0;
+        root->status_lines = 0;
+        goto done;
+    }
+
+    bstr term_msg = {0};
+    prepare_prefix(root, &term_msg, MSGL_STATUS, 0);
+    if (term_msg.len) {
+        fprintf(fp, "%.*s", BSTR_P(term_msg));
+        talloc_free(term_msg.start);
+    }
+
+done:
+    root->status_line.len = 0;
+}
+
 void mp_msg_flush_status_line(struct mp_log *log, bool clear)
 {
     if (!log->root)
         return;
 
     mp_mutex_lock(&log->root->lock);
-    if (!log->root->status_lines)
-        goto done;
-
-    if (!clear) {
-        if (log->root->isatty[STDERR_FILENO])
-            fprintf(stderr, TERM_ESC_RESTORE_CURSOR);
-        fprintf(stderr, "\n");
-        log->root->blank_lines = 0;
-        log->root->status_lines = 0;
-        goto done;
-    }
-
-    bstr term_msg = {0};
-    prepare_prefix(log->root, &term_msg, MSGL_STATUS, 0);
-    if (term_msg.len) {
-        fprintf(stderr, "%.*s", BSTR_P(term_msg));
-        talloc_free(term_msg.start);
-    }
-
-done:
-    log->root->status_line.len = 0;
+    msg_flush_status_line(log->root, clear);
     mp_mutex_unlock(&log->root->lock);
 }
 
@@ -278,7 +300,7 @@ void mp_msg_set_term_title(struct mp_log *log, const char *title)
     if (log->root && title) {
         // Lock because printf to terminal is not necessarily atomic.
         mp_mutex_lock(&log->root->lock);
-        fprintf(stderr, "\033]0;%s\007", title);
+        fprintf(term_msg_fp(log->root, MSGL_STATUS), "\033]0;%s\007", title);
         mp_mutex_unlock(&log->root->lock);
     }
 }
@@ -298,13 +320,27 @@ static void set_term_color(void *talloc_ctx, bstr *text, int c)
         bstr_xappend(talloc_ctx, text, bstr0("\033[0m"));
         return;
     }
-
-    bstr_xappend_asprintf(talloc_ctx, text, "\033[%d;3%dm", c >> 3, c & 7);
+    // Pure black to gray
+    if (c == 0)
+        c += 8;
+    // Pure white to light one
+    if (c == 15)
+        c -= 8;
+    bstr_xappend_asprintf(talloc_ctx, text, "\033[%d%dm", c >= 8 ? 9 : 3, c & 7);
 }
 
 static void set_msg_color(void *talloc_ctx, bstr *text, int lev)
 {
-    static const int v_colors[] = {9, 1, 3, -1, -1, 2, 8, 8, 8, -1};
+    static const int v_colors[] = {
+        [MSGL_FATAL]  = 9,  // bright red
+        [MSGL_ERR]    = 1,  // red
+        [MSGL_WARN]   = 3,  // yellow
+        [MSGL_INFO]   = -1, // default
+        [MSGL_STATUS] = -1, // default
+        [MSGL_V]      = 2,  // green
+        [MSGL_DEBUG]  = 4,  // blue
+        [MSGL_TRACE]  = 8,  // bright black aka. gray
+    };
     set_term_color(talloc_ctx, text, v_colors[lev]);
 }
 
@@ -337,39 +373,8 @@ static bool test_terminal_level(struct mp_log *log, int lev)
            !(lev == MSGL_STATUS && terminal_in_background());
 }
 
-// This is very basic way to infer needed width for a string.
-static int term_disp_width(bstr str)
-{
-    int width = 0;
-
-    while (str.len) {
-        if (bstr_eatstart0(&str, "\033[")) {
-            while (str.len && !((*str.start >= '@' && *str.start <= '~') || *str.start == 'm'))
-                str = bstr_cut(str, 1);
-            str = bstr_cut(str, 1);
-            continue;
-        }
-
-        bstr code = bstr_split_utf8(str, &str);
-        if (code.len == 0)
-            return 0;
-
-        if (code.len == 1 && *code.start == '\n')
-            continue;
-
-        // Only single-width characters are supported
-        width++;
-
-        // Assume that everything before \r should be discarded for simplicity
-        if (code.len == 1 && *code.start == '\r')
-            width = 0;
-    }
-
-    return width;
-}
-
 static void append_terminal_line(struct mp_log *log, int lev,
-                                 bstr text, bstr *term_msg, int *line_w)
+                                 bstr text, bstr *term_msg, int *line_w, int term_w)
 {
     struct mp_log_root *root = log->root;
 
@@ -389,8 +394,40 @@ static void append_terminal_line(struct mp_log *log, int lev,
     }
 
     bstr_xappend(root, term_msg, text);
-    *line_w = root->isatty[term_msg_fileno(root, lev)]
-                ? term_disp_width(bstr_splice(*term_msg, start, term_msg->len)) : 0;
+
+    const unsigned char *cut_pos = NULL;
+    int ellipsis_width = 2;
+    int width = term_disp_width(bstr_splice(*term_msg, start, term_msg->len),
+                                term_w - ellipsis_width, &cut_pos);
+    if (cut_pos) {
+        int new_len = cut_pos - term_msg->start;
+        bstr rem = bstrdup(NULL, (bstr){(unsigned char *)cut_pos, term_msg->len - new_len});
+        void *ptr = rem.start;
+        term_msg->len = new_len;
+
+        bstr_xappend(root, term_msg, bstr0(".."));
+
+        while (rem.len) {
+            if (bstr_eatstart0(&rem, "\n")) {
+                bstr_xappend(root, term_msg, bstr0("\n"));
+                continue;
+            }
+            if (bstr_eatstart0(&rem, "\033[")) {
+                bstr_xappend(root, term_msg, bstr0("\033["));
+
+                while (rem.len && !((*rem.start >= '@' && *rem.start <= '~') || *rem.start == 'm')) {
+                    bstr_xappend(root, term_msg, bstr_splice(rem, 0, 1));
+                    rem = bstr_cut(rem, 1);
+                }
+                bstr_xappend(root, term_msg, bstr_splice(rem, 0, 1));
+            }
+            rem = bstr_cut(rem, 1);
+        }
+        talloc_free(ptr);
+
+        width += ellipsis_width;
+    }
+    *line_w = root->isatty[term_msg_fileno(root, lev)] ? width : 0;
 }
 
 static struct mp_log_buffer_entry *log_buffer_read(struct mp_log_buffer *buffer)
@@ -489,9 +526,11 @@ static void write_term_msg(struct mp_log *log, int lev, bstr text, bstr *out)
             break;
         }
 
+        bool clip = bstr_eatstart0(&line, TERM_MSG_0);
         if (print_term) {
             int line_w;
-            append_terminal_line(log, lev, line, &root->term_msg_tmp, &line_w);
+            append_terminal_line(log, lev, line, &root->term_msg_tmp, &line_w,
+                                 clip && term_w ? term_w : INT_MAX);
             term_msg_lines += (!line_w || !term_w)
                                 ? 1 : (line_w + term_w - 1) / term_w;
         }
@@ -500,8 +539,10 @@ static void write_term_msg(struct mp_log *log, int lev, bstr text, bstr *out)
 
     if (lev == MSGL_STATUS) {
         int line_w = 0;
+        bool clip = bstr_eatstart0(&str, TERM_MSG_0);
         if (str.len && print_term)
-            append_terminal_line(log, lev, str, &root->term_msg_tmp, &line_w);
+            append_terminal_line(log, lev, str, &root->term_msg_tmp, &line_w,
+                                 clip && term_w ? term_w : INT_MAX);
         term_msg_lines += !term_w ? (str.len ? 1 : 0)
                                   : (line_w + term_w - 1) / term_w;
     } else if (str.len) {
@@ -533,7 +574,10 @@ void mp_msg_va(struct mp_log *log, int lev, const char *format, va_list va)
         bstr_xappend(root, &root->buffer, log->partial[lev]);
     log->partial[lev].len = 0;
 
-    bstr_xappend_vasprintf(root, &root->buffer, format, va);
+    if (bstr_xappend_vasprintf(root, &root->buffer, format, va) < 0) {
+        bstr_xappend(root, &root->buffer, bstr0("format error: "));
+        bstr_xappend(root, &root->buffer, bstr0(format));
+    }
 
     // Remember last status message and restore it to ensure that it is
     // always displayed
@@ -552,17 +596,15 @@ void mp_msg_va(struct mp_log *log, int lev, const char *format, va_list va)
     } else {
         write_term_msg(log, lev, root->buffer, &root->term_msg);
 
-        root->term_status_msg.len = 0;
-        if (lev != MSGL_STATUS && root->status_line.len && root->status_log &&
-            test_terminal_level(root->status_log, MSGL_STATUS))
-        {
-            write_term_msg(root->status_log, MSGL_STATUS, root->status_line,
-                           &root->term_status_msg);
-        }
-
-        int fileno = term_msg_fileno(root, lev);
-        FILE *stream = fileno == STDERR_FILENO ? stderr : stdout;
+        FILE *stream = term_msg_fp(root, lev);
         if (root->term_msg.len) {
+            root->term_status_msg.len = 0;
+            if (lev != MSGL_STATUS && root->status_line.len && root->status_log &&
+                is_status_output(root, lev) && test_terminal_level(root->status_log, MSGL_STATUS))
+            {
+                write_term_msg(root->status_log, MSGL_STATUS, root->status_line,
+                               &root->term_status_msg);
+            }
             fwrite(root->term_msg.start, root->term_msg.len, 1, stream);
             if (root->term_status_msg.len)
                 fwrite(root->term_status_msg.start, root->term_status_msg.len, 1, stream);
@@ -850,8 +892,8 @@ void mp_msg_uninit(struct mpv_global *global)
 {
     struct mp_log_root *root = global->log->root;
     mp_msg_flush_status_line(global->log, true);
-    if (root->really_quiet && root->isatty[STDERR_FILENO])
-        fprintf(stderr, TERM_ESC_RESTORE_CURSOR);
+    if (root->really_quiet && root->isatty[term_msg_fileno(root, MSGL_STATUS)])
+        fprintf(term_msg_fp(root, MSGL_STATUS), TERM_ESC_RESTORE_CURSOR);
     terminate_log_file_thread(root);
     mp_msg_log_buffer_destroy(root->early_buffer);
     mp_msg_log_buffer_destroy(root->early_filebuffer);

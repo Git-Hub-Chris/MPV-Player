@@ -36,12 +36,17 @@ struct demux_seek_range {
     double start, end;
 };
 
+struct demux_ctrl_ts_info {
+    double duration;
+    double reader; // approx. timestamp of decoder position
+    double end;    // approx. timestamp of end of buffered range
+};
+
 struct demux_reader_state {
     bool eof, underrun, idle;
     bool bof_cached, eof_cached;
-    double ts_duration;
-    double ts_reader; // approx. timerstamp of decoder position
-    double ts_end; // approx. timestamp of end of buffered range
+    struct demux_ctrl_ts_info ts_info;
+    struct demux_ctrl_ts_info ts_per_stream[STREAM_TYPE_COUNT];
     int64_t total_bytes;
     int64_t fw_bytes;
     int64_t file_cache_bytes;
@@ -81,6 +86,7 @@ struct demux_opts {
     double back_seek_size;
     char *meta_cp;
     bool force_retry_eof;
+    int autocreate_playlist;
 };
 
 #define SEEK_FACTOR   (1 << 1)      // argument is in range [0,1]
@@ -206,6 +212,7 @@ struct demuxer_params {
     bool stream_record; // if true, enable stream recording if option is set
     int stream_flags;
     struct stream *external_stream; // if set, use this, don't open or close streams
+    bool allow_playlist_create;
     // result
     bool demuxer_failed;
 };

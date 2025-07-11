@@ -69,7 +69,7 @@ static void wayland_egl_swap_buffers(struct ra_ctx *ctx)
 
     eglSwapBuffers(p->egl_display, p->egl_surface);
 
-    if (!wl->opts->disable_vsync)
+    if (!wl->opts->wl_disable_vsync)
         vo_wayland_wait_frame(wl);
 
     if (wl->use_present)
@@ -220,6 +220,7 @@ static bool wayland_egl_init(struct ra_ctx *ctx)
 const struct ra_ctx_fns ra_ctx_wayland_egl = {
     .type               = "opengl",
     .name               = "wayland",
+    .description        = "Wayland/EGL",
     .reconfig           = wayland_egl_reconfig,
     .control            = wayland_egl_control,
     .wakeup             = wayland_egl_wakeup,

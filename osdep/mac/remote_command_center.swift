@@ -17,6 +17,7 @@
 
 import Cocoa
 import MediaPlayer
+import QuickLookThumbnailing
 
 extension RemoteCommandCenter {
     typealias ConfigHandler = (MPRemoteCommandEvent) -> (MPRemoteCommandHandlerStatus)
@@ -32,7 +33,7 @@ extension RemoteCommandCenter {
         var state: NSEvent.EventType = .applicationDefined
         let handler: ConfigHandler
 
-        init(key: Int32 = 0, type: KeyType = .normal, handler: @escaping ConfigHandler = { event in return .commandFailed }) {
+        init(key: Int32 = 0, type: KeyType = .normal, handler: @escaping ConfigHandler = { _ in return .commandFailed }) {
             self.key = key
             self.type = type
             self.handler = handler
@@ -42,9 +43,9 @@ extension RemoteCommandCenter {
 
 class RemoteCommandCenter: EventSubscriber {
     unowned let appHub: AppHub
-    var event: EventHelper? { get { return appHub.event } }
-    var input: InputHelper { get { return appHub.input } }
-    var configs: [MPRemoteCommand:Config] = [:]
+    var event: EventHelper? { return appHub.event }
+    var input: InputHelper { return appHub.input }
+    var configs: [MPRemoteCommand: Config] = [:]
     var disabledCommands: [MPRemoteCommand] = []
     var isPaused: Bool = false { didSet { updateInfoCenter() } }
     var duration: Double = 0 { didSet { updateInfoCenter() } }
@@ -54,14 +55,22 @@ class RemoteCommandCenter: EventSubscriber {
     var chapter: String? { didSet { updateInfoCenter() } }
     var album: String? { didSet { updateInfoCenter() } }
     var artist: String? { didSet { updateInfoCenter() } }
-    var cover: NSImage
+    var path: String?
 
-    var infoCenter: MPNowPlayingInfoCenter { get { return MPNowPlayingInfoCenter.default() } }
-    var commandCenter: MPRemoteCommandCenter { get { return MPRemoteCommandCenter.shared() } }
+    let coverLock = NSLock()
+    var coverTime: UInt64 = mach_absolute_time()
+    var coverPath: String?
+    var cover: NSImage? { didSet { updateInfoCenter() } }
+    var coverThumb: NSImage? { didSet { updateInfoCenter() } }
+    var defaultCover: NSImage
+
+    let queue: DispatchQueue = DispatchQueue(label: "io.mpv.remote.queue")
+    var infoCenter: MPNowPlayingInfoCenter { return MPNowPlayingInfoCenter.default() }
+    var commandCenter: MPRemoteCommandCenter { return MPRemoteCommandCenter.shared() }
 
     init(_ appHub: AppHub) {
         self.appHub = appHub
-        cover = appHub.getIcon()
+        defaultCover = appHub.getIcon()
 
         configs = [
             commandCenter.pauseCommand: Config(key: MP_KEY_PAUSEONLY, handler: keyHandler),
@@ -72,7 +81,7 @@ class RemoteCommandCenter: EventSubscriber {
             commandCenter.togglePlayPauseCommand: Config(key: MP_KEY_PLAY, handler: keyHandler),
             commandCenter.seekForwardCommand: Config(key: MP_KEY_FORWARD, type: .repeatable, handler: keyHandler),
             commandCenter.seekBackwardCommand: Config(key: MP_KEY_REWIND, type: .repeatable, handler: keyHandler),
-            commandCenter.changePlaybackPositionCommand: Config(handler: seekHandler),
+            commandCenter.changePlaybackPositionCommand: Config(handler: seekHandler)
         ]
 
         disabledCommands = [
@@ -86,7 +95,7 @@ class RemoteCommandCenter: EventSubscriber {
             commandCenter.ratingCommand,
             commandCenter.likeCommand,
             commandCenter.dislikeCommand,
-            commandCenter.bookmarkCommand,
+            commandCenter.bookmarkCommand
         ]
 
         for cmd in disabledCommands {
@@ -103,6 +112,8 @@ class RemoteCommandCenter: EventSubscriber {
         event?.subscribe(self, event: .init(name: "chapter-metadata/title", format: MPV_FORMAT_STRING))
         event?.subscribe(self, event: .init(name: "metadata/by-key/album", format: MPV_FORMAT_STRING))
         event?.subscribe(self, event: .init(name: "metadata/by-key/artist", format: MPV_FORMAT_STRING))
+        event?.subscribe(self, event: .init(name: "path", format: MPV_FORMAT_STRING))
+        event?.subscribe(self, event: .init(name: "track-list", format: MPV_FORMAT_NODE))
     }
 
     func start() {
@@ -114,11 +125,9 @@ class RemoteCommandCenter: EventSubscriber {
         updateInfoCenter()
 
         NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(self.makeCurrent),
-            name: NSApplication.willBecomeActiveNotification,
-            object: nil
-        )
+            forName: NSApplication.willBecomeActiveNotification,
+            object: nil,
+            queue: nil) { _ in self.makeCurrent() }
     }
 
     func stop() {
@@ -137,13 +146,14 @@ class RemoteCommandCenter: EventSubscriber {
         )
     }
 
-    @objc func makeCurrent(notification: NSNotification) {
+    func makeCurrent() {
         infoCenter.playbackState = .paused
         infoCenter.playbackState = .playing
         updateInfoCenter()
     }
 
     func updateInfoCenter() {
+        let cover = cover ?? coverThumb ?? defaultCover
         infoCenter.playbackState = isPaused ? .paused : .playing
         infoCenter.nowPlayingInfo = (infoCenter.nowPlayingInfo ?? [:]).merging([
             MPNowPlayingInfoPropertyMediaType: NSNumber(value: MPNowPlayingInfoMediaType.video.rawValue),
@@ -154,8 +164,71 @@ class RemoteCommandCenter: EventSubscriber {
             MPMediaItemPropertyTitle: title,
             MPMediaItemPropertyArtist: artist ?? chapter ?? "",
             MPMediaItemPropertyAlbumTitle: album ?? "",
-            MPMediaItemPropertyArtwork: MPMediaItemArtwork(boundsSize: cover.size) { _ in return self.cover }
+            MPMediaItemPropertyArtwork: MPMediaItemArtwork(boundsSize: cover.size) { _ in return cover }
         ]) { (_, new) in new }
+    }
+
+    func updateCover(tracks: [Any?]) {
+        coverLock.withLock {
+            coverTime = mach_absolute_time()
+            coverPath = nil
+            cover = nil
+            coverThumb = nil
+
+            // read cover image on separate thread
+            queue.async { self.generateCover(tracks: tracks, time: self.coverTime) }
+            generateCoverThumb(time: self.coverTime)
+        }
+    }
+
+    func generateCover(tracks: [Any?], time: UInt64) {
+        var imageCoverPath: String?
+        var externalCoverPath: String?
+
+        for item in tracks {
+            guard let track = item as? [String: Any?] else { continue }
+            if (track["image"] as? Bool) == true {
+                // opened file is an image
+                if track["external"] as? Bool == false && track["albumart"] as? Bool == false && imageCoverPath == nil {
+                    imageCoverPath = path
+                    continue
+                }
+                // external cover
+                if let filename = track["external-filename"] as? String, externalCoverPath == nil {
+                    externalCoverPath = filename
+                    continue
+                }
+            }
+        }
+
+        guard let path = imageCoverPath ?? externalCoverPath, coverPath != path else { return }
+
+        var image = NSImage(contentsOf: URL(fileURLWithPath: path))
+        if let url = URL(string: path), image == nil {
+            image = NSImage(contentsOf: url)
+        }
+
+        coverLock.withLock {
+            guard time == coverTime else { return }
+            cover = image
+            coverPath = path
+        }
+    }
+
+    func generateCoverThumb(time: UInt64) {
+        guard let path = path else { return }
+
+        let request = QLThumbnailGenerator.Request(fileAt: URL(fileURLWithPath: path),
+                                                   size: CGSize(width: 2000, height: 2000),
+                                                   scale: 1,
+                                                   representationTypes: .all)
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { thumbnail, _ in
+            self.coverLock.withLock {
+                guard time == self.coverTime else { return }
+                guard let image = thumbnail?.nsImage, thumbnail?.type != .icon else { return }
+                self.coverThumb = image
+            }
+        }
     }
 
     lazy var keyHandler: ConfigHandler = { event in
@@ -196,6 +269,8 @@ class RemoteCommandCenter: EventSubscriber {
         case "chapter-metadata/title": chapter = event.string
         case "metadata/by-key/album": album = event.string
         case "metadata/by-key/artist": artist = event.string
+        case "path": path = event.string
+        case "track-list": updateCover(tracks: event.array)
         default: break
         }
     }

@@ -26,7 +26,6 @@
 #include "common/msg.h"
 #include "options/options.h"
 #include "common/common.h"
-#include "common/global.h"
 
 #include "stream/stream.h"
 #include "sub/dec_sub.h"
@@ -61,8 +60,7 @@ void redraw_subs(struct MPContext *mpctx)
         if (mpctx->current_track[n][STREAM_SUB] &&
             mpctx->current_track[n][STREAM_SUB]->d_sub)
         {
-            mpctx->redraw_subs = true;
-            break;
+            mpctx->current_track[n][STREAM_SUB]->redraw_subs = true;
         }
     }
 }
@@ -97,7 +95,7 @@ static bool update_subtitle(struct MPContext *mpctx, double video_pts,
 {
     struct dec_sub *dec_sub = track ? track->d_sub : NULL;
 
-    if (!dec_sub || video_pts == MP_NOPTS_VALUE)
+    if (!dec_sub)
         return true;
 
     if (mpctx->vo_chain) {
@@ -105,6 +103,15 @@ static bool update_subtitle(struct MPContext *mpctx, double video_pts,
         if (params.imgfmt)
             sub_control(dec_sub, SD_CTRL_SET_VIDEO_PARAMS, &params);
     }
+
+    // Checking if packets have special animations is relatively expensive.
+    // This is only needed if we are rendering ASS subtitles with no video
+    // being played.
+    bool still_image = mpctx->video_out && ((mpctx->video_status == STATUS_EOF &&
+                       mpctx->opts->subs_rend->sub_past_video_end) ||
+                       !mpctx->current_track[0][STREAM_VIDEO] ||
+                       mpctx->current_track[0][STREAM_VIDEO]->image);
+    sub_control(dec_sub, SD_CTRL_SET_ANIMATED_CHECK, &still_image);
 
     if (track->demuxer->fully_read && sub_can_preload(dec_sub)) {
         // Assume fully_read implies no interleaved audio/video streams.
@@ -121,9 +128,9 @@ static bool update_subtitle(struct MPContext *mpctx, double video_pts,
 
     // Check if we need to update subtitles for these special cases. Always
     // update on discontinuities like seeking or a new file.
-    if (sub_updated || mpctx->redraw_subs || osd_pts == MP_NOPTS_VALUE) {
-        // Always force a redecode of all packets if we have a refresh.
-        if (mpctx->redraw_subs)
+    if (sub_updated || track->redraw_subs || osd_pts == MP_NOPTS_VALUE) {
+        // Always force a redecode of all packets if we seek on a still image.
+        if (track->redraw_subs && still_image)
             sub_redecode_cached_packets(dec_sub);
 
         // Handle displaying subtitles on terminal; never done for secondary subs
@@ -136,10 +143,7 @@ static bool update_subtitle(struct MPContext *mpctx, double video_pts,
         // Handle displaying subtitles on VO with no video being played. This is
         // quite different, because normally subtitles are redrawn on new video
         // frames, using the video frames' timestamps.
-        if (mpctx->video_out && mpctx->video_status == STATUS_EOF &&
-            (mpctx->opts->subs_rend->sub_past_video_end ||
-            !mpctx->current_track[0][STREAM_VIDEO] ||
-            mpctx->current_track[0][STREAM_VIDEO]->image)) {
+        if (still_image) {
             if (osd_pts != video_pts) {
                 osd_set_force_video_pts(mpctx->osd, video_pts);
                 osd_query_and_reset_want_redraw(mpctx->osd);
@@ -148,7 +152,7 @@ static bool update_subtitle(struct MPContext *mpctx, double video_pts,
         }
     }
 
-    mpctx->redraw_subs = false;
+    track->redraw_subs = false;
     return packets_read;
 }
 

@@ -23,10 +23,10 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <limits.h>
-#include <unistd.h>
 
 #include "mpv_talloc.h"
 #include "config.h"
+#include "common/common.h"
 #include "misc/random.h"
 #include "misc/io_utils.h"
 #include "osdep/io.h"
@@ -45,7 +45,7 @@ int mp_mkostemps(char *template, int suffixlen, int flags)
         // not truly random; just a counter would be sufficient).
         size_t fuckmess = mp_rand_next();
         char crap[7] = "";
-        snprintf(crap, sizeof(crap), "%06zx", fuckmess);
+        mp_tprintf_buf(crap, sizeof(crap), "%06zx", fuckmess);
         memcpy(t, crap, 6);
 
         int res = open(template, O_RDWR | O_CREAT | O_EXCL | flags, 0600);
@@ -63,7 +63,7 @@ bool mp_save_to_file(const char *filepath, const void *data, size_t size)
 
     bool result = false;
     char *tmp = talloc_asprintf(NULL, "%sXXXXXX", filepath);
-    int fd = mkstemp(tmp);
+    int fd = mp_mkostemps(tmp, 0, O_CLOEXEC);
     if (fd < 0)
         goto done;
     FILE *cache = fdopen(fd, "wb");

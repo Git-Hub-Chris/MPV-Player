@@ -195,7 +195,7 @@ AudioChannelLabel mp_speaker_id_to_ca_label(int speaker_id)
     return -1; // kAudioChannelLabel_Unknown
 }
 
-#if HAVE_COREAUDIO
+#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
 void ca_log_layout(struct ao *ao, int l, AudioChannelLayout *layout)
 {
     if (!mp_msg_test(ao->log, l))
@@ -297,9 +297,9 @@ AudioChannelLayout *ca_find_standard_layout(void *talloc_ctx, AudioChannelLayout
         if (l->mNumberChannelDescriptions != r->mNumberChannelDescriptions)
             goto mismatch;
 
-        for (int i = 0; i < l->mNumberChannelDescriptions; ++i) {
-            AudioChannelDescription *ld = l->mChannelDescriptions + i;
-            AudioChannelDescription *rd = r->mChannelDescriptions + i;
+        for (int j = 0; j < l->mNumberChannelDescriptions; ++j) {
+            AudioChannelDescription *ld = l->mChannelDescriptions + j;
+            AudioChannelDescription *rd = r->mChannelDescriptions + j;
             if (ld->mChannelLabel == rd->mChannelLabel)
                 continue;
             // XXX: we cannot handle channels with coordinates
@@ -312,6 +312,30 @@ mismatch:;
     }
 
     return s ? s : l;
+}
+
+AudioChannelLayout *ca_get_acl(struct ao *ao, size_t *out_layout_size)
+{
+    size_t layout_size = sizeof(AudioChannelLayout)
+                         + (ao->channels.num - 1) * sizeof(AudioChannelDescription);
+    AudioChannelLayout *layout = talloc_size(ao, layout_size);
+    layout->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions;
+    layout->mNumberChannelDescriptions = ao->channels.num;
+    for (int i = 0; i < ao->channels.num; ++i) {
+        AudioChannelDescription *desc = layout->mChannelDescriptions + i;
+        desc->mChannelFlags = kAudioChannelFlags_AllOff;
+        desc->mChannelLabel = mp_speaker_id_to_ca_label(ao->channels.speaker[i]);
+    }
+
+    void *talloc_ctx = talloc_new(NULL);
+    AudioChannelLayout *std_layout = ca_find_standard_layout(talloc_ctx, layout);
+    memmove(layout, std_layout, sizeof(AudioChannelLayout));
+    talloc_free(talloc_ctx);
+    ca_log_layout(ao, MSGL_V, layout);
+
+    if (out_layout_size)
+        *out_layout_size = layout_size;
+    return layout;
 }
 
 

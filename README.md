@@ -37,7 +37,7 @@ Releases can be found on the [release list][releases].
 ## System requirements
 
 - A not too ancient Linux (usually, only the latest releases of distributions
-  are actively supported), Windows 10 or later, or macOS 10.15 or later.
+  are actively supported), Windows 10 1607 or later, or macOS 10.15 or later.
 - A somewhat capable CPU. Hardware decoding might help if the CPU is too slow to
   decode video in realtime, but must be explicitly enabled with the `--hwdec`
   option.
@@ -75,6 +75,9 @@ on every release.
 
 Changes to the default key bindings are indicated in
 [restore-old-bindings.conf][restore-old-bindings].
+
+Changes to the default OSC bindings are indicated in
+[restore-osc-bindings.conf][restore-osc-bindings].
 
 ## Compilation
 
@@ -120,7 +123,7 @@ Essential dependencies (incomplete list):
 
 Libass dependencies (when building libass):
 
-- gcc or clang, yasm on x86 and x86_64
+- gcc or clang, nasm on x86 and x86_64
 - fribidi, freetype, fontconfig development headers (for libass)
 - harfbuzz (required for correct rendering of combining characters, particularly
   for correct rendering of non-English text on macOS, and Arabic/Indic scripts on
@@ -128,7 +131,7 @@ Libass dependencies (when building libass):
 
 FFmpeg dependencies (when building FFmpeg):
 
-- gcc or clang, yasm on x86 and x86_64
+- gcc or clang, nasm on x86 and x86_64
 - OpenSSL or GnuTLS (have to be explicitly enabled when compiling FFmpeg)
 - libx264/libmp3lame/libfdk-aac if you want to use encoding (have to be
   explicitly enabled when compiling FFmpeg)
@@ -144,9 +147,7 @@ you may wish to use the separately available build wrapper ([mpv-build][mpv-buil
 which first compiles FFmpeg libraries and libass, and then compiles the player
 statically linked against those.
 
-If you want to build a Windows binary, you either have to use MSYS2 and MinGW,
-or cross-compile from Linux with MinGW. See
-[Windows compilation][windows_compilation].
+If you want to build a Windows binary, see [Windows compilation][windows_compilation].
 
 
 ## Release cycle
@@ -169,8 +170,8 @@ Please use the [issue tracker][issue-tracker] provided by GitHub to send us bug
 reports or feature requests. Follow the template's instructions or the issue
 will likely be ignored or closed as invalid.
 
-Using the bug tracker as place for simple questions is fine but IRC is
-recommended (see [Contact](#Contact) below).
+Questions can be asked in the [discussions][discussions] or on IRC (see
+[Contact](#Contact) below).
 
 ## Contributing
 
@@ -202,6 +203,7 @@ see the [FAQ][FAQ].
 Most activity happens on the IRC channel and the GitHub issue tracker.
 
 - **GitHub issue tracker**: [issue tracker][issue-tracker] (report bugs here)
+- **Discussions**: [discussions][discussions]
 - **User IRC Channel**: `#mpv` on `irc.libera.chat`
 - **Developer IRC Channel**: `#mpv-devel` on `irc.libera.chat`
 
@@ -209,9 +211,11 @@ Most activity happens on the IRC channel and the GitHub issue tracker.
 [releases]: https://github.com/mpv-player/mpv/releases
 [mpv-build]: https://github.com/mpv-player/mpv-build
 [issue-tracker]:  https://github.com/mpv-player/mpv/issues
+[discussions]: https://github.com/mpv-player/mpv/discussions
 [release-policy]: https://github.com/mpv-player/mpv/blob/master/DOCS/release-policy.md
 [windows_compilation]: https://github.com/mpv-player/mpv/blob/master/DOCS/compile-windows.md
 [interface-changes]: https://github.com/mpv-player/mpv/blob/master/DOCS/interface-changes.rst
 [api-changes]: https://github.com/mpv-player/mpv/blob/master/DOCS/client-api-changes.rst
 [restore-old-bindings]: https://github.com/mpv-player/mpv/blob/master/etc/restore-old-bindings.conf
+[restore-osc-bindings]: https://github.com/mpv-player/mpv/blob/master/etc/restore-osc-bindings.conf
 [contribute.md]: https://github.com/mpv-player/mpv/blob/master/DOCS/contribute.md

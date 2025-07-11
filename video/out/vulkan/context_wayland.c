@@ -36,7 +36,7 @@ static void wayland_vk_swap_buffers(struct ra_ctx *ctx)
 {
     struct vo_wayland_state *wl = ctx->vo->wl;
 
-    if (!wl->opts->disable_vsync)
+    if (!wl->opts->wl_disable_vsync)
         vo_wayland_wait_frame(wl);
 
     if (wl->use_present)
@@ -157,6 +157,7 @@ static void wayland_vk_update_render_opts(struct ra_ctx *ctx)
 const struct ra_ctx_fns ra_ctx_vulkan_wayland = {
     .type               = "vulkan",
     .name               = "waylandvk",
+    .description        = "Wayland/Vulkan",
     .reconfig           = wayland_vk_reconfig,
     .control            = wayland_vk_control,
     .wakeup             = wayland_vk_wakeup,

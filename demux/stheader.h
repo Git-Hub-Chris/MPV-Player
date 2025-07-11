@@ -78,13 +78,20 @@ struct mp_codec_params {
     // Corresponding codec profile
     const char *codec_profile;
 
+    // E.g. "h264" (usually corresponds to AVCodec.name)
+    const char *decoder;
+
+    // Usually corresponds to AVCodec.long_name
+    const char *decoder_desc;
+
     // Usually a FourCC, exact meaning depends on codec.
     unsigned int codec_tag;
 
     unsigned char *extradata;   // codec specific per-stream header
     int extradata_size;
 
-    // Codec specific header data (set by demux_lavf.c only)
+    // Codec specific header data (set by demux_{lavf,mkv,raw}, useful to pass
+    // through stream global side data)
     struct AVCodecParameters *lav_codecpar;
 
     // Timestamp granularity for converting double<->rational timestamps.
@@ -112,8 +119,12 @@ struct mp_codec_params {
     int rotate;           // intended display rotation, in degrees, [0, 359]
     int stereo_mode;      // mp_stereo3d_mode (0 if none/unknown)
     struct pl_color_space color; // colorspace info where available
-    struct pl_color_repr repr;   // color representaion info where available
+    struct pl_color_repr repr;   // color representation info where available
     struct mp_rect crop;         // crop to be applied
+
+    bool dovi;
+    uint8_t dv_profile;
+    uint8_t dv_level;
 
     // STREAM_VIDEO + STREAM_AUDIO
     int bits_per_coded_sample;

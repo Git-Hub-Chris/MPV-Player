@@ -21,8 +21,12 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
+
+#ifdef _WIN32
+#include <sys/utime.h>
+#else
 #include <utime.h>
+#endif
 
 #include <libavutil/md5.h>
 
@@ -30,7 +34,6 @@
 
 #include "osdep/io.h"
 
-#include "common/global.h"
 #include "common/encode.h"
 #include "common/msg.h"
 #include "misc/ctype.h"
@@ -41,6 +44,7 @@
 #include "common/playlist.h"
 #include "options/options.h"
 #include "options/m_property.h"
+#include "input/input.h"
 
 #include "stream/stream.h"
 
@@ -76,8 +80,7 @@ void mp_parse_cfgfiles(struct MPContext *mpctx)
     talloc_free(p2);
 
     char *section = NULL;
-    bool encoding = opts->encode_opts &&
-        opts->encode_opts->file && opts->encode_opts->file[0];
+    bool encoding = opts->encode_opts->file && opts->encode_opts->file[0];
     // In encoding mode, we don't want to apply normal config options.
     // So we "divert" normal options into a separate section, and the diverted
     // section is never used - unless maybe it's explicitly referenced from an
@@ -89,8 +92,10 @@ void mp_parse_cfgfiles(struct MPContext *mpctx)
 
     load_all_cfgfiles(mpctx, section, "mpv.conf|config");
 
-    if (encoding)
+    if (encoding) {
         m_config_set_profile(mpctx->mconfig, SECT_ENCODE, 0);
+        mp_input_enable_section(mpctx->input, "encode", MP_INPUT_EXCLUSIVE);
+    }
 }
 
 static int try_load_config(struct MPContext *mpctx, const char *file, int flags,
@@ -192,7 +197,7 @@ static bool copy_mtime(const char *f1, const char *f2)
     return true;
 }
 
-static char *mp_get_playback_resume_dir(struct MPContext *mpctx)
+char *mp_get_playback_resume_dir(struct MPContext *mpctx)
 {
     char *wl_dir = mpctx->opts->watch_later_dir;
     if (wl_dir && wl_dir[0]) {
@@ -209,20 +214,18 @@ static char *mp_get_playback_resume_config_filename(struct MPContext *mpctx,
     struct MPOpts *opts = mpctx->opts;
     char *res = NULL;
     void *tmp = talloc_new(NULL);
-    const char *realpath = fname;
-    bstr bfname = bstr0(fname);
-    if (!mp_is_url(bfname)) {
-        if (opts->ignore_path_in_watch_later_config) {
-            realpath = mp_basename(fname);
-        } else {
-            char *cwd = mp_getcwd(tmp);
-            if (!cwd)
-                goto exit;
-            realpath = mp_path_join(tmp, cwd, fname);
-        }
+    const char *path = NULL;
+    if (mp_is_url(bstr0(fname))) {
+        path = fname;
+    } else if (opts->ignore_path_in_watch_later_config) {
+        path = mp_basename(fname);
+    } else {
+        path = mp_normalize_path(tmp, fname);
+        if (!path)
+            goto exit;
     }
     uint8_t md5[16];
-    av_md5_sum(md5, realpath, strlen(realpath));
+    av_md5_sum(md5, path, strlen(path));
     char *conf = talloc_strdup(tmp, "");
     for (int i = 0; i < 16; i++)
         conf = talloc_asprintf_append(conf, "%02X", md5[i]);
@@ -312,6 +315,8 @@ void mp_write_watch_later_conf(struct MPContext *mpctx)
         goto exit;
 
     char *path = mp_normalize_path(ctx, cur->filename);
+    if (!path)
+        goto exit;
 
     struct demuxer *demux = mpctx->demuxer;
 
@@ -333,7 +338,7 @@ void mp_write_watch_later_conf(struct MPContext *mpctx)
     write_filename(mpctx, file, path);
 
     bool write_start = true;
-    double pos = get_current_time(mpctx);
+    double pos = get_playback_time(mpctx);
 
     if ((demux && (!demux->seekable || demux->partially_seekable)) ||
         pos == MP_NOPTS_VALUE)
@@ -391,39 +396,34 @@ exit:
 
 void mp_delete_watch_later_conf(struct MPContext *mpctx, const char *file)
 {
-    if (!file) {
-        struct playlist_entry *cur = mpctx->playing;
-        if (!cur)
-            return;
-        file = cur->filename;
-        if (!file)
-            return;
-    }
-
-    char *fname = mp_get_playback_resume_config_filename(mpctx, file);
-    if (fname) {
-        unlink(fname);
-        talloc_free(fname);
-    }
-
-    if (mp_is_url(bstr0(file)) || mpctx->opts->ignore_path_in_watch_later_config)
-        return;
-
     void *ctx = talloc_new(NULL);
-    char *path = mp_normalize_path(ctx, file);
+    char *path = mp_normalize_path(ctx, file ? file : mpctx->filename);
+    if (!path)
+        goto exit;
+
+    char *fname = mp_get_playback_resume_config_filename(mpctx, path);
+    if (!fname)
+        goto exit;
+
+    unlink(fname);
+    talloc_free(fname);
+
+    if (mp_is_url(bstr0(path)) || mpctx->opts->ignore_path_in_watch_later_config)
+        goto exit;
 
     bstr dir = mp_dirname(path);
     while (dir.len > 1 && dir.len < strlen(path)) {
         path[dir.len] = '\0';
         mp_path_strip_trailing_separator(path);
         fname = mp_get_playback_resume_config_filename(mpctx, path);
-        if (fname) {
-            unlink(fname);
-            talloc_free(fname);
-        }
+        if (!fname)
+            break;
+        unlink(fname);
+        talloc_free(fname);
         dir = mp_dirname(path);
     }
 
+exit:
     talloc_free(ctx);
 }
 
@@ -472,4 +472,3 @@ struct playlist_entry *mp_check_playlist_resume(struct MPContext *mpctx,
     }
     return NULL;
 }
-

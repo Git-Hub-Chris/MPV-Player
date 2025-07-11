@@ -42,7 +42,7 @@ Copyright of contributions
   this. If the license of the code is not LGPLv2.1+, you must mention this.
 - These license statements are legally binding.
 - Don't use fake names (something that looks like an actual name, and may be
-  someone else's name, but is not your legal name). Using a pseudonyms is
+  someone else's name, but is not your legal name). Using a pseudonym is
   allowed if it can be used to identify or contact you, even if whatever
   account you used to submit the patch dies.
 - Do not add your name to the license header. This convention is not used by
@@ -141,7 +141,10 @@ Interface change policy
   must be documented by making a new text file with a txt extension containing a
   small note in the DOCS/interface-changes directory.
 - The name of the file should be brief and related to the commit that makes the
-  change.
+  change. The content of the file should begin with the type of the change
+  (add, remove, deprecate, change, rename, etc.). If the file contains multiple
+  changes, the change which causes the most serious compatibility issues should
+  be placed first.
 - Grouping multiple related changes in the same file is also OK. Just be sure to
   put each separate change on a different line.
 - Documenting additions in DOCS/interface-changes is optional but encouraged.
@@ -252,6 +255,11 @@ General coding
 - If you add features that require intrusive changes, discuss them on the dev
   channel first. There might be a better way to add a feature and it can avoid
   wasted work.
+- Newly added code for any Apple Platform (macOS, iOS, etc), that uses Cocoa or
+  any other object-oriented Framework or API, should be written in Swift instead
+  of Objective-C. This also includes complete rewrites/refactors of existing
+  code. Plain C API usages may stay as C, but can be written in Swift. Existing
+  Objective-C code can stay as is, though Swift rewrites are welcome.
 
 Code of Conduct
 ---------------

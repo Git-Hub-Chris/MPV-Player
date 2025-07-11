@@ -23,7 +23,6 @@
 #include <stdbool.h>
 
 #include "osdep/io.h"
-#include "common/global.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
 #include "m_option.h"
@@ -96,7 +95,7 @@ static bool split_opt(struct parse_state *p)
     return true;
 }
 
-#ifdef __MINGW32__
+#ifdef _WIN32
 static void process_non_option(struct playlist *files, const char *arg)
 {
     glob_t gg;

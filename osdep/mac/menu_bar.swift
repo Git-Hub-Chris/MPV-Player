@@ -71,10 +71,11 @@ extension MenuBar {
 
 class MenuBar: NSObject {
     unowned let appHub: AppHub
+    var option: OptionHelper? { return appHub.option }
     let mainMenu = NSMenu(title: "Main")
     let servicesMenu = NSMenu(title: "Services")
     var menuConfigs: [Config] = []
-    var dynamicMenuItems: [Type:[MenuItem]] = [:]
+    var dynamicMenuItems: [Type: [MenuItem]] = [:]
     let appIcon: NSImage
 
     @objc init(_ appHub: AppHub) {
@@ -111,7 +112,7 @@ class MenuBar: NSObject {
             Config(name: "Show All", action: #selector(NSApp.unhideAllApplications(_:))),
             Config(type: .separator),
             Config(name: "Quit and Remember Position", action: #selector(command(_:)), target: self, command: "quit-watch-later"),
-            Config(name: "Quit mpv", key: "q", action: #selector(command(_:)), target: self, command: "quit"),
+            Config(name: "Quit mpv", key: "q", action: #selector(command(_:)), target: self, command: "quit")
         ]
 
         let fileMenuConfigs = [
@@ -120,7 +121,7 @@ class MenuBar: NSObject {
             Config(name: "Open Playlist…", action: #selector(openPlaylist), target: self),
             Config(type: .separator),
             Config(name: "Close", key: "w", action: #selector(NSWindow.performClose(_:))),
-            Config(name: "Save Screenshot", action: #selector(command(_:)), target: self, command: "async screenshot"),
+            Config(name: "Save Screenshot", action: #selector(command(_:)), target: self, command: "async screenshot")
         ]
 
         let editMenuConfigs = [
@@ -130,7 +131,7 @@ class MenuBar: NSObject {
             Config(name: "Cut", key: "x", action: #selector(NSText.cut(_:))),
             Config(name: "Copy", key: "c", action: #selector(NSText.copy(_:))),
             Config(name: "Paste", key: "v", action: #selector(NSText.paste(_:))),
-            Config(name: "Select All", key: "a", action: #selector(NSResponder.selectAll(_:))),
+            Config(name: "Select All", key: "a", action: #selector(NSResponder.selectAll(_:)))
         ]
 
         var viewMenuConfigs = [
@@ -141,12 +142,12 @@ class MenuBar: NSObject {
                 action: #selector(command(_:)),
                 target: self,
                 command: "cycle on-all-workspaces"
-            ),
+            )
         ]
 #if HAVE_MACOS_TOUCHBAR
         viewMenuConfigs += [
             Config(type: .separator),
-            Config(name: "Customize Touch Bar…", action: #selector(NSApp.toggleTouchBarCustomizationPalette(_:))),
+            Config(name: "Customize Touch Bar…", action: #selector(NSApp.toggleTouchBarCustomizationPalette(_:)))
         ]
 #endif
 
@@ -167,7 +168,7 @@ class MenuBar: NSObject {
             Config(type: .separator),
             Config(name: "Half Size", key: "0", type: .itemHalfSize),
             Config(name: "Normal Size", key: "1", type: .itemNormalSize),
-            Config(name: "Double Size", key: "2", type: .itemDoubleSize),
+            Config(name: "Double Size", key: "2", type: .itemDoubleSize)
         ]
 
         let audioMenuConfigs = [
@@ -178,7 +179,7 @@ class MenuBar: NSObject {
             Config(type: .separator),
             Config(name: "Play Audio Later", action: #selector(command(_:)), target: self, command: "add audio-delay 0.1"),
             Config(name: "Play Audio Earlier", action: #selector(command(_:)), target: self, command: "add audio-delay -0.1"),
-            Config(name: "Reset Audio Delay", action: #selector(command(_:)), target: self, command: "set audio-delay 0.0"),
+            Config(name: "Reset Audio Delay", action: #selector(command(_:)), target: self, command: "set audio-delay 0.0")
         ]
 
         let subtitleMenuConfigs = [
@@ -189,7 +190,7 @@ class MenuBar: NSObject {
             Config(type: .separator),
             Config(name: "Display Subtitles Later", action: #selector(command(_:)), target: self, command: "add sub-delay 0.1"),
             Config(name: "Display Subtitles Earlier", action: #selector(command(_:)), target: self, command: "add sub-delay -0.1"),
-            Config(name: "Reset Subtitle Delay", action: #selector(command(_:)), target: self, command: "set sub-delay 0.0"),
+            Config(name: "Reset Subtitle Delay", action: #selector(command(_:)), target: self, command: "set sub-delay 0.0")
         ]
 
         let playbackMenuConfigs = [
@@ -198,9 +199,9 @@ class MenuBar: NSObject {
             Config(name: "Decrease Speed", action: #selector(command(_:)), target: self, command: "add speed -0.1"),
             Config(name: "Reset Speed", action: #selector(command(_:)), target: self, command: "set speed 1.0"),
             Config(type: .separator),
-            Config(name: "Show Playlist", action: #selector(command(_:)), target: self, command: "script-message osc-playlist"),
-            Config(name: "Show Chapters", action: #selector(command(_:)), target: self, command: "script-message osc-chapterlist"),
-            Config(name: "Show Tracks", action: #selector(command(_:)), target: self, command: "script-message osc-tracklist"),
+            Config(name: "Show Playlist", action: #selector(command(_:)), target: self, command: "show-text ${playlist} 3000"),
+            Config(name: "Show Chapters", action: #selector(command(_:)), target: self, command: "show-text ${chapter-list} 3000"),
+            Config(name: "Show Tracks", action: #selector(command(_:)), target: self, command: "show-text ${track-list} 3000"),
             Config(type: .separator),
             Config(name: "Next File", action: #selector(command(_:)), target: self, command: "playlist-next"),
             Config(name: "Previous File", action: #selector(command(_:)), target: self, command: "playlist-prev"),
@@ -212,12 +213,12 @@ class MenuBar: NSObject {
             Config(name: "Previous Chapter", action: #selector(command(_:)), target: self, command: "add chapter -1"),
             Config(type: .separator),
             Config(name: "Step Forward", action: #selector(command(_:)), target: self, command: "frame-step"),
-            Config(name: "Step Backward", action: #selector(command(_:)), target: self, command: "frame-back-step"),
+            Config(name: "Step Backward", action: #selector(command(_:)), target: self, command: "frame-back-step")
         ]
 
         let windowMenuConfigs = [
             Config(name: "Minimize", key: "m", type: .itemMinimize),
-            Config(name: "Zoom", type: .itemZoom),
+            Config(name: "Zoom", type: .itemZoom)
         ]
 
         var helpMenuConfigs = [
@@ -229,9 +230,9 @@ class MenuBar: NSObject {
             Config(name: "Release Notes…", action: #selector(url(_:)), target: self, url: "https://github.com/mpv-player/mpv/blob/master/RELEASE_NOTES"),
             Config(name: "Keyboard Shortcuts…", action: #selector(url(_:)), target: self, url: "https://github.com/mpv-player/mpv/blob/master/etc/input.conf"),
             Config(type: .separator),
-            Config(name: "Report Issue…", action: #selector(url(_:)), target: self, url: "https://github.com/mpv-player/mpv/issues/new/choose"),
+            Config(name: "Report Issue…", action: #selector(url(_:)), target: self, url: "https://github.com/mpv-player/mpv/issues/new/choose")
         ]
-        if ProcessInfo.processInfo.environment["MPVBUNDLE"] == "true" {
+        if AppHub.shared.isBundle {
             helpMenuConfigs += [
                 Config(name: "Show log File…", action: #selector(showFile(_:)), target: self, url: NSHomeDirectory() + "/Library/Logs/mpv.log")
             ]
@@ -247,7 +248,7 @@ class MenuBar: NSObject {
             Config(name: "Subtitle", configs: subtitleMenuConfigs),
             Config(name: "Playback", configs: playbackMenuConfigs),
             Config(name: "Window", configs: windowMenuConfigs),
-            Config(name: "Help", configs: helpMenuConfigs),
+            Config(name: "Help", configs: helpMenuConfigs)
         ]
 
         createMenu(parentMenu: mainMenu, configs: menuConfigs)
@@ -272,7 +273,8 @@ class MenuBar: NSObject {
     }
 
     func createMenuItem(parentMenu: NSMenu, config: Config) -> MenuItem {
-        var item = MenuItem(title: config.name, action: config.action, keyEquivalent: config.key)
+        var item = MenuItem(title: config.name, action: config.action,
+              keyEquivalent: (option?.mac.macos_menu_shortcuts ?? true) ? config.key : "")
         item.config = config
         item.target = config.target
         item.keyEquivalentModifierMask = config.modifiers
@@ -290,7 +292,7 @@ class MenuBar: NSObject {
             .applicationName: "mpv",
             .applicationIcon: appIcon,
             .applicationVersion: String(cString: swift_mpv_version),
-            .init(rawValue: "Copyright"): String(cString: swift_mpv_copyright),
+            .init(rawValue: "Copyright"): String(cString: swift_mpv_copyright)
         ])
     }
 
@@ -298,7 +300,7 @@ class MenuBar: NSObject {
         guard let menuConfig = menuItem.config else { return }
         let configPaths: [URL] = [
             URL(fileURLWithPath: NSHomeDirectory() + "/.config/mpv/", isDirectory: true),
-            URL(fileURLWithPath: NSHomeDirectory() + "/.mpv/", isDirectory: true),
+            URL(fileURLWithPath: NSHomeDirectory() + "/.mpv/", isDirectory: true)
         ]
 
         for path in configPaths {

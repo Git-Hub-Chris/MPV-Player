@@ -28,13 +28,19 @@ typedef struct mp_vo_opts {
     char *fsscreen_name;
     char *winname;
     char *appid;
-    int content_type;
     int x11_netwm;
     int x11_bypass_compositor;
     int x11_present;
     bool x11_wid_title;
     bool cursor_passthrough;
     bool native_keyrepeat;
+
+    int wl_configure_bounds;
+    int wl_content_type;
+    bool wl_disable_vsync;
+    int wl_edge_pixels_pointer;
+    int wl_edge_pixels_touch;
+    bool wl_present;
 
     float panscan;
     float zoom;
@@ -52,10 +58,13 @@ typedef struct mp_vo_opts {
     double window_scale;
 
     bool auto_window_resize;
+    bool recenter;
     bool keepaspect;
     bool keepaspect_window;
     bool hidpi_window_scale;
     bool native_fs;
+    bool native_touch;
+    bool show_in_taskbar;
 
     int64_t WinID;
 
@@ -95,20 +104,23 @@ struct mp_subtitle_opts {
     bool ass_scale_with_window;
     struct osd_style_opts *sub_style;
     float sub_scale;
+    bool sub_scale_signs;
     float sub_gauss;
     bool sub_gray;
     bool ass_enabled;
-    float ass_line_spacing;
+    float sub_line_spacing;
     bool ass_use_margins;
     bool sub_use_margins;
-    bool ass_vsfilter_aspect_compat;
     int ass_vsfilter_color_compat;
-    bool ass_vsfilter_blur_compat;
+    bool sub_vsfilter_bidi_compat;
+    int ass_use_video_data;
+    double ass_video_aspect;
     bool use_embedded_fonts;
     char **ass_style_override_list;
     char *ass_styles_file;
-    int ass_hinting;
-    int ass_shaper;
+    int sub_hinting;
+    int sub_shaper;
+    double ass_prune_delay;
     bool ass_justify;
     bool sub_clear_on_seek;
     int teletext_page;
@@ -124,26 +136,13 @@ struct mp_subtitle_shared_opts {
     int ass_style_override[2];
 };
 
-struct mp_sub_filter_opts {
-    bool sub_filter_SDH;
-    bool sub_filter_SDH_harder;
-    char *sub_filter_SDH_enclosures;
-    bool rf_enable;
-    bool rf_plain;
-    char **rf_items;
-    char **jsre_items;
-    bool rf_warn;
-};
-
 struct mp_osd_render_opts {
-    float osd_bar_align_x;
-    float osd_bar_align_y;
-    float osd_bar_w;
-    float osd_bar_h;
-    float osd_bar_border_size;
     float osd_scale;
     bool osd_scale_by_window;
+    struct m_color osd_selected_color;
+    struct m_color osd_selected_outline_color;
     struct osd_style_opts *osd_style;
+    struct osd_bar_style_opts *osd_bar_style;
     bool force_rgba_osd;
 };
 
@@ -172,6 +171,7 @@ typedef struct MPOpts {
     bool lua_load_stats;
     bool lua_load_console;
     int lua_load_auto_profiles;
+    bool lua_load_select;
 
     bool auto_load_scripts;
 
@@ -185,7 +185,7 @@ typedef struct MPOpts {
     float rgain_preamp;         // Set replaygain pre-amplification
     bool rgain_clip;             // Enable/disable clipping prevention
     float rgain_fallback;
-    int softvol_mute;
+    bool softvol_mute;
     float softvol_max;
     float softvol_gain;
     float softvol_gain_min;
@@ -255,6 +255,7 @@ typedef struct MPOpts {
     char *status_msg;
     char *osd_status_msg;
     char *osd_msg[3];
+    int playlist_entry_name;
     int player_idle_mode;
     char **input_commands;
     bool consolecontrols;
@@ -312,6 +313,7 @@ typedef struct MPOpts {
     int audio_output_format;
     int force_srate;
     double playback_speed;
+    double playback_pitch;
     bool pitch_correction;
     struct m_obj_settings *vf_settings;
     struct m_obj_settings *af_settings;
@@ -326,13 +328,17 @@ typedef struct MPOpts {
     int sub_auto;
     char **sub_auto_exts;
     int audiofile_auto;
-    char **audiofile_auto_exts;
+    char **audio_exts;
     int coverart_auto;
-    char **coverart_auto_exts;
-    bool coverart_whitelist;
+    char **image_exts;
+    char **coverart_whitelist;
+    char **video_exts;
+    char **archive_exts;
+    char **playlist_exts;
     bool osd_bar_visible;
 
     int w32_priority;
+    bool media_controls;
 
     struct bluray_opts *stream_bluray_opts;
     struct cdda_opts *stream_cdda_opts;
@@ -346,7 +352,6 @@ typedef struct MPOpts {
     struct demux_playlist_opts *demux_playlist;
     struct demux_lavf_opts *demux_lavf;
     struct demux_mkv_opts *demux_mkv;
-    struct demux_cue_opts *demux_cue;
 
     struct demux_opts *demux_opts;
     struct demux_cache_opts *demux_cache_opts;
@@ -357,7 +362,8 @@ typedef struct MPOpts {
 
     struct input_opts *input_opts;
 
-    // may be NULL if encoding is not compiled-in
+    struct clipboard_opts *clipboard_opts;
+
     struct encode_opts *encode_opts;
 
     char *ipc_path;
@@ -377,25 +383,19 @@ typedef struct MPOpts {
     struct d3d11va_opts *d3d11va_opts;
     struct macos_opts *macos_opts;
     struct drm_opts *drm_opts;
-    struct wayland_opts *wayland_opts;
     struct wingl_opts *wingl_opts;
     struct cuda_opts *cuda_opts;
     struct dvd_opts *dvd_opts;
     struct vaapi_opts *vaapi_opts;
     struct sws_opts *sws_opts;
     struct zimg_opts *zimg_opts;
+    struct egl_opts *egl_opts;
 
     int cuda_device;
 } MPOpts;
 
 struct cuda_opts {
     int cuda_device;
-};
-
-struct dvd_opts {
-    int angle;
-    int speed;
-    char *device;
 };
 
 struct filter_opts {
@@ -405,10 +405,8 @@ struct filter_opts {
 
 extern const struct m_sub_options vo_sub_opts;
 extern const struct m_sub_options cuda_conf;
-extern const struct m_sub_options dvd_conf;
 extern const struct m_sub_options mp_subtitle_sub_opts;
 extern const struct m_sub_options mp_subtitle_shared_sub_opts;
-extern const struct m_sub_options mp_sub_filter_opts;
 extern const struct m_sub_options mp_osd_render_sub_opts;
 extern const struct m_sub_options filter_conf;
 extern const struct m_sub_options resample_conf;

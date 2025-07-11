@@ -4,10 +4,8 @@ outdir = join_paths(build_root, 'test', 'out')
 refdir = ''
 
 # Convenient testing libraries. An adhoc collection of
-# mpv objects that test_utils.c needs. Paths and subprocesses
-# are required in order to run a diff command when comparing
-# different files. Stuff will probably break if core things are
-# carelessly moved around.
+# mpv objects that test_utils.c needs. Stuff will probably
+# break if core things are carelessly moved around.
 test_utils_args = []
 test_utils_files = [
     'audio/chmap.c',
@@ -16,6 +14,7 @@ test_utils_files = [
     'misc/bstr.c',
     'misc/dispatch.c',
     'misc/json.c',
+    'misc/language.c',
     'misc/node.c',
     'misc/path_utils.c',
     'misc/random.c',
@@ -23,13 +22,9 @@ test_utils_files = [
     'options/m_config_core.c',
     'options/m_config_frontend.c',
     'options/m_option.c',
-    'options/path.c',
     'osdep/io.c',
-    'osdep/subprocess.c',
     'osdep/timer.c',
     timer_source,
-    path_source,
-    subprocess_source,
     'ta/ta.c',
     'ta/ta_talloc.c',
     'ta/ta_utils.c'
@@ -51,8 +46,9 @@ if not features['win32-threads']
 endif
 
 if features['win32-desktop']
-    test_utils_deps += cc.find_library('imm32')
-    test_utils_deps += cc.find_library('ntdll')
+    test_utils_deps += [cc.find_library('imm32'),
+                        cc.find_library('ntdll'),
+                        cc.find_library('pathcch')]
 endif
 test_utils_objects = libmpv.extract_objects(test_utils_files)
 test_utils = static_library('test-utils', 'test_utils.c', include_directories: incdir,
@@ -66,7 +62,6 @@ img_utils_files = [
     'video/fmt-conversion.c',
     'video/img_format.c',
     'video/mp_image.c',
-    'video/out/placebo/utils.c',
     'video/sws_utils.c'
 ]
 if features['zimg']
@@ -79,11 +74,9 @@ img_utils = static_library('img-utils', 'img_utils.c', include_directories: incd
 
 # The actual tests.
 chmap_files = [
-    'audio/chmap_sel.c'
+    'audio/chmap_avchannel.c',
+    'audio/chmap_sel.c',
 ]
-if features['av-channel-layout']
-    chmap_files += 'audio/chmap_avchannel.c'
-endif
 chmap_objects = libmpv.extract_objects(chmap_files)
 chmap = executable('chmap', 'chmap.c', include_directories: incdir,
                    dependencies: [libavutil], objects: chmap_objects,
@@ -109,6 +102,14 @@ test('timer', timer)
 format = executable('format', files('format.c'), include_directories: incdir, link_with: test_utils)
 test('format', format)
 
+language = executable('language', files('language.c'), include_directories: incdir, link_with: test_utils)
+test('language', language)
+
+codepoint_width = executable('codepoint-width', files('codepoint_width.c'),
+                             objects: libmpv.extract_objects('misc/codepoint_width.c'),
+                             include_directories: incdir, link_with: test_utils)
+test('codepoint-width', codepoint_width)
+
 paths_objects = libmpv.extract_objects('options/path.c', path_source)
 paths = executable('paths', 'paths.c', include_directories: incdir,
                    objects: paths_objects, link_with: test_utils)
@@ -118,18 +119,30 @@ if get_option('libmpv')
     exe = executable('libmpv-test', 'libmpv_test.c',
                      include_directories: incdir, link_with: libmpv)
     file = join_paths(source_root, 'etc', 'mpv-icon-8bit-16x16.png')
-    test('libmpv', exe, args: file, timeout: 60)
+    test('libmpv', exe, args: file, timeout: 60, should_fail: not features['lua'])
 
     exe = executable('libmpv-encode', 'libmpv_encode.c',
                      include_directories: incdir, link_with: libmpv)
     test('libmpv-encode', exe, timeout: 30)
+
+    mpvlib = libmpv
+    shared = get_option('default_library') == 'shared'
+    if get_option('default_library') == 'both'
+        mpvlib = libmpv.get_shared_lib()
+        shared = true
+    endif
+    if shared
+        exe = executable('libmpv-lifetime', sources: 'libmpv_lifetime.c',
+                         include_directories: incdir)
+        test('libmpv-lifetime', exe, depends: mpvlib)
+    endif
 endif
 
 # Supported libavutil versions that work with these tests.
 # Will need to be manually updated when ffmpeg adds/removes more formats in the future.
-if libavutil.version().version_compare('>= 59.0.100')
+if libavutil.version().version_compare('>= 59.0.100') and libavutil.version().version_compare('<= 59.39.100')
     refdir = join_paths(source_root, 'test', 'ref', 'ffmpeg7')
-elif libavutil.version().version_compare('>= 58.27.100')
+elif libavutil.version().version_compare('>= 58.27.100') and libavutil.version().version_compare('< 59.0.100')
     refdir = join_paths(source_root, 'test', 'ref', 'ffmpeg6')
 endif
 

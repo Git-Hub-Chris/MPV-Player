@@ -1,5 +1,6 @@
 -- Compatibility shim for lua 5.2/5.3
-unpack = unpack or table.unpack
+-- luacheck: globals unpack
+unpack = unpack or table.unpack -- luacheck: globals table.unpack
 
 -- these are used internally by lua.c
 mp.UNKNOWN_TYPE.info = "this value is inserted if the C type is not supported"
@@ -59,10 +60,10 @@ local function reserve_binding()
     return "__keybinding" .. tostring(message_id)
 end
 
-local function dispatch_key_binding(name, state, key_name, key_text)
+local function dispatch_key_binding(name, state, key_name, key_text, scale, arg)
     local fn = dispatch_key_bindings[name]
     if fn then
-        fn(name, state, key_name, key_text)
+        fn(name, state, key_name, key_text, scale, arg)
     end
 end
 
@@ -95,7 +96,7 @@ function mp.set_key_bindings(list, section, flags)
         local cb_up = entry[4]
         if type(cb) ~= "string" then
             local mangle = reserve_binding()
-            dispatch_key_bindings[mangle] = function(name, state)
+            dispatch_key_bindings[mangle] = function(_, state)
                 local event = state:sub(1, 1)
                 local is_mouse = state:sub(2, 2) == "m"
                 local def = (is_mouse and "u") or "d"
@@ -156,7 +157,7 @@ function mp.flush_keybindings()
             flags = "force"
         end
         local bindings = {}
-        for k, v in pairs(key_bindings) do
+        for _, v in pairs(key_bindings) do
             if v.bind and v.forced ~= def then
                 bindings[#bindings + 1] = v
             end
@@ -169,7 +170,6 @@ function mp.flush_keybindings()
             cfg = cfg .. v.bind .. "\n"
         end
         mp.input_define_section(section, cfg, flags)
-        -- TODO: remove the section if the script is stopped
         mp.input_enable_section(section, "allow-hide-cursor+allow-vo-dragging")
     end
 end
@@ -185,6 +185,7 @@ local function add_binding(attrs, key, name, fn, rp)
         name = reserve_binding()
     end
     local repeatable = rp == "repeatable" or rp["repeatable"]
+    local scalable = rp == "scalable" or rp["scalable"]
     if rp["forced"] then
         attrs.forced = true
     end
@@ -199,29 +200,33 @@ local function add_binding(attrs, key, name, fn, rp)
             ["r"] = "repeat",
             ["p"] = "press",
         }
-        key_cb = function(name, state, key_name, key_text)
+        key_cb = function(_, state, key_name, key_text, scale, arg)
             if key_text == "" then
                 key_text = nil
             end
             fn({
                 event = key_states[state:sub(1, 1)] or "unknown",
                 is_mouse = state:sub(2, 2) == "m",
+                canceled = state:sub(3, 3) == "c",
                 key_name = key_name,
                 key_text = key_text,
+                scale = tonumber(scale),
+                arg = arg,
             })
         end
         msg_cb = function()
             fn({event = "press", is_mouse = false})
         end
     else
-        key_cb = function(name, state)
+        key_cb = function(_, state)
             -- Emulate the same semantics as input.c uses for most bindings:
             -- For keyboard, "down" runs the command, "up" does nothing;
             -- for mouse, "down" does nothing, "up" runs the command.
             -- Also, key repeat triggers the binding again.
             local event = state:sub(1, 1)
             local is_mouse = state:sub(2, 2) == "m"
-            if event == "r" and not repeatable then
+            local canceled = state:sub(3, 3) == "c"
+            if canceled or event == "r" and not repeatable then
                 return
             end
             if is_mouse and (event == "u" or event == "p") then
@@ -232,8 +237,9 @@ local function add_binding(attrs, key, name, fn, rp)
         end
         msg_cb = fn
     end
+    local prefix = scalable and "" or " nonscalable"
     if key and #key > 0 then
-        attrs.bind = key .. " script-binding " .. mp.script_name .. "/" .. name
+        attrs.bind = key .. prefix .. " script-binding " .. mp.script_name .. "/" .. name
     end
     attrs.name = name
     -- new bindings override old ones (but do not overwrite them)
@@ -413,6 +419,10 @@ end
 -- used by default event loop (mp_event_loop()) to decide when to quit
 mp.keep_running = true
 
+function _G.exit()
+    mp.keep_running = false
+end
+
 local event_handlers = {}
 
 function mp.register_event(name, cb)
@@ -428,7 +438,7 @@ end
 function mp.unregister_event(cb)
     for name, sub in pairs(event_handlers) do
         local found = false
-        for i, e in ipairs(sub) do
+        for _, e in ipairs(sub) do
             if e == cb then
                 found = true
                 break
@@ -452,7 +462,7 @@ function mp.unregister_event(cb)
 end
 
 -- default handlers
-mp.register_event("shutdown", function() mp.keep_running = false end)
+mp.register_event("shutdown", exit)
 mp.register_event("client-message", message_dispatch)
 mp.register_event("property-change", property_change)
 

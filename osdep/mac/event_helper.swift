@@ -23,38 +23,44 @@ protocol EventSubscriber: AnyObject {
 }
 
 extension EventSubscriber {
-    var uid: Int { get { return Int(bitPattern: ObjectIdentifier(self)) }}
+    var uid: Int { return Int(bitPattern: ObjectIdentifier(self)) }
 }
 
 extension EventHelper {
-    typealias wakeup_cb = (@convention(c) (UnsafeMutableRawPointer?) -> Void)?
+    typealias WakeupCallback = (@convention(c) (UnsafeMutableRawPointer?) -> Void)?
 
     struct Event {
         var id: String {
-            get { name + (name.starts(with: "MPV_EVENT_") ? "" : String(format.rawValue)) }
+            return name + (name.starts(with: "MPV_EVENT_") ? "" : String(format.rawValue))
         }
         var idReset: String {
-            get { name + (name.starts(with: "MPV_EVENT_") ? "" : String(MPV_FORMAT_NONE.rawValue)) }
+            return name + (name.starts(with: "MPV_EVENT_") ? "" : String(MPV_FORMAT_NONE.rawValue))
         }
         let name: String
         let format: mpv_format
         let string: String?
         let bool: Bool?
+        let int: Int64?
         let double: Double?
+        let array: [Any?]
 
         init(
             name: String = "",
             format: mpv_format = MPV_FORMAT_NONE,
             string: String? = nil,
             bool: Bool? = nil,
-            double: Double? = nil
+            int: Int64? = nil,
+            double: Double? = nil,
+            array: [Any?] = []
 
         ) {
             self.name = name
             self.format = format
             self.string = string
             self.bool = bool
+            self.int = int
             self.double = double
+            self.array = array
         }
     }
 }
@@ -62,7 +68,7 @@ extension EventHelper {
 class EventHelper {
     unowned let appHub: AppHub
     var mpv: OpaquePointer?
-    var events: [String:[Int:EventSubscriber]] = [:]
+    var events: [String: [Int: EventSubscriber]] = [:]
 
     init?(_ appHub: AppHub, _ mpv: OpaquePointer) {
         if !appHub.isApplication {
@@ -75,7 +81,7 @@ class EventHelper {
         mpv_set_wakeup_callback(mpv, wakeup, TypeHelper.bridge(obj: self))
     }
 
-    func subscribe(_ subscriber: any EventSubscriber, event: Event) {
+    func subscribe(_ subscriber: EventSubscriber, event: Event) {
         guard let mpv = mpv else { return }
 
         if !event.name.isEmpty {
@@ -91,7 +97,7 @@ class EventHelper {
         }
     }
 
-    let wakeup: wakeup_cb = { ( ctx ) in
+    let wakeup: WakeupCallback = { ( ctx ) in
         let event = unsafeBitCast(ctx, to: EventHelper.self)
         DispatchQueue.main.async { event.eventLoop() }
     }
@@ -128,7 +134,7 @@ class EventHelper {
         let name = String(cString: property.name)
         let format = property.format
         for (_, subscriber) in events[name + String(format.rawValue)] ?? [:] {
-            var event: Event? = nil
+            var event: Event?
             switch format {
             case MPV_FORMAT_STRING:
                 event = .init(name: name, format: format, string: TypeHelper.toString(property.data))
@@ -136,6 +142,17 @@ class EventHelper {
                 event = .init(name: name, format: format, bool: TypeHelper.toBool(property.data))
             case MPV_FORMAT_DOUBLE:
                 event = .init(name: name, format: format, double: TypeHelper.toDouble(property.data))
+            case MPV_FORMAT_NODE:
+                let node = TypeHelper.toNode(property.data)
+                event = .init(
+                    name: name,
+                    format: format,
+                    string: TypeHelper.nodeToString(node),
+                    bool: TypeHelper.nodeToBool(node),
+                    int: TypeHelper.nodeToInt(node),
+                    double: TypeHelper.nodeToDouble(node),
+                    array: TypeHelper.nodeToArray(node)
+                )
             case MPV_FORMAT_NONE:
                 event = .init(name: name, format: format)
             default: break

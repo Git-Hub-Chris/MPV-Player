@@ -47,7 +47,7 @@ class LibmpvHelper {
                 mpv_render_param()
             ]
 
-            if (mpv_render_context_create(&mpvRenderContext, mpv, &params) < 0) {
+            if mpv_render_context_create(&mpvRenderContext, mpv, &params) < 0 {
                 log.error("Render context init has failed.")
                 exit(1)
             }
@@ -55,12 +55,8 @@ class LibmpvHelper {
     }
 
     let getProcAddress: (@convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Int8>?)
-                        -> UnsafeMutableRawPointer?) =
-    {
-        (ctx: UnsafeMutableRawPointer?, name: UnsafePointer<Int8>?)
-                        -> UnsafeMutableRawPointer? in
-        let symbol: CFString = CFStringCreateWithCString(
-                                kCFAllocatorDefault, name, kCFStringEncodingASCII)
+        -> UnsafeMutableRawPointer?) = { (_ ctx: UnsafeMutableRawPointer?, name: UnsafePointer<Int8>?) -> UnsafeMutableRawPointer? in
+        let symbol: CFString = CFStringCreateWithCString(kCFAllocatorDefault, name, kCFStringEncodingASCII)
         let identifier = CFBundleGetBundleWithIdentifier("com.apple.opengl" as CFString)
         let addr = CFBundleGetFunctionPointerForName(identifier, symbol)
 
@@ -128,7 +124,7 @@ class LibmpvHelper {
                     mpv_render_param(type: MPV_RENDER_PARAM_SKIP_RENDERING, data: pointers[3]),
                     mpv_render_param()
                 ]
-                mpv_render_context_render(mpvRenderContext, &params);
+                mpv_render_context_render(mpvRenderContext, &params)
             }
         } else {
             glClearColor(0, 0, 0, 1)
@@ -150,21 +146,11 @@ class LibmpvHelper {
             guard let baseAddress = ptr.baseAddress, ptr.count > 0 else { return }
 
             let u8Ptr = baseAddress.assumingMemoryBound(to: UInt8.self)
-            let iccBstr = bstrdup(nil, bstr(start: u8Ptr, len: ptr.count))
-            var icc = mpv_byte_array(data: iccBstr.start, size: iccBstr.len)
+            var icc = mpv_byte_array(data: u8Ptr, size: ptr.count)
             withUnsafeMutableBytes(of: &icc) { (ptr: UnsafeMutableRawBufferPointer) in
                 let params = mpv_render_param(type: MPV_RENDER_PARAM_ICC_PROFILE, data: ptr.baseAddress)
                 mpv_render_context_set_parameter(mpvRenderContext, params)
             }
-        }
-    }
-
-    func setRenderLux(_ lux: Int) {
-        if mpvRenderContext == nil { return }
-        var light = lux
-        withUnsafeMutableBytes(of: &light) { (ptr: UnsafeMutableRawBufferPointer) in
-            let params = mpv_render_param(type: MPV_RENDER_PARAM_AMBIENT_LIGHT, data: ptr.baseAddress)
-            mpv_render_context_set_parameter(mpvRenderContext, params)
         }
     }
 

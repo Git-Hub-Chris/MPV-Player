@@ -25,17 +25,17 @@
 #include "audio/out/ao_coreaudio_utils.h"
 #include "osdep/timer.h"
 #include "osdep/endian.h"
-#include "osdep/semaphore.h"
 #include "audio/format.h"
+#include "osdep/mac/compat.h"
 
-#if HAVE_COREAUDIO
+#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
 #include "audio/out/ao_coreaudio_properties.h"
 #include <CoreAudio/HostTime.h>
 #else
 #include <mach/mach_time.h>
 #endif
 
-#if HAVE_COREAUDIO
+#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
 static bool ca_is_output_device(struct ao *ao, AudioDeviceID dev)
 {
     size_t n_buffers;
@@ -98,7 +98,7 @@ OSStatus ca_select_device(struct ao *ao, char* name, AudioDeviceID *device)
         AudioObjectPropertyAddress p_addr = (AudioObjectPropertyAddress) {
             .mSelector = kAudioHardwarePropertyDeviceForUID,
             .mScope    = kAudioObjectPropertyScopeGlobal,
-            .mElement  = kAudioObjectPropertyElementMaster,
+            .mElement  = kAudioObjectPropertyElementMain,
         };
         err = AudioObjectGetPropertyData(
             kAudioObjectSystemObject, &p_addr, 0, 0, &size, &v);
@@ -236,20 +236,20 @@ void ca_print_asbd(struct ao *ao, const char *description,
     int mpfmt       = ca_asbd_to_mp_format(asbd);
 
     MP_VERBOSE(ao,
-       "%s %7.1fHz %" PRIu32 "bit %s "
-       "[%" PRIu32 "][%" PRIu32 "bpp][%" PRIu32 "fbp]"
-       "[%" PRIu32 "bpf][%" PRIu32 "ch] "
-       "%s %s %s%s%s%s (%s)\n",
-       description, asbd->mSampleRate, asbd->mBitsPerChannel, format,
-       asbd->mFormatFlags, asbd->mBytesPerPacket, asbd->mFramesPerPacket,
-       asbd->mBytesPerFrame, asbd->mChannelsPerFrame,
-       (flags & kAudioFormatFlagIsFloat) ? "float" : "int",
-       (flags & kAudioFormatFlagIsBigEndian) ? "BE" : "LE",
-       (flags & kAudioFormatFlagIsSignedInteger) ? "S" : "U",
-       (flags & kAudioFormatFlagIsPacked) ? " packed" : "",
-       (flags & kAudioFormatFlagIsAlignedHigh) ? " aligned" : "",
-       (flags & kAudioFormatFlagIsNonInterleaved) ? " P" : "",
-       mpfmt ? af_fmt_to_str(mpfmt) : "-");
+        "%s %7.1fHz %" PRIu32 "bit %s "
+        "[%" PRIu32 "][%" PRIu32 "bpp][%" PRIu32 "fbp]"
+        "[%" PRIu32 "bpf][%" PRIu32 "ch] "
+        "%s %s %s%s%s%s (%s)\n",
+        description, asbd->mSampleRate, asbd->mBitsPerChannel, format,
+        asbd->mFormatFlags, asbd->mBytesPerPacket, asbd->mFramesPerPacket,
+        asbd->mBytesPerFrame, asbd->mChannelsPerFrame,
+        (flags & kAudioFormatFlagIsFloat) ? "float" : "int",
+        (flags & kAudioFormatFlagIsBigEndian) ? "BE" : "LE",
+        (flags & kAudioFormatFlagIsSignedInteger) ? "S" : "U",
+        (flags & kAudioFormatFlagIsPacked) ? " packed" : "",
+        (flags & kAudioFormatFlagIsAlignedHigh) ? " aligned" : "",
+        (flags & kAudioFormatFlagIsNonInterleaved) ? " P" : "",
+        mpfmt ? af_fmt_to_str(mpfmt) : "-");
 }
 
 // Return whether new is an improvement over old. Assume a higher value means
@@ -300,7 +300,7 @@ int64_t ca_frames_to_ns(struct ao *ao, uint32_t frames)
 
 int64_t ca_get_latency(const AudioTimeStamp *ts)
 {
-#if HAVE_COREAUDIO
+#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
     uint64_t out = AudioConvertHostTimeToNanos(ts->mHostTime);
     uint64_t now = AudioConvertHostTimeToNanos(AudioGetCurrentHostTime());
 
@@ -323,7 +323,7 @@ int64_t ca_get_latency(const AudioTimeStamp *ts)
 #endif
 }
 
-#if HAVE_COREAUDIO
+#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
 bool ca_stream_supports_compressed(struct ao *ao, AudioStreamID stream)
 {
     AudioStreamRangedDescription *formats = NULL;
@@ -378,7 +378,7 @@ static OSStatus ca_change_mixing(struct ao *ao, AudioDeviceID device,
     AudioObjectPropertyAddress p_addr = (AudioObjectPropertyAddress) {
         .mSelector = kAudioDevicePropertySupportsMixing,
         .mScope    = kAudioObjectPropertyScopeGlobal,
-        .mElement  = kAudioObjectPropertyElementMaster,
+        .mElement  = kAudioObjectPropertyElementMain,
     };
 
     if (AudioObjectHasProperty(device, &p_addr)) {
@@ -442,12 +442,14 @@ int64_t ca_get_device_latency_ns(struct ao *ao, AudioDeviceID device)
         }
     }
 
-    double sample_rate = ao->samplerate;
+    double sample_rate;
     OSStatus err = CA_GET_O(device, kAudioDevicePropertyNominalSampleRate,
                             &sample_rate);
     CHECK_CA_WARN("cannot get device sample rate, falling back to AO sample rate!");
     if (err == noErr) {
         MP_VERBOSE(ao, "Device sample rate: %f\n", sample_rate);
+    } else {
+        sample_rate = ao->samplerate;
     }
 
     return MP_TIME_S_TO_NS(latency_frames / sample_rate);
@@ -458,22 +460,22 @@ static OSStatus ca_change_format_listener(
     const AudioObjectPropertyAddress addresses[],
     void *data)
 {
-    mp_sem_t *sem = data;
-    mp_sem_post(sem);
+    struct coreaudio_cb_sem *sem = data;
+    mp_mutex_lock(&sem->mutex);
+    mp_cond_broadcast(&sem->cond);
+    mp_mutex_unlock(&sem->mutex);
     return noErr;
 }
 
 bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
                                     AudioStreamBasicDescription change_format)
 {
+    struct coreaudio_cb_sem *sem = ao->priv;
+
     OSStatus err = noErr;
     bool format_set = false;
 
     ca_print_asbd(ao, "setting stream physical format:", &change_format);
-
-    mp_sem_t wakeup;
-    if (mp_sem_init(&wakeup, 0, 0))
-        MP_HANDLE_OOM(0);
 
     AudioStreamBasicDescription prev_format;
     err = CA_GET(stream, kAudioStreamPropertyPhysicalFormat, &prev_format);
@@ -485,13 +487,15 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
     AudioObjectPropertyAddress p_addr = {
         .mSelector = kAudioStreamPropertyPhysicalFormat,
         .mScope    = kAudioObjectPropertyScopeGlobal,
-        .mElement  = kAudioObjectPropertyElementMaster,
+        .mElement  = kAudioObjectPropertyElementMain,
     };
 
     err = AudioObjectAddPropertyListener(stream, &p_addr,
                                          ca_change_format_listener,
-                                         &wakeup);
+                                         sem);
     CHECK_CA_ERROR("can't add property listener during format change");
+
+    mp_mutex_lock(&sem->mutex);
 
     /* Change the format. */
     err = CA_SET(stream, kAudioStreamPropertyPhysicalFormat, &change_format);
@@ -510,11 +514,13 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
         if (format_set)
             break;
 
-        if (mp_sem_timedwait(&wakeup, wait_until)) {
+        if (mp_cond_timedwait_until(&sem->cond, &sem->mutex, wait_until)) {
             MP_VERBOSE(ao, "reached timeout\n");
             break;
         }
     }
+
+    mp_mutex_unlock(&sem->mutex);
 
     ca_print_asbd(ao, "actual format in use:", &actual_format);
 
@@ -528,11 +534,10 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
 
     err = AudioObjectRemovePropertyListener(stream, &p_addr,
                                             ca_change_format_listener,
-                                            &wakeup);
+                                            sem);
     CHECK_CA_ERROR("can't remove property listener");
 
 coreaudio_error:
-    mp_sem_destroy(&wakeup);
     return format_set;
 }
 #endif

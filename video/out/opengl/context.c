@@ -57,11 +57,13 @@ const struct m_sub_options opengl_conf = {
     .opts = (const struct m_option[]) {
         {"opengl-glfinish", OPT_BOOL(use_glfinish)},
         {"opengl-waitvsync", OPT_BOOL(waitvsync)},
-        {"opengl-swapinterval", OPT_INT(swapinterval)},
+        {"opengl-swapinterval", OPT_INT(swapinterval), .flags = UPDATE_VO},
         {"opengl-check-pattern-a", OPT_INT(vsync_pattern[0])},
         {"opengl-check-pattern-b", OPT_INT(vsync_pattern[1])},
         {"opengl-es", OPT_CHOICE(gles_mode,
-            {"auto", GLES_AUTO}, {"yes", GLES_YES}, {"no", GLES_NO})},
+            {"auto", GLES_AUTO}, {"yes", GLES_YES}, {"no", GLES_NO}),
+            .flags = UPDATE_VO,
+        },
         {"opengl-early-flush", OPT_CHOICE(early_flush,
             {"no", FLUSH_NO}, {"yes", FLUSH_YES}, {"auto", FLUSH_AUTO})},
         {0},
@@ -270,7 +272,7 @@ static void check_pattern(struct priv *p, int item)
         p->matches++;
     } else {
         p->mismatches++;
-        MP_WARN(p, "wrong pattern, expected %d got %d (hit: %d, mis: %d)\n",
+        MP_WARN(p, "wrong pattern, expected %d got %d (hit: %d, miss: %d)\n",
                 expected, item, p->matches, p->mismatches);
     }
 }

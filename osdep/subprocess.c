@@ -21,10 +21,6 @@
 
 #include "subprocess.h"
 
-void mp_devnull(void *ctx, char *data, size_t size)
-{
-}
-
 const char *mp_subprocess_err_str(int num)
 {
     // Note: these are visible to the public client API
@@ -35,5 +31,21 @@ const char *mp_subprocess_err_str(int num)
     case MP_SUBPROCESS_EUNSUPPORTED:    return "unsupported";
     case MP_SUBPROCESS_EGENERIC:        // fall through
     default:                            return "unknown";
+    }
+}
+
+void mp_subprocess(struct mp_log *log,
+                   struct mp_subprocess_opts *opts,
+                   struct mp_subprocess_result *res)
+{
+    mp_verbose(log, "Starting subprocess: [%s", opts->args[0]);
+    char **arg = &opts->args[1];
+    while (*arg)
+        mp_verbose(log, ", %s", *arg++);
+    mp_verbose(log, "]\n");
+    mp_subprocess2(opts, res);
+    if (res->error < 0) {
+        int lev = res->error == MP_SUBPROCESS_EKILLED_BY_US ? MSGL_V : MSGL_ERR;
+        mp_msg(log, lev, "Subprocess failed: %s\n", mp_subprocess_err_str(res->error));
     }
 }

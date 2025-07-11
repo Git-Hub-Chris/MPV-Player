@@ -19,20 +19,21 @@ import Cocoa
 
 class View: NSView, CALayerDelegate {
     unowned var common: Common
-    var input: InputHelper? { get { return common.input } }
+    var input: InputHelper? { return common.input }
 
     var tracker: NSTrackingArea?
     var hasMouseDown: Bool = false
+    var lastMouseDownEvent: NSEvent?
 
     override var isFlipped: Bool { return true }
     override var acceptsFirstResponder: Bool { return true }
-
 
     init(frame: NSRect, common com: Common) {
         common = com
         super.init(frame: frame)
         autoresizingMask = [.width, .height]
         wantsBestResolutionOpenGLSurface = true
+        wantsExtendedDynamicRangeOpenGLSurface = true
         registerForDraggedTypes([ .fileURL, .URL, .string ])
     }
 
@@ -65,9 +66,10 @@ class View: NSView, CALayerDelegate {
     }
 
     func isURL(_ str: String) -> Bool {
-        // force unwrapping is fine here, regex is guaranteed to be valid
-        let regex = try! NSRegularExpression(pattern: "^(https?|ftp)://[^\\s/$.?#].[^\\s]*$",
-                                             options: .caseInsensitive)
+        guard let regex = try? NSRegularExpression(pattern: "^(https?|ftp)://[^\\s/$.?#].[^\\s]*$",
+                                                   options: .caseInsensitive) else {
+            return false
+        }
         let isURL = regex.numberOfMatches(in: str,
                                      options: [],
                                        range: NSRange(location: 0, length: str.count))
@@ -136,6 +138,7 @@ class View: NSView, CALayerDelegate {
     override func mouseDown(with event: NSEvent) {
         hasMouseDown = event.clickCount <= 1
         input?.processMouse(event: event)
+        lastMouseDownEvent = event
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -175,7 +178,6 @@ class View: NSView, CALayerDelegate {
         point = convertToBacking(point)
         point.y = -point.y
 
-        common.window?.updateMovableBackground(point)
         if !(common.window?.isMoving ?? false) {
             input?.setMouse(position: point)
         }

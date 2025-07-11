@@ -76,7 +76,7 @@ struct mux_stream {
 #define OPT_BASE_STRUCT struct encode_opts
 const struct m_sub_options encode_config = {
     .opts = (const m_option_t[]) {
-        {"o", OPT_STRING(file), .flags = CONF_NOCFG | CONF_PRE_PARSE | M_OPT_FILE},
+        {"o", OPT_STRING(file), .flags = M_OPT_NOCFG | M_OPT_PRE_PARSE | M_OPT_FILE},
         {"of", OPT_STRING(format)},
         {"ofopts", OPT_KEYVALUELIST(fopts), .flags = M_OPT_HAVE_HELP},
         {"ovc", OPT_STRING(vcodec)},
@@ -116,12 +116,6 @@ struct encode_lavc_context *encode_lavc_init(struct mpv_global *global)
     // ffmpeg.c works around this too, the same way
     if (!strcmp(filename, "-"))
         filename = "pipe:1";
-
-    if (filename && (
-            !strcmp(filename, "/dev/stdout") ||
-            !strcmp(filename, "pipe:") ||
-            !strcmp(filename, "pipe:1")))
-        mp_msg_force_stderr(global, true);
 
     encode_lavc_discontinuity(ctx);
 
@@ -378,7 +372,7 @@ static void encode_lavc_add_stream(struct encoder_context *enc,
         dst->st->sample_aspect_ratio = info->codecpar->sample_aspect_ratio;
 
     if (avcodec_parameters_copy(dst->st->codecpar, info->codecpar) < 0)
-        MP_HANDLE_OOM(0);
+        MP_HANDLE_OOM(NULL);
 
     dst->on_ready = on_ready;
     dst->on_ready_ctx = on_ready_ctx;
@@ -552,7 +546,7 @@ bool encode_lavc_showhelp(struct mp_log *log, struct encode_opts *opts)
         encode_lavc_printoptions(log, c, "  --ofopts=", "           ", NULL,
                                  AV_OPT_FLAG_ENCODING_PARAM,
                                  AV_OPT_FLAG_ENCODING_PARAM);
-        av_free(c);
+        avformat_free_context(c);
         void *iter = NULL;
         while ((format = av_muxer_iterate(&iter))) {
             if (format->priv_class) {
@@ -944,6 +938,19 @@ fail:
     MP_ERR(p, "error encoding at %s\n",
            frame ? av_ts2timestr(frame->pts, &p->encoder->time_base) : "EOF");
     return false;
+}
+
+void encoder_update_log(struct mpv_global *global)
+{
+    struct encode_opts *options = mp_get_config_group(NULL, global, &encode_config);
+    if (options->file && (!strcmp(options->file, "-") ||
+                          !strcmp(options->file, "/dev/stdout") ||
+                          !strcmp(options->file, "pipe:") ||
+                          !strcmp(options->file, "pipe:1")))
+    {
+        mp_msg_force_stderr(global, true);
+    }
+    talloc_free(options);
 }
 
 // vim: ts=4 sw=4 et

@@ -20,8 +20,14 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <sys/types.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 // Stolen from osdep/compiler.h
 #ifdef __GNUC__
@@ -47,7 +53,7 @@ static void exit_cleanup(void)
 {
     if (ctx)
         mpv_destroy(ctx);
-    if (out_path)
+    if (out_path && *out_path)
         unlink(out_path);
 }
 
@@ -81,18 +87,19 @@ static void wait_done(void)
     }
 }
 
-static void check_output(int fd)
+static void check_output(FILE *fp)
 {
-    off_t size = lseek(fd, 0, SEEK_END);
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
     if (size < 100)
-        fail("did not encode anything");
+        fail("did not encode anything\n");
 
-    char magic[4] = {0};
-    lseek(fd, 0, SEEK_SET);
-    read(fd, magic, sizeof(magic));
+    char magic[4];
+    fseek(fp, 0, SEEK_SET);
+    size_t ret = fread(magic, sizeof(magic), 1, fp);
     static const char ebml_magic[] = {26, 69, 223, 163};
-    if (memcmp(magic, ebml_magic, 4) != 0)
-        fail("output was not Matroska");
+    if (ret != 1 || memcmp(magic, ebml_magic, sizeof(magic)) != 0)
+        fail("output was not Matroska\n");
 
     puts("output file ok");
 }
@@ -105,23 +112,28 @@ int main(int argc, char *argv[])
     if (!ctx)
         return 1;
 
-    int fd;
-    {
-        char path[] = "./testout.XXXXXX";
-        fd = mkstemp(path);
-        if (fd == -1)
-            fail("mkstemp failed");
-        out_path = strdup(path);
-    }
+    static char path[] = "./testout.XXXXXX";
+
+#ifdef _WIN32
+    out_path = _mktemp(path);
+    if (!out_path || !*out_path)
+        fail("tmpfile failed\n");
+#else
+    int fd = mkstemp(path);
+    if (fd == -1)
+        fail("tmpfile failed\n");
+    out_path = path;
+#endif
+
     check_api_error(mpv_set_option_string(ctx, "o", out_path));
     check_api_error(mpv_set_option_string(ctx, "of", "matroska"));
     check_api_error(mpv_set_option_string(ctx, "end", "1.5"));
+    check_api_error(mpv_set_option_string(ctx, "terminal", "yes"));
+    check_api_error(mpv_set_option_string(ctx, "msg-level", "all=v"));
 
     if (mpv_initialize(ctx) != 0)
         return 1;
 
-    check_api_error(mpv_set_option_string(ctx, "terminal", "yes"));
-    check_api_error(mpv_set_option_string(ctx, "msg-level", "all=v"));
     check_api_error(mpv_set_option_string(ctx, "idle", "once"));
 
     const char *cmd[] = {"loadfile", "av://lavfi:testsrc", NULL};
@@ -131,8 +143,11 @@ int main(int argc, char *argv[])
     mpv_destroy(ctx);
     ctx = NULL;
 
-    check_output(fd);
-    close(fd);
+    FILE *output = fopen(out_path, "rb");
+    if (!output)
+        fail("output file doesn't exist\n");
+    check_output(output);
+    fclose(output);
 
     return 0;
 }

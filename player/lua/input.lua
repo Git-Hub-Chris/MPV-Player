@@ -18,18 +18,23 @@ License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
 local utils = require "mp.utils"
 local input = {}
 
-function input.get(t)
-    mp.commandv("script-message-to", "console", "get-input",
-                mp.get_script_name(), utils.format_json({
-                    prompt = t.prompt,
-                    default_text = t.default_text,
-                    cursor_position = t.cursor_position,
-                    id = t.id,
-                }))
+local function get_non_callbacks(t)
+    local non_callbacks = {}
 
-    mp.register_script_message("input-event", function (type, text, cursor_position)
+    for key, value in pairs(t) do
+        if type(value) ~= "function" then
+            non_callbacks[key] = value
+        end
+    end
+
+    return non_callbacks
+end
+
+local function register_event_handler(t)
+    mp.register_script_message("input-event", function (type, args)
         if t[type] then
-            local suggestions, completion_start_position = t[type](text, cursor_position)
+            local suggestions, completion_start_position =
+                t[type](unpack(utils.parse_json(args or "") or {}))
 
             if type == "complete" and suggestions then
                 mp.commandv("script-message-to", "console", "complete",
@@ -41,9 +46,16 @@ function input.get(t)
             mp.unregister_script_message("input-event")
         end
     end)
-
-    return true
 end
+
+function input.get(t)
+    mp.commandv("script-message-to", "console", "get-input",
+                mp.get_script_name(), utils.format_json(get_non_callbacks(t)))
+
+    register_event_handler(t)
+end
+
+input.select = input.get
 
 function input.terminate()
     mp.commandv("script-message-to", "console", "disable")

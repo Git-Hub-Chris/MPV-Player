@@ -20,13 +20,18 @@ import os
 
 class LogHelper {
     var log: OpaquePointer?
-    let logger = Logger(subsystem: "io.mpv", category: "mpv")
+#if HAVE_MACOS_11_FEATURES
+    @available(macOS 11.0, *)
+    var logger: Logger? {
+        return Logger(subsystem: "io.mpv", category: "mpv")
+    }
+#endif
 
-    let loggerMapping: [Int:OSLogType] = [
+    let loggerMapping: [Int: OSLogType] = [
         MSGL_V: .debug,
         MSGL_INFO: .info,
         MSGL_WARN: .error,
-        MSGL_ERR: .fault,
+        MSGL_ERR: .fault
     ]
 
     init(_ log: OpaquePointer? = nil) {
@@ -51,7 +56,11 @@ class LogHelper {
 
     func send(message: String, type: Int) {
         guard let log = log else {
-            logger.log(level: loggerMapping[type] ?? .default, "\(message, privacy: .public)")
+#if HAVE_MACOS_11_FEATURES
+        if #available(macOS 11.0, *) {
+            logger?.log(level: loggerMapping[type] ?? .default, "\(message, privacy: .public)")
+        }
+#endif
             return
         }
 

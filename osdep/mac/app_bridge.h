@@ -35,6 +35,57 @@ enum {
     RENDER_TIMER_PRECISE,
 };
 
+enum {
+    MAC_APPEAR_AUTO = 0,
+    MAC_APPEAR_AQUA,
+    MAC_APPEAR_DARK_AQUA,
+    MAC_APPEAR_VIBRANT_LIGHT,
+    MAC_APPEAR_VIBRANT_DARK,
+    MAC_APPEAR_AQUA_HC,
+    MAC_APPEAR_DARK_AQUA_HC,
+    MAC_APPEAR_VIBRANT_LIGHT_HC,
+    MAC_APPEAR_VIBRANT_DARK_HC,
+};
+
+enum {
+    MAC_MAT_TITLEBAR = 0,
+    MAC_MAT_SELECTION,
+    MAC_MAT_MENU,
+    MAC_MAT_POPOVER,
+    MAC_MAT_SIDEBAR,
+    MAC_MAT_HEADER_VIEW,
+    MAC_MAT_SHEET,
+    MAC_MAT_WINDOW_BACKGROUND,
+    MAC_MAT_HUD_WINDOW,
+    MAC_MAT_FULL_SCREEN,
+    MAC_MAT_TOOL_TIP,
+    MAC_MAT_CONTENT_BACKGROUND,
+    MAC_MAT_UNDER_WINDOW_BACKGROUND,
+    MAC_MAT_UNDER_PAGE_BACKGROUND,
+    MAC_MAT_DARK,
+    MAC_MAT_LIGHT,
+    MAC_MAT_MEDIUM_LIGHT,
+    MAC_MAT_ULTRA_DARK,
+};
+
+enum {
+    MAC_CSP_AUTO = -1,
+    MAC_CSP_DISPLAY_P3,
+    MAC_CSP_DISPLAY_P3_HLG,
+    MAC_CSP_DISPLAY_P3_PQ,
+    MAC_CSP_DISPLAY_P3_LINEAR,
+    MAC_CSP_DCI_P3,
+    MAC_CSP_BT_2020,
+    MAC_CSP_BT_2020_LINEAR,
+    MAC_CSP_BT_2100_HLG,
+    MAC_CSP_BT_2100_PQ,
+    MAC_CSP_BT_709,
+    MAC_CSP_SRGB,
+    MAC_CSP_SRGB_LINEAR,
+    MAC_CSP_RGB_LINEAR,
+    MAC_CSP_ADOBE,
+};
+
 struct macos_opts {
     int macos_title_bar_appearance;
     int macos_title_bar_material;
@@ -44,8 +95,11 @@ struct macos_opts {
     int macos_app_activation_policy;
     int macos_geometry_calculation;
     int macos_render_timer;
+    bool macos_menu_shortcuts;
+    char **macos_bundle_path;
     int cocoa_cb_sw_renderer;
     bool cocoa_cb_10bit_context;
+    int cocoa_cb_output_csp;
 };
 
 void cocoa_init_media_keys(void);

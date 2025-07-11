@@ -23,12 +23,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include "libmpv/client.h"
 
 #include "common/common.h"
-#include "common/global.h"
 #include "common/msg_control.h"
 #include "common/msg.h"
 #include "m_config_frontend.h"
@@ -80,7 +78,6 @@ static void list_profiles(struct m_config *config)
     MP_INFO(config, "Available profiles:\n");
     for (struct m_profile *p = config->profiles; p; p = p->next)
         MP_INFO(config, "\t%s\t%s\n", p->name, p->desc ? p->desc : "");
-    MP_INFO(config, "\n");
 }
 
 static int show_profile(struct m_config *config, bstr param)
@@ -121,8 +118,6 @@ static int show_profile(struct m_config *config, bstr param)
         }
     }
     config->profile_depth--;
-    if (!config->profile_depth)
-        MP_INFO(config, "\n");
     return M_OPT_EXIT;
 }
 
@@ -303,7 +298,9 @@ static struct m_config_option *m_config_get_co_any(const struct m_config *config
 
     const char *prefix = config->is_toplevel ? "--" : "";
     if (co->opt->type == &m_option_type_alias) {
-        const char *alias = (const char *)co->opt->priv;
+        char buf[M_CONFIG_MAX_OPT_NAME_LEN];
+        const char *alias = m_config_shadow_get_alias_from_opt(config->shadow, co->opt_id,
+                                                               buf, sizeof(buf));
         if (co->opt->deprecation_message && !co->warning_was_printed) {
             if (co->opt->deprecation_message[0]) {
                 MP_WARN(config, "Warning: option %s%s was replaced with "
@@ -664,10 +661,13 @@ static struct m_config_option *m_config_mogrify_cli_opt(struct m_config *config,
     bstr no_name = *name;
     if (!co && bstr_eatstart0(&no_name, "no-")) {
         co = m_config_get_co(config, no_name);
+        if (!co)
+            return NULL;
 
         // Not all choice types have this value - if they don't, then parsing
         // them will simply result in an error. Good enough.
-        if (!co || !(co->opt->type->flags & M_OPT_TYPE_CHOICE))
+        if (!(co->opt->type->flags & M_OPT_TYPE_CHOICE) &&
+            !(co->opt->flags & M_OPT_ALLOW_NO))
             return NULL;
 
         *name = no_name;
@@ -882,8 +882,12 @@ void m_config_print_option_list(const struct m_config *config, const char *name)
             MP_INFO(config, " [file]");
         if (opt->deprecation_message)
             MP_INFO(config, " [deprecated]");
-        if (opt->type == &m_option_type_alias)
-            MP_INFO(config, " for %s", (char *)opt->priv);
+        if (opt->type == &m_option_type_alias) {
+            char buf[M_CONFIG_MAX_OPT_NAME_LEN];
+            const char *alias = m_config_shadow_get_alias_from_opt(config->shadow, co->opt_id,
+                                                                   buf, sizeof(buf));
+            MP_INFO(config, " for %s", alias);
+        }
         if (opt->type == &m_option_type_cli_alias)
             MP_INFO(config, " for --%s (CLI/config files only)", (char *)opt->priv);
         MP_INFO(config, "\n");
@@ -991,6 +995,11 @@ static struct m_profile *find_check_profile(struct m_config *config, char *name)
 
 int m_config_set_profile(struct m_config *config, char *name, int flags)
 {
+    if ((flags & M_SETOPT_FROM_CONFIG_FILE) && !strcmp(name, "default")) {
+        MP_WARN(config, "Ignoring profile=%s from config file.\n", name);
+        return 0;
+    }
+
     MP_VERBOSE(config, "Applying profile '%s'...\n", name);
     struct m_profile *p = find_check_profile(config, name);
     if (!p)
@@ -1041,7 +1050,7 @@ int m_config_restore_profile(struct m_config *config, char *name)
 void m_config_finish_default_profile(struct m_config *config, int flags)
 {
     struct m_profile *p = m_config_add_profile(config, NULL);
-    m_config_set_profile(config, p->name, flags);
+    m_config_set_profile(config, p->name, flags & ~M_SETOPT_FROM_CONFIG_FILE);
     p->num_opts = 0;
 }
 

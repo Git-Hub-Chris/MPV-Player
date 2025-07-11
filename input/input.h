@@ -102,6 +102,16 @@ void mp_input_set_mouse_pos_artificial(struct input_ctx *ictx, int x, int y);
 
 void mp_input_get_mouse_pos(struct input_ctx *ictx, int *x, int *y, int *hover);
 
+// Add/Update/Remove a touch point (in window coordinates).
+void mp_input_add_touch_point(struct input_ctx *ictx, int id, int x, int y);
+void mp_input_update_touch_point(struct input_ctx *ictx, int id, int x, int y);
+void mp_input_remove_touch_point(struct input_ctx *ictx, int id);
+
+// Get the positions of the touch points. xs and ys are arrays of at least
+// count elements. ids is an array of at least count elements to uniquely
+// identify touch points. Return the current number of touch points.
+int mp_input_get_touch_pos(struct input_ctx *ictx, int count, int *xs, int *ys, int *ids);
+
 // Return whether we want/accept mouse input.
 bool mp_input_mouse_enabled(struct input_ctx *ictx);
 
@@ -205,8 +215,9 @@ bool mp_input_use_media_keys(struct input_ctx *ictx);
 // Like mp_input_parse_cmd_strv, but also run the command.
 void mp_input_run_cmd(struct input_ctx *ictx, const char **cmd);
 
-// Binds a command to a key.
-void mp_input_bind_key(struct input_ctx *ictx, int key, bstr command);
+// Binds a command to a key. Returns true if the bind is successful.
+bool mp_input_bind_key(struct input_ctx *ictx, const char *key, bstr command,
+                       const char *desc);
 
 void mp_input_set_repeat_info(struct input_ctx *ictx, int rate, int delay);
 

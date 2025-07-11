@@ -21,6 +21,7 @@
 #include <libavutil/mem.h>
 #include <libavutil/common.h>
 #include <libavutil/display.h>
+#include <libavutil/dovi_meta.h>
 #include <libavutil/bswap.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/intreadwrite.h>
@@ -28,10 +29,6 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libplacebo/utils/libav.h>
-
-#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 16, 100)
-# include <libavutil/dovi_meta.h>
-#endif
 
 #include "mpv_talloc.h"
 
@@ -491,7 +488,12 @@ void mp_image_copy(struct mp_image *dst, struct mp_image *src)
 static enum pl_color_system mp_image_params_get_forced_csp(struct mp_image_params *params)
 {
     int imgfmt = params->hw_subfmt ? params->hw_subfmt : params->imgfmt;
-    return mp_imgfmt_get_forced_csp(imgfmt);
+    enum pl_color_system csp = mp_imgfmt_get_forced_csp(imgfmt);
+
+    if (csp == PL_COLOR_SYSTEM_RGB && params->repr.sys == PL_COLOR_SYSTEM_XYZ)
+        csp = PL_COLOR_SYSTEM_XYZ;
+
+    return csp;
 }
 
 static void assign_bufref(AVBufferRef **dst, AVBufferRef *new)
@@ -522,6 +524,9 @@ void mp_image_copy_attributes(struct mp_image *dst, struct mp_image *src)
     dst->params.chroma_location = src->params.chroma_location;
     dst->params.crop = src->params.crop;
     dst->nominal_fps = src->nominal_fps;
+    dst->params.primaries_orig = src->params.primaries_orig;
+    dst->params.transfer_orig = src->params.transfer_orig;
+    dst->params.sys_orig = src->params.sys_orig;
 
     // ensure colorspace consistency
     enum pl_color_system dst_forced_csp = mp_image_params_get_forced_csp(&dst->params);
@@ -851,6 +856,36 @@ bool mp_image_params_static_equal(const struct mp_image_params *p1,
     return mp_image_params_equal(&a, &b);
 }
 
+void mp_image_params_update_dynamic(struct mp_image_params *dst,
+                                    const struct mp_image_params *src,
+                                    bool has_peak_detect_values)
+{
+    dst->repr.dovi = src->repr.dovi;
+    // Don't overwrite peak-detected HDR metadata if available.
+    float max_pq_y = dst->color.hdr.max_pq_y;
+    float avg_pq_y = dst->color.hdr.avg_pq_y;
+    dst->color.hdr = src->color.hdr;
+    if (has_peak_detect_values) {
+        dst->color.hdr.max_pq_y = max_pq_y;
+        dst->color.hdr.avg_pq_y = avg_pq_y;
+    }
+}
+
+// Restore color system, transfer, and primaries to their original values
+// before dovi mapping.
+void mp_image_params_restore_dovi_mapping(struct mp_image_params *params)
+{
+    if (params->repr.sys != PL_COLOR_SYSTEM_DOLBYVISION)
+        return;
+    params->color.primaries = params->primaries_orig;
+    params->color.transfer = params->transfer_orig;
+    params->repr.sys = params->sys_orig;
+    if (!pl_color_transfer_is_hdr(params->transfer_orig))
+        params->color.hdr = (struct pl_hdr_metadata){0};
+    if (params->transfer_orig != PL_COLOR_TRC_PQ)
+        params->color.hdr.max_pq_y = params->color.hdr.avg_pq_y = 0;
+}
+
 // Set most image parameters, but not image format or size.
 // Display size is used to set the PAR.
 void mp_image_set_attributes(struct mp_image *image,
@@ -1031,17 +1066,10 @@ struct mp_image *mp_image_from_av_frame(struct AVFrame *src)
     dst->params.crop.y1 = src->height - src->crop_bottom;
 
     dst->fields = 0;
-#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(58, 7, 100)
     if (src->flags & AV_FRAME_FLAG_INTERLACED)
         dst->fields |= MP_IMGFIELD_INTERLACED;
     if (src->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST)
         dst->fields |= MP_IMGFIELD_TOP_FIRST;
-#else
-    if (src->interlaced_frame)
-        dst->fields |= MP_IMGFIELD_INTERLACED;
-    if (src->top_field_first)
-        dst->fields |= MP_IMGFIELD_TOP_FIRST;
-#endif
     if (src->repeat_pict == 1)
         dst->fields |= MP_IMGFIELD_REPEAT_FIRST;
 
@@ -1089,8 +1117,10 @@ struct mp_image *mp_image_from_av_frame(struct AVFrame *src)
     if (sd)
         dst->a53_cc = sd->buf;
 
+    dst->params.primaries_orig = dst->params.color.primaries;
+    dst->params.transfer_orig = dst->params.color.transfer;
+    dst->params.sys_orig = dst->params.repr.sys;
     AVBufferRef *dovi = NULL;
-#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 16, 100)
     sd = av_frame_get_side_data(src, AV_FRAME_DATA_DOVI_METADATA);
     if (sd) {
 #ifdef PL_HAVE_LAV_DOLBY_VISION
@@ -1116,12 +1146,9 @@ struct mp_image *mp_image_from_av_frame(struct AVFrame *src)
 
     sd = av_frame_get_side_data(src, AV_FRAME_DATA_DOVI_RPU_BUFFER);
     if (sd) {
-#ifdef PL_HAVE_LIBDOVI
         pl_hdr_metadata_from_dovi_rpu(&dst->params.color.hdr, sd->buf->data,
                                       sd->buf->size);
-#endif
     }
-#endif
 
     sd = av_frame_get_side_data(src, AV_FRAME_DATA_FILM_GRAIN_PARAMS);
     if (sd)
@@ -1189,27 +1216,23 @@ struct AVFrame *mp_image_to_av_frame(struct mp_image *src)
     dst->extended_data = dst->data;
 
     dst->pict_type = src->pict_type;
-#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(58, 7, 100)
     if (src->fields & MP_IMGFIELD_INTERLACED)
         dst->flags |= AV_FRAME_FLAG_INTERLACED;
     if (src->fields & MP_IMGFIELD_TOP_FIRST)
         dst->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
-#else
-    if (src->fields & MP_IMGFIELD_INTERLACED)
-        dst->interlaced_frame = 1;
-    if (src->fields & MP_IMGFIELD_TOP_FIRST)
-        dst->top_field_first = 1;
-#endif
     if (src->fields & MP_IMGFIELD_REPEAT_FIRST)
         dst->repeat_pict = 1;
 
-    pl_avframe_set_repr(dst, src->params.repr);
+    // Image params without dovi mapped; should be passed as side data instead
+    struct mp_image_params params = src->params;
+    mp_image_params_restore_dovi_mapping(&params);
+    pl_avframe_set_repr(dst, params.repr);
 
-    dst->chroma_location = pl_chroma_to_av(src->params.chroma_location);
+    dst->chroma_location = pl_chroma_to_av(params.chroma_location);
 
     dst->opaque_ref = av_buffer_alloc(sizeof(struct mp_image_params));
     MP_HANDLE_OOM(dst->opaque_ref);
-    *(struct mp_image_params *)dst->opaque_ref->data = src->params;
+    *(struct mp_image_params *)dst->opaque_ref->data = params;
 
     if (src->icc_profile) {
         AVFrameSideData *sd =
@@ -1219,14 +1242,14 @@ struct AVFrame *mp_image_to_av_frame(struct mp_image *src)
         new_ref->icc_profile = NULL;
     }
 
-    pl_avframe_set_color(dst, src->params.color);
+    pl_avframe_set_color(dst, params.color);
 
     {
         AVFrameSideData *sd = av_frame_new_side_data(dst,
                                                      AV_FRAME_DATA_DISPLAYMATRIX,
                                                      sizeof(int32_t) * 9);
         MP_HANDLE_OOM(sd);
-        av_display_rotation_set((int32_t *)sd->data, src->params.rotate);
+        av_display_rotation_set((int32_t *)sd->data, params.rotate);
     }
 
     // Add back side data, but only for types which are not specially handled

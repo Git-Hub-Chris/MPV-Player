@@ -22,7 +22,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <string.h>
 #include <time.h>
 #include <errno.h>
@@ -101,6 +100,10 @@ const struct keymap_entry keys[] = {
     {SDLK_LEFT, MP_KEY_LEFT},
     {SDLK_DOWN, MP_KEY_DOWN},
     {SDLK_UP, MP_KEY_UP},
+    {SDLK_KP_PLUS, MP_KEY_KPADD},
+    {SDLK_KP_MINUS, MP_KEY_KPSUBTRACT},
+    {SDLK_KP_MULTIPLY, MP_KEY_KPMULTIPLY},
+    {SDLK_KP_DIVIDE, MP_KEY_KPDIVIDE},
     {SDLK_KP_ENTER, MP_KEY_KPENTER},
     {SDLK_KP_1, MP_KEY_KP1},
     {SDLK_KP_2, MP_KEY_KP2},
@@ -450,7 +453,7 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
     struct mp_rect screenrc;
 
     update_screeninfo(vo, &screenrc);
-    vo_calc_window_geometry(vo, &screenrc, &geo);
+    vo_calc_window_geometry(vo, &screenrc, &screenrc, 1.0, false, &geo);
     vo_apply_window_geometry(vo, &geo);
 
     int win_w = vo->dwidth;
@@ -876,7 +879,7 @@ static int query_format(struct vo *vo, int format)
     return 0;
 }
 
-static void draw_frame(struct vo *vo, struct vo_frame *frame)
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *vc = vo->priv;
 
@@ -891,7 +894,7 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
 
         mp_image_t texmpi;
         if (!lock_texture(vo, &texmpi))
-            return;
+            goto done;
 
         mp_image_copy(&texmpi, frame->current);
 
@@ -911,6 +914,9 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
     SDL_RenderCopy(vc->renderer, vc->tex, &src, &dst);
 
     draw_osd(vo);
+
+done:
+    return VO_TRUE;
 }
 
 static struct mp_image *get_window_screenshot(struct vo *vo)

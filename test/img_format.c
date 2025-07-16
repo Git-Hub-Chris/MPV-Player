@@ -1,55 +1,16 @@
 #include <libavutil/frame.h>
 #include <libavutil/pixdesc.h>
 
-#include "tests.h"
+#include "img_utils.h"
+#include "options/path.h"
+#include "test_utils.h"
 #include "video/fmt-conversion.h"
 #include "video/img_format.h"
 #include "video/mp_image.h"
 #include "video/sws_utils.h"
 
-int imgfmts[IMGFMT_AVPIXFMT_END - IMGFMT_AVPIXFMT_START + 100];
-int num_imgfmts;
-
 static enum AVPixelFormat pixfmt_unsup[100];
 static int num_pixfmt_unsup;
-static bool imgfmts_initialized;
-
-static int cmp_imgfmt_name(const void *a, const void *b)
-{
-    char *name_a = mp_imgfmt_to_name(*(int *)a);
-    char *name_b = mp_imgfmt_to_name(*(int *)b);
-
-    return strcmp(name_a, name_b);
-}
-
-void init_imgfmts_list(void)
-{
-    if (imgfmts_initialized)
-        return;
-
-    const AVPixFmtDescriptor *avd = av_pix_fmt_desc_next(NULL);
-    for (; avd; avd = av_pix_fmt_desc_next(avd)) {
-        enum AVPixelFormat fmt = av_pix_fmt_desc_get_id(avd);
-        int mpfmt = pixfmt2imgfmt(fmt);
-        if (!mpfmt) {
-            assert(num_pixfmt_unsup < MP_ARRAY_SIZE(pixfmt_unsup));
-            pixfmt_unsup[num_pixfmt_unsup++] = fmt;
-        }
-    }
-
-    for (int fmt = IMGFMT_START; fmt <= IMGFMT_END; fmt++) {
-        struct mp_imgfmt_desc d = mp_imgfmt_get_desc(fmt);
-        enum AVPixelFormat pixfmt = imgfmt2pixfmt(fmt);
-        if (d.id || pixfmt != AV_PIX_FMT_NONE) {
-            assert(num_imgfmts < MP_ARRAY_SIZE(imgfmts)); // enlarge that array
-            imgfmts[num_imgfmts++] = fmt;
-        }
-    }
-
-    qsort(imgfmts, num_imgfmts, sizeof(imgfmts[0]), cmp_imgfmt_name);
-
-    imgfmts_initialized = true;
-}
 
 static const char *comp_type(enum mp_component_type type)
 {
@@ -60,11 +21,13 @@ static const char *comp_type(enum mp_component_type type)
     }
 }
 
-static void run(struct test_ctx *ctx)
+int main(int argc, char *argv[])
 {
     init_imgfmts_list();
+    const char *refdir = argv[1];
+    const char *outdir = argv[2];
 
-    FILE *f = test_open_out(ctx, "img_formats.txt");
+    FILE *f = test_open_out(outdir, "img_formats.txt");
 
     for (int z = 0; z < num_imgfmts; z++) {
         int mpfmt = imgfmts[z];
@@ -77,35 +40,80 @@ static void run(struct test_ctx *ctx)
 
         int fcsp = mp_imgfmt_get_forced_csp(mpfmt);
         if (fcsp)
-            fprintf(f, "fcsp=%s ", m_opt_choice_str(mp_csp_names, fcsp));
+            fprintf(f, "fcsp=%s ", m_opt_choice_str(pl_csp_names, fcsp));
         fprintf(f, "ctype=%s\n", comp_type(mp_imgfmt_get_component_type(mpfmt)));
 
         struct mp_imgfmt_desc d = mp_imgfmt_get_desc(mpfmt);
         if (d.id) {
-            fprintf(f, "  Legacy desc: ");
+            fprintf(f, "  Basic desc: ");
             #define FLAG(t, c) if (d.flags & (t)) fprintf(f, "[%s]", c);
             FLAG(MP_IMGFLAG_BYTE_ALIGNED, "ba")
+            FLAG(MP_IMGFLAG_BYTES, "bb")
             FLAG(MP_IMGFLAG_ALPHA, "a")
             FLAG(MP_IMGFLAG_YUV_P, "yuvp")
             FLAG(MP_IMGFLAG_YUV_NV, "nv")
-            FLAG(MP_IMGFLAG_YUV, "yuv")
-            FLAG(MP_IMGFLAG_RGB, "rgb")
+            FLAG(MP_IMGFLAG_COLOR_YUV, "yuv")
+            FLAG(MP_IMGFLAG_COLOR_RGB, "rgb")
+            FLAG(MP_IMGFLAG_COLOR_XYZ, "xyz")
+            FLAG(MP_IMGFLAG_GRAY, "gray")
             FLAG(MP_IMGFLAG_LE, "le")
             FLAG(MP_IMGFLAG_BE, "be")
-            FLAG(MP_IMGFLAG_PAL, "pal")
-            FLAG(MP_IMGFLAG_HWACCEL, "hw")
+            FLAG(MP_IMGFLAG_TYPE_PAL8, "pal")
+            FLAG(MP_IMGFLAG_TYPE_HW, "hw")
+            FLAG(MP_IMGFLAG_TYPE_FLOAT, "float")
+            FLAG(MP_IMGFLAG_TYPE_UINT, "uint")
             fprintf(f, "\n");
-            fprintf(f, "    planes=%d, chroma=%d:%d align=%d:%d bits=%d cbits=%d\n",
-                    d.num_planes, d.chroma_xs, d.chroma_ys, d.align_x, d.align_y,
-                    d.plane_bits, d.component_bits);
+            fprintf(f, "    planes=%d, chroma=%d:%d align=%d:%d\n",
+                    d.num_planes, d.chroma_xs, d.chroma_ys, d.align_x, d.align_y);
             fprintf(f, "    {");
             for (int n = 0; n < MP_MAX_PLANES; n++) {
-                fprintf(f, "%d/%d/[%d:%d] ", d.bytes[n], d.bpp[n],
-                                             d.xs[n], d.ys[n]);
+                if (n >= d.num_planes) {
+                    assert(d.bpp[n] == 0 && d.xs[n] == 0 && d.ys[n] == 0);
+                    continue;
+                }
+                fprintf(f, "%d/[%d:%d] ", d.bpp[n], d.xs[n], d.ys[n]);
             }
             fprintf(f, "}\n");
         } else {
             fprintf(f, "  [NODESC]\n");
+        }
+
+        for (int n = 0; n < d.num_planes; n++) {
+            fprintf(f, "    %d: %dbits", n, d.bpp[n]);
+            if (d.endian_shift)
+                fprintf(f, " endian_bytes=%d", 1 << d.endian_shift);
+            for (int x = 0; x < MP_NUM_COMPONENTS; x++) {
+                struct mp_imgfmt_comp_desc cm = d.comps[x];
+                fprintf(f, " {");
+                if (cm.plane == n) {
+                    if (cm.size) {
+                        fprintf(f, "%d:%d", cm.offset, cm.size);
+                        if (cm.pad)
+                            fprintf(f, "/%d", cm.pad);
+                    } else {
+                        assert(cm.offset == 0);
+                        assert(cm.pad == 0);
+                    }
+                }
+                fprintf(f, "}");
+                if (!(d.flags & (MP_IMGFLAG_PACKED_SS_YUV | MP_IMGFLAG_HAS_COMPS)))
+                {
+                    assert(cm.size == 0);
+                    assert(cm.offset == 0);
+                    assert(cm.pad == 0);
+                }
+            }
+            fprintf(f, "\n");
+            if (d.flags & MP_IMGFLAG_PACKED_SS_YUV) {
+                assert(!(d.flags & MP_IMGFLAG_HAS_COMPS));
+                uint8_t offsets[10];
+                bool r = mp_imgfmt_get_packed_yuv_locations(mpfmt, offsets);
+                assert(r);
+                fprintf(f, "       luma_offsets=[");
+                for (int x = 0; x < d.align_x; x++)
+                    fprintf(f, " %d", offsets[x]);
+                fprintf(f, "]\n");
+            }
         }
 
         if (!(d.flags & MP_IMGFLAG_HWACCEL) && pixfmt != AV_PIX_FMT_NONE) {
@@ -203,11 +211,7 @@ static void run(struct test_ctx *ctx)
 
     fclose(f);
 
-    assert_text_files_equal(ctx, "img_formats.txt", "img_formats.txt",
+    assert_text_files_equal(refdir, outdir, "img_formats.txt",
                             "This can fail if FFmpeg adds new formats or flags.");
+    return 0;
 }
-
-const struct unittest test_img_format = {
-    .name = "img_format",
-    .run = run,
-};

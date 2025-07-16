@@ -18,6 +18,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "filter.h"
 
@@ -42,10 +43,6 @@ struct mp_decoder_wrapper {
 struct mp_decoder_wrapper *mp_decoder_wrapper_create(struct mp_filter *parent,
                                                      struct sh_stream *src);
 
-// For informational purposes.
-void mp_decoder_wrapper_get_desc(struct mp_decoder_wrapper *d,
-                                 char *buf, size_t buf_size);
-
 // Legacy decoder framedrop control.
 void mp_decoder_wrapper_set_frame_drops(struct mp_decoder_wrapper *d, int num);
 int mp_decoder_wrapper_get_frames_dropped(struct mp_decoder_wrapper *d);
@@ -54,6 +51,9 @@ double mp_decoder_wrapper_get_container_fps(struct mp_decoder_wrapper *d);
 
 // Whether to prefer spdif wrapper over real decoders on next reinit.
 void mp_decoder_wrapper_set_spdif_flag(struct mp_decoder_wrapper *d, bool spdif);
+
+// Whether to decode only 1 frame and then stop, and cache the frame across resets.
+void mp_decoder_wrapper_set_coverart_flag(struct mp_decoder_wrapper *d, bool c);
 
 // True if a pts reset was observed (audio only, heuristic).
 bool mp_decoder_wrapper_get_pts_reset(struct mp_decoder_wrapper *d);
@@ -74,6 +74,7 @@ enum dec_ctrl {
     VDCTRL_GET_BFRAMES,
     // framedrop mode: 0=none, 1=standard, 2=hrseek
     VDCTRL_SET_FRAMEDROP,
+    VDCTRL_CHECK_FORCED_EOF,
 };
 
 int mp_decoder_wrapper_control(struct mp_decoder_wrapper *d,
@@ -110,6 +111,7 @@ extern const struct mp_decoder_fns ad_spdif;
 // init to all-0 on init and resets.
 struct lavc_state {
     bool eof_returned;
+    bool packets_sent;
 };
 void lavc_process(struct mp_filter *f, struct lavc_state *state,
                   int (*send)(struct mp_filter *f, struct demux_packet *pkt),

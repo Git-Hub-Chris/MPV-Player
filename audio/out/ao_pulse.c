@@ -24,11 +24,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
-#include <pthread.h>
 
 #include <pulse/pulseaudio.h>
 
-#include "config.h"
 #include "audio/format.h"
 #include "common/msg.h"
 #include "options/m_option.h"
@@ -52,16 +50,13 @@ struct priv {
     struct pa_sink_input_info pi;
 
     int retval;
-
-    // for wakeup handling
-    pthread_mutex_t wakeup_lock;
-    pthread_cond_t wakeup;
-    int wakeup_status;
+    bool playing;
+    bool underrun_signalled;
 
     char *cfg_host;
     int cfg_buffer;
-    int cfg_latency_hacks;
-    int cfg_allow_suspended;
+    bool cfg_latency_hacks;
+    bool cfg_allow_suspended;
 };
 
 #define GENERIC_ERR_MSG(str) \
@@ -119,42 +114,28 @@ static void stream_state_cb(pa_stream *s, void *userdata)
     }
 }
 
-static void wakeup(struct ao *ao)
-{
-    struct priv *priv = ao->priv;
-    pthread_mutex_lock(&priv->wakeup_lock);
-    priv->wakeup_status = 1;
-    pthread_cond_signal(&priv->wakeup);
-    pthread_mutex_unlock(&priv->wakeup_lock);
-}
-
 static void stream_request_cb(pa_stream *s, size_t length, void *userdata)
 {
     struct ao *ao = userdata;
     struct priv *priv = ao->priv;
-    wakeup(ao);
+    ao_wakeup(ao);
     pa_threaded_mainloop_signal(priv->mainloop, 0);
-}
-
-static int wait_audio(struct ao *ao, pthread_mutex_t *lock)
-{
-    struct priv *priv = ao->priv;
-    // We don't use this mutex, because pulse like to call stream_request_cb
-    // while we have the central mutex held.
-    pthread_mutex_unlock(lock);
-    pthread_mutex_lock(&priv->wakeup_lock);
-    while (!priv->wakeup_status)
-        pthread_cond_wait(&priv->wakeup, &priv->wakeup_lock);
-    priv->wakeup_status = 0;
-    pthread_mutex_unlock(&priv->wakeup_lock);
-    pthread_mutex_lock(lock);
-    return 0;
 }
 
 static void stream_latency_update_cb(pa_stream *s, void *userdata)
 {
     struct ao *ao = userdata;
     struct priv *priv = ao->priv;
+    pa_threaded_mainloop_signal(priv->mainloop, 0);
+}
+
+static void underflow_cb(pa_stream *s, void *userdata)
+{
+    struct ao *ao = userdata;
+    struct priv *priv = ao->priv;
+    priv->playing = false;
+    priv->underrun_signalled = true;
+    ao_wakeup(ao);
     pa_threaded_mainloop_signal(priv->mainloop, 0);
 }
 
@@ -166,26 +147,31 @@ static void success_cb(pa_stream *s, int success, void *userdata)
     pa_threaded_mainloop_signal(priv->mainloop, 0);
 }
 
-/**
- * \brief waits for a pulseaudio operation to finish, frees it and
- *        unlocks the mainloop
- * \param op operation to wait for
- * \return 1 if operation has finished normally (DONE state), 0 otherwise
- */
-static int waitop(struct priv *priv, pa_operation *op)
+// Like waitop(), but keep the lock (even if it may unlock temporarily).
+static bool waitop_no_unlock(struct priv *priv, pa_operation *op)
 {
-    if (!op) {
-        pa_threaded_mainloop_unlock(priv->mainloop);
-        return 0;
-    }
+    if (!op)
+        return false;
     pa_operation_state_t state = pa_operation_get_state(op);
     while (state == PA_OPERATION_RUNNING) {
         pa_threaded_mainloop_wait(priv->mainloop);
         state = pa_operation_get_state(op);
     }
     pa_operation_unref(op);
-    pa_threaded_mainloop_unlock(priv->mainloop);
     return state == PA_OPERATION_DONE;
+}
+
+/**
+ * \brief waits for a pulseaudio operation to finish, frees it and
+ *        unlocks the mainloop
+ * \param op operation to wait for
+ * \return 1 if operation has finished normally (DONE state), 0 otherwise
+ */
+static bool waitop(struct priv *priv, pa_operation *op)
+{
+    bool r = waitop_no_unlock(priv, op);
+    pa_threaded_mainloop_unlock(priv->mainloop);
+    return r;
 }
 
 static const struct format_map {
@@ -223,25 +209,25 @@ static pa_encoding_t map_digital_format(int format)
 }
 
 static const int speaker_map[][2] = {
-  {PA_CHANNEL_POSITION_FRONT_LEFT,              MP_SPEAKER_ID_FL},
-  {PA_CHANNEL_POSITION_FRONT_RIGHT,             MP_SPEAKER_ID_FR},
-  {PA_CHANNEL_POSITION_FRONT_CENTER,            MP_SPEAKER_ID_FC},
-  {PA_CHANNEL_POSITION_REAR_CENTER,             MP_SPEAKER_ID_BC},
-  {PA_CHANNEL_POSITION_REAR_LEFT,               MP_SPEAKER_ID_BL},
-  {PA_CHANNEL_POSITION_REAR_RIGHT,              MP_SPEAKER_ID_BR},
-  {PA_CHANNEL_POSITION_LFE,                     MP_SPEAKER_ID_LFE},
-  {PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER,    MP_SPEAKER_ID_FLC},
-  {PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER,   MP_SPEAKER_ID_FRC},
-  {PA_CHANNEL_POSITION_SIDE_LEFT,               MP_SPEAKER_ID_SL},
-  {PA_CHANNEL_POSITION_SIDE_RIGHT,              MP_SPEAKER_ID_SR},
-  {PA_CHANNEL_POSITION_TOP_CENTER,              MP_SPEAKER_ID_TC},
-  {PA_CHANNEL_POSITION_TOP_FRONT_LEFT,          MP_SPEAKER_ID_TFL},
-  {PA_CHANNEL_POSITION_TOP_FRONT_RIGHT,         MP_SPEAKER_ID_TFR},
-  {PA_CHANNEL_POSITION_TOP_FRONT_CENTER,        MP_SPEAKER_ID_TFC},
-  {PA_CHANNEL_POSITION_TOP_REAR_LEFT,           MP_SPEAKER_ID_TBL},
-  {PA_CHANNEL_POSITION_TOP_REAR_RIGHT,          MP_SPEAKER_ID_TBR},
-  {PA_CHANNEL_POSITION_TOP_REAR_CENTER,         MP_SPEAKER_ID_TBC},
-  {PA_CHANNEL_POSITION_INVALID,                 -1}
+    {PA_CHANNEL_POSITION_FRONT_LEFT,              MP_SPEAKER_ID_FL},
+    {PA_CHANNEL_POSITION_FRONT_RIGHT,             MP_SPEAKER_ID_FR},
+    {PA_CHANNEL_POSITION_FRONT_CENTER,            MP_SPEAKER_ID_FC},
+    {PA_CHANNEL_POSITION_REAR_CENTER,             MP_SPEAKER_ID_BC},
+    {PA_CHANNEL_POSITION_REAR_LEFT,               MP_SPEAKER_ID_BL},
+    {PA_CHANNEL_POSITION_REAR_RIGHT,              MP_SPEAKER_ID_BR},
+    {PA_CHANNEL_POSITION_LFE,                     MP_SPEAKER_ID_LFE},
+    {PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER,    MP_SPEAKER_ID_FLC},
+    {PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER,   MP_SPEAKER_ID_FRC},
+    {PA_CHANNEL_POSITION_SIDE_LEFT,               MP_SPEAKER_ID_SL},
+    {PA_CHANNEL_POSITION_SIDE_RIGHT,              MP_SPEAKER_ID_SR},
+    {PA_CHANNEL_POSITION_TOP_CENTER,              MP_SPEAKER_ID_TC},
+    {PA_CHANNEL_POSITION_TOP_FRONT_LEFT,          MP_SPEAKER_ID_TFL},
+    {PA_CHANNEL_POSITION_TOP_FRONT_RIGHT,         MP_SPEAKER_ID_TFR},
+    {PA_CHANNEL_POSITION_TOP_FRONT_CENTER,        MP_SPEAKER_ID_TFC},
+    {PA_CHANNEL_POSITION_TOP_REAR_LEFT,           MP_SPEAKER_ID_TBL},
+    {PA_CHANNEL_POSITION_TOP_REAR_RIGHT,          MP_SPEAKER_ID_TBR},
+    {PA_CHANNEL_POSITION_TOP_REAR_CENTER,         MP_SPEAKER_ID_TBC},
+    {PA_CHANNEL_POSITION_INVALID,                 -1}
 };
 
 static bool chmap_pa_from_mp(pa_channel_map *dst, struct mp_chmap *src)
@@ -278,15 +264,6 @@ static bool select_chmap(struct ao *ao, pa_channel_map *dst)
            chmap_pa_from_mp(dst, &ao->channels);
 }
 
-static void drain(struct ao *ao)
-{
-    struct priv *priv = ao->priv;
-    if (priv->stream) {
-        pa_threaded_mainloop_lock(priv->mainloop);
-        waitop(priv, pa_stream_drain(priv->stream, success_cb, ao));
-    }
-}
-
 static void uninit(struct ao *ao)
 {
     struct priv *priv = ao->priv;
@@ -310,9 +287,6 @@ static void uninit(struct ao *ao)
         pa_threaded_mainloop_free(priv->mainloop);
         priv->mainloop = NULL;
     }
-
-    pthread_cond_destroy(&priv->wakeup);
-    pthread_mutex_destroy(&priv->wakeup_lock);
 }
 
 static int pa_init_boilerplate(struct ao *ao)
@@ -320,9 +294,6 @@ static int pa_init_boilerplate(struct ao *ao)
     struct priv *priv = ao->priv;
     char *host = priv->cfg_host && priv->cfg_host[0] ? priv->cfg_host : NULL;
     bool locked = false;
-
-    pthread_mutex_init(&priv->wakeup_lock, NULL);
-    pthread_cond_init(&priv->wakeup, NULL);
 
     if (!(priv->mainloop = pa_threaded_mainloop_new())) {
         MP_ERR(ao, "Failed to allocate main loop\n");
@@ -343,10 +314,8 @@ static int pa_init_boilerplate(struct ao *ao)
     }
 
     MP_VERBOSE(ao, "Library version: %s\n", pa_get_library_version());
-    MP_VERBOSE(ao, "Proto: %lu\n",
-        (long)pa_context_get_protocol_version(priv->context));
-    MP_VERBOSE(ao, "Server proto: %lu\n",
-        (long)pa_context_get_server_protocol_version(priv->context));
+    MP_VERBOSE(ao, "Proto: %" PRIu32 "\n",
+               pa_context_get_protocol_version(priv->context));
 
     pa_context_set_state_callback(priv->context, context_state_cb, ao);
     pa_context_set_subscribe_callback(priv->context, subscribe_cb, ao);
@@ -363,6 +332,9 @@ static int pa_init_boilerplate(struct ao *ao)
             goto fail;
         pa_threaded_mainloop_wait(priv->mainloop);
     }
+
+    MP_VERBOSE(ao, "Server proto: %" PRIu32 "\n",
+               pa_context_get_server_protocol_version(priv->context));
 
     pa_threaded_mainloop_unlock(priv->mainloop);
     return 0;
@@ -460,17 +432,18 @@ static int init(struct ao *ao)
     pa_stream_set_write_callback(priv->stream, stream_request_cb, ao);
     pa_stream_set_latency_update_callback(priv->stream,
                                           stream_latency_update_cb, ao);
+    pa_stream_set_underflow_callback(priv->stream, underflow_cb, ao);
     uint32_t buf_size = ao->samplerate * (priv->cfg_buffer / 1000.0) *
         af_fmt_to_bytes(ao->format) * ao->channels.num;
     pa_buffer_attr bufattr = {
         .maxlength = -1,
         .tlength = buf_size > 0 ? buf_size : -1,
-        .prebuf = -1,
+        .prebuf = 0,
         .minreq = -1,
         .fragsize = -1,
     };
 
-    int flags = PA_STREAM_NOT_MONOTONIC;
+    int flags = PA_STREAM_NOT_MONOTONIC | PA_STREAM_START_CORKED;
     if (!priv->cfg_latency_hacks)
         flags |= PA_STREAM_INTERPOLATE_TIMING|PA_STREAM_AUTO_TIMING_UPDATE;
 
@@ -493,6 +466,14 @@ static int init(struct ao *ao)
         goto unlock_and_fail;
     }
 
+    const pa_buffer_attr* final_bufattr = pa_stream_get_buffer_attr(priv->stream);
+    if(!final_bufattr) {
+        MP_ERR(ao, "PulseAudio didn't tell us what buffer sizes it set. Bailing out.\n");
+        goto unlock_and_fail;
+    }
+    ao->device_buffer = final_bufattr->tlength /
+                        af_fmt_to_bytes(ao->format) / ao->channels.num;
+
     pa_threaded_mainloop_unlock(priv->mainloop);
     return 0;
 
@@ -514,28 +495,36 @@ static void cork(struct ao *ao, bool pause)
     struct priv *priv = ao->priv;
     pa_threaded_mainloop_lock(priv->mainloop);
     priv->retval = 0;
-    if (!waitop(priv, pa_stream_cork(priv->stream, pause, success_cb, ao)) ||
-        !priv->retval)
+    if (waitop_no_unlock(priv, pa_stream_cork(priv->stream, pause, success_cb, ao))
+        && priv->retval)
+    {
+        if (!pause)
+            priv->playing = true;
+    } else {
         GENERIC_ERR_MSG("pa_stream_cork() failed");
+        priv->playing = false;
+    }
+    pa_threaded_mainloop_unlock(priv->mainloop);
 }
 
 // Play the specified data to the pulseaudio server
-static int play(struct ao *ao, void **data, int samples, int flags)
+static bool audio_write(struct ao *ao, void **data, int samples)
 {
     struct priv *priv = ao->priv;
+    bool res = true;
     pa_threaded_mainloop_lock(priv->mainloop);
     if (pa_stream_write(priv->stream, data[0], samples * ao->sstride, NULL, 0,
                         PA_SEEK_RELATIVE) < 0) {
         GENERIC_ERR_MSG("pa_stream_write() failed");
-        samples = -1;
-    }
-    if (flags & AOPLAY_FINAL_CHUNK) {
-        // Force start in case the stream was too short for prebuf
-        pa_operation *op = pa_stream_trigger(priv->stream, NULL, NULL);
-        pa_operation_unref(op);
+        res = false;
     }
     pa_threaded_mainloop_unlock(priv->mainloop);
-    return samples;
+    return res;
+}
+
+static void start(struct ao *ao)
+{
+    cork(ao, false);
 }
 
 // Reset the audio stream, i.e. flush the playback buffer on the server side
@@ -545,33 +534,17 @@ static void reset(struct ao *ao)
     cork(ao, true);
     struct priv *priv = ao->priv;
     pa_threaded_mainloop_lock(priv->mainloop);
+    priv->playing = false;
     priv->retval = 0;
     if (!waitop(priv, pa_stream_flush(priv->stream, success_cb, ao)) ||
         !priv->retval)
         GENERIC_ERR_MSG("pa_stream_flush() failed");
-    cork(ao, false);
 }
 
-// Pause the audio stream by corking it on the server
-static void pause(struct ao *ao)
+static bool set_pause(struct ao *ao, bool paused)
 {
-    cork(ao, true);
-}
-
-// Resume the audio stream by uncorking it on the server
-static void resume(struct ao *ao)
-{
-    cork(ao, false);
-}
-
-// Return number of samples that may be written to the server without blocking
-static int get_space(struct ao *ao)
-{
-    struct priv *priv = ao->priv;
-    pa_threaded_mainloop_lock(priv->mainloop);
-    size_t space = pa_stream_writable_size(priv->stream);
-    pa_threaded_mainloop_unlock(priv->mainloop);
-    return space / ao->sstride;
+    cork(ao, paused);
+    return true;
 }
 
 static double get_delay_hackfixed(struct ao *ao)
@@ -590,21 +563,19 @@ static double get_delay_hackfixed(struct ao *ao)
      * this should be enough to fix the normal local playback case.
      */
     struct priv *priv = ao->priv;
-    pa_threaded_mainloop_lock(priv->mainloop);
-    if (!waitop(priv, pa_stream_update_timing_info(priv->stream, NULL, NULL))) {
+    if (!waitop_no_unlock(priv, pa_stream_update_timing_info(priv->stream,
+                                                             NULL, NULL)))
+    {
         GENERIC_ERR_MSG("pa_stream_update_timing_info() failed");
         return 0;
     }
-    pa_threaded_mainloop_lock(priv->mainloop);
     const pa_timing_info *ti = pa_stream_get_timing_info(priv->stream);
     if (!ti) {
-        pa_threaded_mainloop_unlock(priv->mainloop);
         GENERIC_ERR_MSG("pa_stream_get_timing_info() failed");
         return 0;
     }
     const struct pa_sample_spec *ss = pa_stream_get_sample_spec(priv->stream);
     if (!ss) {
-        pa_threaded_mainloop_unlock(priv->mainloop);
         GENERIC_ERR_MSG("pa_stream_get_sample_spec() failed");
         return 0;
     }
@@ -625,7 +596,6 @@ static double get_delay_hackfixed(struct ao *ao)
         latency += sink_latency;
     if (latency < 0)
         latency = 0;
-    pa_threaded_mainloop_unlock(priv->mainloop);
     return latency / 1e6;
 }
 
@@ -633,7 +603,6 @@ static double get_delay_pulse(struct ao *ao)
 {
     struct priv *priv = ao->priv;
     pa_usec_t latency = (pa_usec_t) -1;
-    pa_threaded_mainloop_lock(priv->mainloop);
     while (pa_stream_get_latency(priv->stream, &latency, NULL) < 0) {
         if (pa_context_errno(priv->context) != PA_ERR_NODATA) {
             GENERIC_ERR_MSG("pa_stream_get_latency() failed");
@@ -642,18 +611,35 @@ static double get_delay_pulse(struct ao *ao)
         /* Wait until latency data is available again */
         pa_threaded_mainloop_wait(priv->mainloop);
     }
-    pa_threaded_mainloop_unlock(priv->mainloop);
     return latency == (pa_usec_t) -1 ? 0 : latency / 1000000.0;
 }
 
-// Return the current latency in seconds
-static double get_delay(struct ao *ao)
+static void audio_get_state(struct ao *ao, struct mp_pcm_state *state)
 {
     struct priv *priv = ao->priv;
+
+    pa_threaded_mainloop_lock(priv->mainloop);
+
+    size_t space = pa_stream_writable_size(priv->stream);
+    state->free_samples = space == (size_t)-1 ? 0 : space / ao->sstride;
+
+    state->queued_samples = ao->device_buffer - state->free_samples; // dunno
+
     if (priv->cfg_latency_hacks) {
-        return get_delay_hackfixed(ao);
+        state->delay = get_delay_hackfixed(ao);
     } else {
-        return get_delay_pulse(ao);
+        state->delay = get_delay_pulse(ao);
+    }
+
+    state->playing = priv->playing;
+
+    pa_threaded_mainloop_unlock(priv->mainloop);
+
+    // Otherwise, PA will keep hammering us for underruns (which it does instead
+    // of stopping the stream automatically).
+    if (!state->playing && priv->underrun_signalled) {
+        reset(ao);
+        priv->underrun_signalled = false;
     }
 }
 
@@ -693,14 +679,8 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg)
         // we naively copied the struct, without updating pointers etc.
         // Pointers might point to invalid data, accessors might fail.
         if (cmd == AOCONTROL_GET_VOLUME) {
-            ao_control_vol_t *vol = arg;
-            if (priv->pi.volume.channels != 2)
-                vol->left = vol->right =
-                    VOL_PA2MP(pa_cvolume_avg(&priv->pi.volume));
-            else {
-                vol->left = VOL_PA2MP(priv->pi.volume.values[0]);
-                vol->right = VOL_PA2MP(priv->pi.volume.values[1]);
-            }
+            float *vol = arg;
+            *vol = VOL_PA2MP(pa_cvolume_avg(&priv->pi.volume));
         } else if (cmd == AOCONTROL_GET_MUTE) {
             bool *mute = arg;
             *mute = priv->pi.mute;
@@ -710,42 +690,36 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg)
 
     case AOCONTROL_SET_MUTE:
     case AOCONTROL_SET_VOLUME: {
-        pa_operation *o;
-
         pa_threaded_mainloop_lock(priv->mainloop);
+        priv->retval = 0;
         uint32_t stream_index = pa_stream_get_index(priv->stream);
         if (cmd == AOCONTROL_SET_VOLUME) {
-            const ao_control_vol_t *vol = arg;
+            const float *vol = arg;
             struct pa_cvolume volume;
 
             pa_cvolume_reset(&volume, ao->channels.num);
-            if (volume.channels != 2)
-                pa_cvolume_set(&volume, volume.channels, VOL_MP2PA(vol->left));
-            else {
-                volume.values[0] = VOL_MP2PA(vol->left);
-                volume.values[1] = VOL_MP2PA(vol->right);
-            }
-            o = pa_context_set_sink_input_volume(priv->context, stream_index,
-                                                 &volume, NULL, NULL);
-            if (!o) {
-                pa_threaded_mainloop_unlock(priv->mainloop);
+            pa_cvolume_set(&volume, volume.channels, VOL_MP2PA(*vol));
+            if (!waitop(priv, pa_context_set_sink_input_volume(priv->context,
+                                                               stream_index,
+                                                               &volume,
+                                                               context_success_cb, ao)) ||
+                !priv->retval) {
                 GENERIC_ERR_MSG("pa_context_set_sink_input_volume() failed");
                 return CONTROL_ERROR;
             }
         } else if (cmd == AOCONTROL_SET_MUTE) {
             const bool *mute = arg;
-            o = pa_context_set_sink_input_mute(priv->context, stream_index,
-                                               *mute, NULL, NULL);
-            if (!o) {
-                pa_threaded_mainloop_unlock(priv->mainloop);
+            if (!waitop(priv, pa_context_set_sink_input_mute(priv->context,
+                                                             stream_index,
+                                                             *mute,
+                                                             context_success_cb, ao)) ||
+                !priv->retval) {
                 GENERIC_ERR_MSG("pa_context_set_sink_input_mute() failed");
                 return CONTROL_ERROR;
             }
-        } else
-            abort();
-        /* We don't wait for completion here */
-        pa_operation_unref(o);
-        pa_threaded_mainloop_unlock(priv->mainloop);
+        } else {
+            MP_ASSERT_UNREACHABLE();
+        }
         return CONTROL_OK;
     }
 
@@ -821,27 +795,24 @@ const struct ao_driver audio_out_pulse = {
     .init      = init,
     .uninit    = uninit,
     .reset     = reset,
-    .get_space = get_space,
-    .play      = play,
-    .get_delay = get_delay,
-    .pause     = pause,
-    .resume    = resume,
-    .drain     = drain,
-    .wait      = wait_audio,
-    .wakeup    = wakeup,
+    .get_state = audio_get_state,
+    .write     = audio_write,
+    .start     = start,
+    .set_pause = set_pause,
     .hotplug_init = hotplug_init,
     .hotplug_uninit = hotplug_uninit,
     .list_devs = list_devs,
     .priv_size = sizeof(struct priv),
     .priv_defaults = &(const struct priv) {
         .cfg_buffer = 100,
+        .cfg_latency_hacks = true,
     },
     .options = (const struct m_option[]) {
         {"host", OPT_STRING(cfg_host)},
         {"buffer", OPT_CHOICE(cfg_buffer, {"native", 0}),
             M_RANGE(1, 2000)},
-        {"latency-hacks", OPT_FLAG(cfg_latency_hacks)},
-        {"allow-suspended", OPT_FLAG(cfg_allow_suspended)},
+        {"latency-hacks", OPT_BOOL(cfg_latency_hacks)},
+        {"allow-suspended", OPT_BOOL(cfg_allow_suspended)},
         {0}
     },
     .options_prefix = "pulse",

@@ -1,5 +1,6 @@
 -- Compatibility shim for lua 5.2/5.3
-unpack = unpack or table.unpack
+-- luacheck: globals unpack
+unpack = unpack or table.unpack -- luacheck: globals table.unpack
 
 -- these are used internally by lua.c
 mp.UNKNOWN_TYPE.info = "this value is inserted if the C type is not supported"
@@ -42,6 +43,11 @@ function mp.input_disable_section(section)
     mp.commandv("disable-section", section)
 end
 
+function mp.get_mouse_pos()
+    local m = mp.get_property_native("mouse-pos")
+    return m.x, m.y
+end
+
 -- For dispatching script-binding. This is sent as:
 --      script-message-to $script_name $binding_name $keystate
 -- The array is indexed by $binding_name, and has functions like this as value:
@@ -54,10 +60,10 @@ local function reserve_binding()
     return "__keybinding" .. tostring(message_id)
 end
 
-local function dispatch_key_binding(name, state, key_name, key_text)
+local function dispatch_key_binding(name, state, key_name, key_text, scale, arg)
     local fn = dispatch_key_bindings[name]
     if fn then
-        fn(name, state, key_name, key_text)
+        fn(name, state, key_name, key_text, scale, arg)
     end
 end
 
@@ -90,7 +96,7 @@ function mp.set_key_bindings(list, section, flags)
         local cb_up = entry[4]
         if type(cb) ~= "string" then
             local mangle = reserve_binding()
-            dispatch_key_bindings[mangle] = function(name, state)
+            dispatch_key_bindings[mangle] = function(_, state)
                 local event = state:sub(1, 1)
                 local is_mouse = state:sub(2, 2) == "m"
                 local def = (is_mouse and "u") or "d"
@@ -151,7 +157,7 @@ function mp.flush_keybindings()
             flags = "force"
         end
         local bindings = {}
-        for k, v in pairs(key_bindings) do
+        for _, v in pairs(key_bindings) do
             if v.bind and v.forced ~= def then
                 bindings[#bindings + 1] = v
             end
@@ -164,13 +170,12 @@ function mp.flush_keybindings()
             cfg = cfg .. v.bind .. "\n"
         end
         mp.input_define_section(section, cfg, flags)
-        -- TODO: remove the section if the script is stopped
         mp.input_enable_section(section, "allow-hide-cursor+allow-vo-dragging")
     end
 end
 
 local function add_binding(attrs, key, name, fn, rp)
-    if (type(name) ~= "string") and (name ~= nil) then
+    if type(name) ~= "string" and name ~= nil then
         rp = fn
         fn = name
         name = nil
@@ -180,6 +185,7 @@ local function add_binding(attrs, key, name, fn, rp)
         name = reserve_binding()
     end
     local repeatable = rp == "repeatable" or rp["repeatable"]
+    local scalable = rp == "scalable" or rp["scalable"]
     if rp["forced"] then
         attrs.forced = true
     end
@@ -194,41 +200,46 @@ local function add_binding(attrs, key, name, fn, rp)
             ["r"] = "repeat",
             ["p"] = "press",
         }
-        key_cb = function(name, state, key_name, key_text)
+        key_cb = function(_, state, key_name, key_text, scale, arg)
             if key_text == "" then
                 key_text = nil
             end
             fn({
                 event = key_states[state:sub(1, 1)] or "unknown",
                 is_mouse = state:sub(2, 2) == "m",
+                canceled = state:sub(3, 3) == "c",
                 key_name = key_name,
                 key_text = key_text,
+                scale = tonumber(scale),
+                arg = arg,
             })
         end
         msg_cb = function()
             fn({event = "press", is_mouse = false})
         end
     else
-        key_cb = function(name, state)
+        key_cb = function(_, state)
             -- Emulate the same semantics as input.c uses for most bindings:
             -- For keyboard, "down" runs the command, "up" does nothing;
             -- for mouse, "down" does nothing, "up" runs the command.
             -- Also, key repeat triggers the binding again.
             local event = state:sub(1, 1)
             local is_mouse = state:sub(2, 2) == "m"
-            if event == "r" and not repeatable then
+            local canceled = state:sub(3, 3) == "c"
+            if canceled or event == "r" and not repeatable then
                 return
             end
             if is_mouse and (event == "u" or event == "p") then
                 fn()
-            elseif (not is_mouse) and (event == "d" or event == "r" or event == "p") then
+            elseif not is_mouse and (event == "d" or event == "r" or event == "p") then
                 fn()
             end
         end
         msg_cb = fn
     end
+    local prefix = scalable and "" or " nonscalable"
     if key and #key > 0 then
-        attrs.bind = key .. " script-binding " .. mp.script_name .. "/" .. name
+        attrs.bind = key .. prefix .. " script-binding " .. mp.script_name .. "/" .. name
     end
     attrs.name = name
     -- new bindings override old ones (but do not overwrite them)
@@ -260,20 +271,22 @@ local timers = {}
 local timer_mt = {}
 timer_mt.__index = timer_mt
 
-function mp.add_timeout(seconds, cb)
-    local t = mp.add_periodic_timer(seconds, cb)
+function mp.add_timeout(seconds, cb, disabled)
+    local t = mp.add_periodic_timer(seconds, cb, disabled)
     t.oneshot = true
     return t
 end
 
-function mp.add_periodic_timer(seconds, cb)
+function mp.add_periodic_timer(seconds, cb, disabled)
     local t = {
         timeout = seconds,
         cb = cb,
         oneshot = false,
     }
     setmetatable(t, timer_mt)
-    t:resume()
+    if not disabled then
+        t:resume()
+    end
     return t
 end
 
@@ -309,7 +322,7 @@ end
 local function get_next_timer()
     local best = nil
     for t, _ in pairs(timers) do
-        if (best == nil) or (t.next_deadline < best.next_deadline) then
+        if best == nil or t.next_deadline < best.next_deadline then
             best = t
         end
     end
@@ -325,9 +338,11 @@ function mp.get_next_timeout()
     return timer.next_deadline - now
 end
 
--- Run timers that have met their deadline.
--- Return: next absolute time a timer expires as number, or nil if no timers
+-- Run timers that have met their deadline at the time of invocation.
+-- Return: time>0 in seconds till the next due timer, 0 if there are due timers
+--         (aborted to avoid infinite loop), or nil if no timers
 local function process_timers()
+    local t0 = nil
     while true do
         local timer = get_next_timer()
         if not timer then
@@ -338,6 +353,14 @@ local function process_timers()
         if wait > 0 then
             return wait
         else
+            if not t0 then
+                t0 = now  -- first due callback: always executes, remember t0
+            elseif timer.next_deadline > t0 then
+                -- don't block forever with slow callbacks and endless timers.
+                -- we'll continue right after checking mpv events.
+                return 0
+            end
+
             if timer.oneshot then
                 timer:kill()
             else
@@ -396,6 +419,10 @@ end
 -- used by default event loop (mp_event_loop()) to decide when to quit
 mp.keep_running = true
 
+function _G.exit()
+    mp.keep_running = false
+end
+
 local event_handlers = {}
 
 function mp.register_event(name, cb)
@@ -411,7 +438,7 @@ end
 function mp.unregister_event(cb)
     for name, sub in pairs(event_handlers) do
         local found = false
-        for i, e in ipairs(sub) do
+        for _, e in ipairs(sub) do
             if e == cb then
                 found = true
                 break
@@ -435,7 +462,7 @@ function mp.unregister_event(cb)
 end
 
 -- default handlers
-mp.register_event("shutdown", function() mp.keep_running = false end)
+mp.register_event("shutdown", exit)
 mp.register_event("client-message", message_dispatch)
 mp.register_event("property-change", property_change)
 
@@ -513,12 +540,20 @@ function mp.dispatch_events(allow_wait)
         local wait = 0
         if not more_events then
             wait = process_timers() or 1e20 -- infinity for all practical purposes
-            for _, handler in ipairs(idle_handlers) do
-                handler()
+            if wait ~= 0 then
+                local idle_called = nil
+                for _, handler in ipairs(idle_handlers) do
+                    idle_called = true
+                    handler()
+                end
+                if idle_called then
+                    -- handlers don't complete in 0 time, and may modify timers
+                    wait = mp.get_next_timeout() or 1e20
+                    if wait < 0 then
+                        wait = 0
+                    end
+                end
             end
-            -- Resume playloop - important especially if an error happened while
-            -- suspended, and the error was handled, but no resume was done.
-            mp.resume_all()
             if allow_wait ~= true then
                 return
             end
@@ -547,12 +582,35 @@ end
 
 local hook_table = {}
 
+local hook_mt = {}
+hook_mt.__index = hook_mt
+
+function hook_mt.cont(t)
+    if t._id == nil then
+        mp.msg.error("hook already continued")
+    else
+        mp.raw_hook_continue(t._id)
+        t._id = nil
+    end
+end
+
+function hook_mt.defer(t)
+    t._defer = true
+end
+
 mp.register_event("hook", function(ev)
     local fn = hook_table[tonumber(ev.id)]
+    local hookobj = {
+        _id = ev.hook_id,
+        _defer = false,
+    }
+    setmetatable(hookobj, hook_mt)
     if fn then
-        fn()
+        fn(hookobj)
     end
-    mp.raw_hook_continue(ev.hook_id)
+    if not hookobj._defer and hookobj._id ~= nil then
+        hookobj:cont()
+    end
 end)
 
 function mp.add_hook(name, pri, cb)
@@ -569,9 +627,10 @@ local async_next_id = 1
 function mp.command_native_async(node, cb)
     local id = async_next_id
     async_next_id = async_next_id + 1
+    cb = cb or function() end
     local res, err = mp.raw_command_native_async(id, node)
     if not res then
-        cb(false, nil, err)
+        mp.add_timeout(0, function() cb(false, nil, err) end)
         return res, err
     end
     local t = {cb = cb, id = id}
@@ -719,6 +778,10 @@ function mp_utils.getcwd()
     return mp.get_property("working-directory")
 end
 
+function mp_utils.getpid()
+    return mp.get_property_number("pid")
+end
+
 function mp_utils.format_bytes_humanized(b)
     local d = {"Bytes", "KiB", "MiB", "GiB", "TiB", "PiB"}
     local i = 1
@@ -754,30 +817,6 @@ end
 
 function mp_utils.subprocess_detached(t)
     mp.commandv("run", unpack(t.args))
-end
-
-function mp_utils.shared_script_property_set(name, value)
-    if value ~= nil then
-        -- no such thing as change-list with mpv_node, so build a string value
-        mp.commandv("change-list", "shared-script-properties", "append",
-                    name .. "=" .. value)
-    else
-        mp.commandv("change-list", "shared-script-properties", "remove", name)
-    end
-end
-
-function mp_utils.shared_script_property_get(name)
-    local map = mp.get_property_native("shared-script-properties")
-    return map and map[name]
-end
-
--- cb(name, value) on change and on init
-function mp_utils.shared_script_property_observe(name, cb)
-    -- it's _very_ wasteful to observe the mpv core "super" property for every
-    -- shared sub-property, but then again you shouldn't use this
-    mp.observe_property("shared-script-properties", "native", function(_, val)
-        cb(name, val and val[name])
-    end)
 end
 
 return {}

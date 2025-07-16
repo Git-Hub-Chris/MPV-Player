@@ -18,8 +18,6 @@
  */
 
 
-#include "config.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +25,6 @@
 #include <assert.h>
 #include <libavutil/common.h>
 
-#include "config.h"
 #include "common/msg.h"
 #include "filters/filter.h"
 #include "filters/filter_internal.h"
@@ -79,9 +76,6 @@ static void vf_sub_process(struct mp_filter *f)
 
     struct mp_image *mpi = frame.data;
 
-    if (!mp_sws_supported_format(mpi->imgfmt))
-        goto error;
-
     struct mp_osd_res dim = {
         .w = mpi->w,
         .h = mpi->h + priv->opts->top_margin + priv->opts->bottom_margin,
@@ -119,9 +113,18 @@ error:
     mp_filter_internal_mark_failed(f);
 }
 
+static void vf_sub_destroy(struct mp_filter *f)
+{
+    struct mp_stream_info *info = mp_filter_find_stream_info(f);
+    struct osd_state *osd = info ? info->osd : NULL;
+    if (osd)
+        osd_set_render_subs_in_filter(osd, false);
+}
+
 static const struct mp_filter_info vf_sub_filter = {
     .name = "sub",
     .process = vf_sub_process,
+    .destroy = vf_sub_destroy,
     .priv_size = sizeof(struct priv),
 };
 
@@ -132,8 +135,6 @@ static struct mp_filter *vf_sub_create(struct mp_filter *parent, void *options)
         talloc_free(options);
         return NULL;
     }
-
-    MP_WARN(f, "This filter is deprecated and will be removed (no replacement)\n");
 
     mp_filter_add_pin(f, MP_PIN_IN, "in");
     mp_filter_add_pin(f, MP_PIN_OUT, "out");

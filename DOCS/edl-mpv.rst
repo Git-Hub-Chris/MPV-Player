@@ -183,7 +183,7 @@ this will use a unified cache for all streams.
 The ``new_stream`` header is not part of the core EDL format. It may be changed
 or removed at any time, depending on mpv's internal requirements.
 
-If the first ``!new_stream`` is redundant, it is ignored. This is the same
+
 example as above::
 
     # mpv EDL v0
@@ -211,9 +211,6 @@ It provides following parameters change track metadata:
 ``title``
     Set the title tag.
 
-``byterate``
-    Number of bytes per second this stream uses. (Purely informational.)
-
 Example::
 
     # mpv EDL v0
@@ -228,6 +225,7 @@ title. The subtitle stream will use ``ducks`` as title.
 
 The ``track_meta`` header is not part of the core EDL format. It may be changed
 or removed at any time, depending on mpv's internal requirements.
+
 
 Delayed media opening
 =====================
@@ -244,25 +242,6 @@ Using multiple segments requires you to specify all offsets and durations (also
 it was never tested whether it works at all). Interaction with ``mp4_dash`` may
 be strange.
 
-This has the following parameters:
-
-``media_type``
-    Required. Must be set to ``video``, ``audio``, or ``sub``. (Other tracks in
-    the opened URL are ignored.)
-
-``codec``
-    The mpv codec name that is expected. Although mpv tries to initialize a
-    decoder with it currently (and will fail track selection if it does not
-    initialize successfully), it is not used for decoding - decoding still uses
-    the information retrieved from opening the actual media information, and may
-    be a different codec (you should try to avoid this, of course). Defaults to
-    ``null``.
-
-    Above also applies for similar fields such as ``w``.  These fields are
-    mostly to help with user track pre-selection.
-
-``w``, ``h``
-    For video codecs: expected video size. See ``codec`` for details.
 
 The ``delay_open`` header is not part of the core EDL format. It may be changed
 or removed at any time, depending on mpv's internal requirements.

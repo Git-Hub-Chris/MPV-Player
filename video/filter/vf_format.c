@@ -22,6 +22,9 @@
 #include <math.h>
 
 #include <libavutil/rational.h>
+#include <libavutil/buffer.h>
+#include <libavutil/frame.h>
+#include <libplacebo/utils/libav.h>
 
 #include "common/msg.h"
 #include "common/common.h"
@@ -50,42 +53,54 @@ struct vf_format_opts {
     int chroma_location;
     int stereo_in;
     int rotate;
+    int alpha;
     int w, h;
     int dw, dh;
     double dar;
-    int convert;
+    bool convert;
+    int force_scaler;
+    bool dovi;
+    bool hdr10plus;
+    bool film_grain;
 };
 
 static void set_params(struct vf_format_opts *p, struct mp_image_params *out,
                        bool set_size)
 {
     if (p->colormatrix)
-        out->color.space = p->colormatrix;
+        out->repr.sys = p->colormatrix;
     if (p->colorlevels)
-        out->color.levels = p->colorlevels;
+        out->repr.levels = p->colorlevels;
     if (p->primaries)
         out->color.primaries = p->primaries;
     if (p->gamma) {
-        enum mp_csp_trc in_gamma = p->gamma;
-        out->color.gamma = p->gamma;
-        if (in_gamma != out->color.gamma) {
+        enum pl_color_transfer in_gamma = p->gamma;
+        out->color.transfer = p->gamma;
+        if (in_gamma != out->color.transfer) {
             // When changing the gamma function explicitly, also reset stuff
             // related to the gamma function since that information will almost
             // surely be false now and have to be re-inferred
-            out->color.sig_peak = 0.0;
-            out->color.light = MP_CSP_LIGHT_AUTO;
+            out->color.hdr = (struct pl_hdr_metadata){0};
+            out->light = MP_CSP_LIGHT_AUTO;
         }
     }
+    if (out->repr.sys != PL_COLOR_SYSTEM_DOLBYVISION) {
+        out->primaries_orig = out->color.primaries;
+        out->transfer_orig = out->color.transfer;
+        out->sys_orig = out->repr.sys;
+    }
     if (p->sig_peak)
-        out->color.sig_peak = p->sig_peak;
+        out->color.hdr = (struct pl_hdr_metadata){ .max_luma = p->sig_peak * MP_REF_WHITE };
     if (p->light)
-        out->color.light = p->light;
+        out->light = p->light;
     if (p->chroma_location)
         out->chroma_location = p->chroma_location;
     if (p->stereo_in)
         out->stereo3d = p->stereo_in;
     if (p->rotate >= 0)
         out->rotate = p->rotate;
+    if (p->alpha)
+        out->repr.alpha = p->alpha;
 
     if (p->w > 0 && set_size)
         out->w = p->w;
@@ -102,6 +117,16 @@ static void set_params(struct vf_format_opts *p, struct mp_image_params *out,
     mp_image_params_set_dsize(out, dsize.num, dsize.den);
 }
 
+static inline void *get_side_data(const struct mp_image *mpi,
+                                  enum AVFrameSideDataType type)
+{
+    for (int i = 0; i < mpi->num_ff_side_data; i++) {
+        if (mpi->ff_side_data[i].type == type)
+            return (void *)mpi->ff_side_data[i].buf->data;
+    }
+    return NULL;
+}
+
 static void vf_format_process(struct mp_filter *f)
 {
     struct priv *priv = f->priv;
@@ -115,15 +140,15 @@ static void vf_format_process(struct mp_filter *f)
             int outfmt = priv->opts->fmt;
 
             // If we convert from RGB to YUV, default to limited range.
-            if (mp_imgfmt_get_forced_csp(img->imgfmt) == MP_CSP_RGB &&
-                outfmt && mp_imgfmt_get_forced_csp(outfmt) == MP_CSP_AUTO)
+            if (mp_imgfmt_get_forced_csp(img->imgfmt) == PL_COLOR_SYSTEM_RGB &&
+                outfmt && mp_imgfmt_get_forced_csp(outfmt) == PL_COLOR_SYSTEM_UNKNOWN)
             {
-                par.color.levels = MP_CSP_LEVELS_TV;
+                par.repr.levels = PL_COLOR_LEVELS_LIMITED;
             }
 
             set_params(priv->opts, &par, true);
 
-            if (par.imgfmt != outfmt) {
+            if (outfmt && par.imgfmt != outfmt) {
                 par.imgfmt = outfmt;
                 par.hw_subfmt = 0;
             }
@@ -137,14 +162,38 @@ static void vf_format_process(struct mp_filter *f)
 
     if (mp_pin_can_transfer_data(f->ppins[1], priv->conv->f->pins[1])) {
         struct mp_frame frame = mp_pin_out_read(priv->conv->f->pins[1]);
+        struct mp_image *img = frame.data;
 
-        if (!priv->opts->convert && frame.type == MP_FRAME_VIDEO) {
-            struct mp_image *img = frame.data;
+        if (frame.type != MP_FRAME_VIDEO)
+            goto write_out;
 
+        if (!priv->opts->convert) {
             set_params(priv->opts, &img->params, false);
             mp_image_params_guess_csp(&img->params);
         }
 
+        if (!priv->opts->dovi) {
+            mp_image_params_restore_dovi_mapping(&img->params);
+            // Map again to strip any DV metadata set to common fields.
+            img->params.color.hdr = (struct pl_hdr_metadata){0};
+            pl_map_hdr_metadata(&img->params.color.hdr, &(struct pl_av_hdr_metadata) {
+                .mdm = get_side_data(img, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA),
+                .clm = get_side_data(img, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL),
+                .dhp = get_side_data(img, AV_FRAME_DATA_DYNAMIC_HDR_PLUS),
+            });
+        }
+
+        if (!priv->opts->hdr10plus) {
+            memset(img->params.color.hdr.scene_max, 0,
+                   sizeof(img->params.color.hdr.scene_max));
+            img->params.color.hdr.scene_avg = 0;
+            img->params.color.hdr.ootf = (struct pl_hdr_bezier){0};
+        }
+
+        if (!priv->opts->film_grain)
+            av_buffer_unref(&img->film_grain);
+
+write_out:
         mp_pin_in_write(f->ppins[1], frame);
     }
 }
@@ -175,6 +224,8 @@ static struct mp_filter *vf_format_create(struct mp_filter *parent, void *option
         return NULL;
     }
 
+    priv->conv->force_scaler = priv->opts->force_scaler;
+
     if (priv->opts->fmt)
         mp_autoconvert_add_imgfmt(priv->conv, priv->opts->fmt, 0);
 
@@ -183,24 +234,30 @@ static struct mp_filter *vf_format_create(struct mp_filter *parent, void *option
 
 #define OPT_BASE_STRUCT struct vf_format_opts
 static const m_option_t vf_opts_fields[] = {
-    OPT_IMAGEFORMAT("fmt", fmt, 0),
-    OPT_CHOICE_C("colormatrix", colormatrix, 0, mp_csp_names),
-    OPT_CHOICE_C("colorlevels", colorlevels, 0, mp_csp_levels_names),
-    OPT_CHOICE_C("primaries", primaries, 0, mp_csp_prim_names),
-    OPT_CHOICE_C("gamma", gamma, 0, mp_csp_trc_names),
-    OPT_FLOAT("sig-peak", sig_peak, 0),
-    OPT_CHOICE_C("light", light, 0, mp_csp_light_names),
-    OPT_CHOICE_C("chroma-location", chroma_location, 0, mp_chroma_names),
-    OPT_CHOICE_C("stereo-in", stereo_in, 0, mp_stereo3d_names),
-    OPT_INTRANGE("rotate", rotate, 0, -1, 359),
-    OPT_INT("w", w, 0),
-    OPT_INT("h", h, 0),
-    OPT_INT("dw", dw, 0),
-    OPT_INT("dh", dh, 0),
-    OPT_DOUBLE("dar", dar, 0),
-    OPT_FLAG("convert", convert, 0),
-    OPT_REMOVED("outputlevels", "use the --video-output-levels global option"),
-    OPT_REMOVED("peak", "use sig-peak instead (changed value scale!)"),
+    {"fmt", OPT_IMAGEFORMAT(fmt)},
+    {"colormatrix", OPT_CHOICE_C(colormatrix, pl_csp_names)},
+    {"colorlevels", OPT_CHOICE_C(colorlevels, pl_csp_levels_names)},
+    {"primaries", OPT_CHOICE_C(primaries, pl_csp_prim_names)},
+    {"gamma", OPT_CHOICE_C(gamma, pl_csp_trc_names)},
+    {"sig-peak", OPT_FLOAT(sig_peak)},
+    {"light", OPT_CHOICE_C(light, mp_csp_light_names)},
+    {"chroma-location", OPT_CHOICE_C(chroma_location, pl_chroma_names)},
+    {"stereo-in", OPT_CHOICE_C(stereo_in, mp_stereo3d_names)},
+    {"rotate", OPT_INT(rotate), M_RANGE(-1, 359)},
+    {"alpha", OPT_CHOICE_C(alpha, pl_alpha_names)},
+    {"w", OPT_INT(w)},
+    {"h", OPT_INT(h)},
+    {"dw", OPT_INT(dw)},
+    {"dh", OPT_INT(dh)},
+    {"dar", OPT_DOUBLE(dar)},
+    {"convert", OPT_BOOL(convert)},
+    {"dolbyvision", OPT_BOOL(dovi)},
+    {"hdr10plus", OPT_BOOL(hdr10plus)},
+    {"film-grain", OPT_BOOL(film_grain)},
+    {"force-scaler", OPT_CHOICE(force_scaler,
+                                {"auto", MP_SWS_AUTO},
+                                {"sws", MP_SWS_SWS},
+                                {"zimg", MP_SWS_ZIMG})},
     {0}
 };
 
@@ -211,6 +268,9 @@ const struct mp_user_filter_entry vf_format = {
         .priv_size = sizeof(OPT_BASE_STRUCT),
         .priv_defaults = &(const OPT_BASE_STRUCT){
             .rotate = -1,
+            .dovi = true,
+            .hdr10plus = true,
+            .film_grain = true,
         },
         .options = vf_opts_fields,
     },

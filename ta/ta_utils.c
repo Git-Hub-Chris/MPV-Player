@@ -17,6 +17,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+
+#include "osdep/atomic.h"
 #include "osdep/strnlen.h"
 
 #define TA_NO_WRAPPERS
@@ -44,32 +46,19 @@ size_t ta_calc_prealloc_elems(size_t nextidx)
     return (nextidx + 1) * 2;
 }
 
-static void dummy_dtor(void *p){}
-
-/* Create an empty (size 0) TA allocation, which is prepared in a way such that
- * using it as parent with ta_set_parent() always succeed. Calling
- * ta_set_destructor() on it will always succeed as well.
+/* Create an empty (size 0) TA allocation.
  */
 void *ta_new_context(void *ta_parent)
 {
-    void *new = ta_alloc_size(ta_parent, 0);
-    // Force it to allocate an extended header.
-    if (!ta_set_destructor(new, dummy_dtor)) {
-        ta_free(new);
-        new = NULL;
-    }
-    return new;
+    return ta_alloc_size(ta_parent, 0);
 }
 
 /* Set parent of ptr to ta_parent, return the ptr.
  * Note that ta_parent==NULL will simply unset the current parent of ptr.
- * If the operation fails (on OOM), return NULL. (That's pretty bad behavior,
- * but the only way to signal failure.)
  */
 void *ta_steal_(void *ta_parent, void *ptr)
 {
-    if (!ta_set_parent(ptr, ta_parent))
-        return NULL;
+    ta_set_parent(ptr, ta_parent);
     return ptr;
 }
 
@@ -138,10 +127,7 @@ char *ta_strndup(void *ta_parent, const char *str, size_t n)
         return NULL;
     char *new = NULL;
     strndup_append_at(&new, 0, str, n);
-    if (!ta_set_parent(new, ta_parent)) {
-        ta_free(new);
-        new = NULL;
-    }
+    ta_set_parent(new, ta_parent);
     return new;
 }
 
@@ -184,6 +170,7 @@ bool ta_strndup_append_buffer(char **str, const char *a, size_t n)
     return strndup_append_at(str, size, a, n);
 }
 
+TA_PRF(3, 0)
 static bool ta_vasprintf_append_at(char **str, size_t at, const char *fmt,
                                    va_list ap)
 {
@@ -229,7 +216,8 @@ char *ta_vasprintf(void *ta_parent, const char *fmt, va_list ap)
 {
     char *res = NULL;
     ta_vasprintf_append_at(&res, 0, fmt, ap);
-    if (!res || !ta_set_parent(res, ta_parent)) {
+    ta_set_parent(res, ta_parent);
+    if (!res) {
         ta_free(res);
         return NULL;
     }
@@ -280,33 +268,6 @@ bool ta_vasprintf_append_buffer(char **str, const char *fmt, va_list ap)
     return ta_vasprintf_append_at(str, size, fmt, ap);
 }
 
-
-void *ta_oom_p(void *p)
-{
-    if (!p)
-        abort();
-    return p;
-}
-
-void ta_oom_b(bool b)
-{
-    if (!b)
-        abort();
-}
-
-char *ta_oom_s(char *s)
-{
-    if (!s)
-        abort();
-    return s;
-}
-
-void *ta_xsteal_(void *ta_parent, void *ptr)
-{
-    ta_oom_b(ta_set_parent(ptr, ta_parent));
-    return ptr;
-}
-
 void *ta_xmemdup(void *ta_parent, void *ptr, size_t size)
 {
     void *new = ta_memdup(ta_parent, ptr, size);
@@ -333,4 +294,116 @@ char *ta_xstrndup(void *ta_parent, const char *str, size_t n)
     char *res = ta_strndup(ta_parent, str, n);
     ta_oom_b(res || !str);
     return res;
+}
+
+struct ta_refcount {
+    atomic_ulong count;
+    void *child;
+    void (*on_free)(void *ctx, void *ta_child);
+    void *on_free_ctx;
+};
+
+// Allocate a refcount helper. The ta_child parameter is automatically freed
+// with ta_free(). The returned object has a refcount of 1. Once the refcount
+// reaches 0, ta_free(ta_child) is called.
+//
+// If on_free() is not NULL, then instead of ta_free(), on_free() is called with
+// the parameters of the same named as passed to this function.
+//
+// The ta_child pointer must not be NULL, and must not have a parent allocation.
+// Neither make any sense for this use-case, and could be hint for serious bugs
+// in the caller, so assert()s check for this.
+//
+// The return value is not a ta allocation. You use the refcount functions to
+// manage it. It is recommended to use ta_alloc_auto_unref().
+//
+// Note: normally you use the ta_refcount_alloc() macro, which lacks the loc
+//       parameter.
+struct ta_refcount *ta_refcount_alloc_(const char *loc, void *ta_child,
+                                       void (*on_free)(void *ctx, void *ta_child),
+                                       void *free_ctx)
+{
+    assert(ta_child && !ta_get_parent(ta_child));
+
+    struct ta_refcount *rc = ta_new_ptrtype(NULL, rc);
+    if (!rc)
+        return NULL;
+
+    ta_dbg_set_loc(rc, loc);
+    *rc = (struct ta_refcount){
+        .count = ATOMIC_VAR_INIT(1),
+        .child = ta_child,
+        .on_free = on_free,
+        .on_free_ctx = free_ctx,
+    };
+
+    return rc + 1; // "obfuscate" the pointer
+}
+
+void ta_refcount_add(struct ta_refcount *rc)
+{
+    assert(rc);
+    rc -= 1;
+
+    unsigned long c = atomic_fetch_add(&rc->count, 1);
+    assert(c > 0); // not allowed: refcount was 0, you can't "revive" it
+}
+
+void ta_refcount_dec(struct ta_refcount *rc)
+{
+    assert(rc);
+    rc -= 1;
+
+    unsigned long c = atomic_fetch_add(&rc->count, -1);
+    assert(c != 0); // not allowed: refcount was 0
+    if (!c) {
+        if (rc->on_free) {
+            rc->on_free(rc->on_free_ctx, rc->child);
+        } else {
+            ta_free(rc->child);
+        }
+        ta_free(rc);
+    }
+}
+
+// Return whether the refcount is 1. Note that if the result is false, it could
+// become true any time in the general case, since other threads may be changing
+// the refcount. But if true is returned, it means you are the only owner of the
+// refcounted object. (If you are not an owner, it's UB to call this function.)
+bool ta_refcount_is_1(struct ta_refcount *rc)
+{
+    assert(rc);
+    rc -= 1;
+
+    return atomic_load(&rc->count) == 1;
+}
+
+struct ta_refuser {
+    struct ta_refcount *rc;
+};
+
+static void autofree_dtor(void *p)
+{
+    struct ta_refuser *ru = p;
+
+    ta_refcount_dec(ru->rc);
+}
+
+// Refcount user helper. This is a ta allocation which on creation increments
+// the refcount, and decrements it when it is free'd.
+//
+// The user must not access the contents of the allocation or resize it. Calling
+// ta_set_destructor() is not allowed. But you can freely reparent it or add
+// child allocation. ta_free_children() is also allowed and does not affect the
+// refcount.
+struct ta_refuser *ta_alloc_auto_ref(void *ta_parent, struct ta_refcount *rc)
+{
+    struct ta_refuser *ru = ta_new(ta_parent, struct ta_refuser);
+    if (!ru)
+        return NULL;
+
+    ta_set_destructor(ru, autofree_dtor);
+    ru->rc = rc;
+    ta_refcount_add(ru->rc);
+    return ru;
 }

@@ -19,8 +19,6 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "config.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +34,7 @@
 #include "common/msg.h"
 #include "osdep/endian.h"
 
-#ifdef __MINGW32__
+#ifdef _WIN32
 // for GetFileType to detect pipes
 #include <windows.h>
 #include <io.h>
@@ -44,8 +42,8 @@
 
 struct priv {
     char *outputfilename;
-    int waveheader;
-    int append;
+    bool waveheader;
+    bool append;
     uint64_t data_length;
     FILE *fp;
 };
@@ -88,7 +86,7 @@ static void write_wave_header(struct ao *ao, FILE *fp, uint64_t data_length)
     fput16le(WAV_ID_FORMAT_EXTENSIBLE, fp);
     fput16le(ao->channels.num, fp);
     fput32le(ao->samplerate, fp);
-    fput32le(ao->bps, fp);
+    fput32le(MPCLAMP(ao->bps, 0, UINT32_MAX), fp);
     fput16le(ao->channels.num * (bits / 8), fp);
     fput16le(bits, fp);
 
@@ -111,9 +109,11 @@ static int init(struct ao *ao)
 {
     struct priv *priv = ao->priv;
 
-    if (!priv->outputfilename)
-        priv->outputfilename =
-            talloc_strdup(priv, priv->waveheader ? "audiodump.wav" : "audiodump.pcm");
+    char *outputfilename = priv->outputfilename;
+    if (!outputfilename) {
+        outputfilename = talloc_strdup(priv, priv->waveheader ? "audiodump.wav"
+                                                              : "audiodump.pcm");
+    }
 
     ao->format = af_fmt_from_planar(ao->format);
 
@@ -145,21 +145,22 @@ static int init(struct ao *ao)
     if (!ao_chmap_sel_adjust(ao, &sel, &ao->channels))
         return -1;
 
-    ao->bps = ao->channels.num * ao->samplerate * af_fmt_to_bytes(ao->format);
+    ao->bps = ao->channels.num * (int64_t)ao->samplerate * af_fmt_to_bytes(ao->format);
 
     MP_INFO(ao, "File: %s (%s)\nPCM: Samplerate: %d Hz Channels: %d Format: %s\n",
-            priv->outputfilename,
+            outputfilename,
             priv->waveheader ? "WAVE" : "RAW PCM", ao->samplerate,
             ao->channels.num, af_fmt_to_str(ao->format));
 
-    priv->fp = fopen(priv->outputfilename, priv->append ? "ab" : "wb");
+    priv->fp = fopen(outputfilename, priv->append ? "ab" : "wb");
     if (!priv->fp) {
-        MP_ERR(ao, "Failed to open %s for writing!\n", priv->outputfilename);
+        MP_ERR(ao, "Failed to open %s for writing!\n", outputfilename);
         return -1;
     }
     if (priv->waveheader)  // Reserve space for wave header
         write_wave_header(ao, priv->fp, 0x7ffff000);
     ao->untimed = true;
+    ao->device_buffer = 1 << 16;
 
     return 0;
 }
@@ -171,7 +172,7 @@ static void uninit(struct ao *ao)
 
     if (priv->waveheader) {    // Rewrite wave header
         bool broken_seek = false;
-#ifdef __MINGW32__
+#ifdef _WIN32
         // Windows, in its usual idiocy "emulates" seeks on pipes so it always
         // looks like they work. So we have to detect them brute-force.
         broken_seek = FILE_TYPE_DISK !=
@@ -191,19 +192,36 @@ static void uninit(struct ao *ao)
     fclose(priv->fp);
 }
 
-static int get_space(struct ao *ao)
-{
-    return 65536;
-}
-
-static int play(struct ao *ao, void **data, int samples, int flags)
+static bool audio_write(struct ao *ao, void **data, int samples)
 {
     struct priv *priv = ao->priv;
     int len = samples * ao->sstride;
 
     fwrite(data[0], len, 1, priv->fp);
     priv->data_length += len;
-    return samples;
+
+    return true;
+}
+
+static void get_state(struct ao *ao, struct mp_pcm_state *state)
+{
+    state->free_samples = ao->device_buffer;
+    state->queued_samples = 0;
+    state->delay = 0;
+}
+
+static bool set_pause(struct ao *ao, bool paused)
+{
+    return true; // signal support so common code doesn't write silence
+}
+
+static void start(struct ao *ao)
+{
+    // we use data immediately
+}
+
+static void reset(struct ao *ao)
+{
 }
 
 #define OPT_BASE_STRUCT struct priv
@@ -213,15 +231,17 @@ const struct ao_driver audio_out_pcm = {
     .name      = "pcm",
     .init      = init,
     .uninit    = uninit,
-    .get_space = get_space,
-    .play      = play,
-    .reports_underruns = true, // not a thing
+    .get_state = get_state,
+    .set_pause = set_pause,
+    .write     = audio_write,
+    .start     = start,
+    .reset     = reset,
     .priv_size = sizeof(struct priv),
-    .priv_defaults = &(const struct priv) { .waveheader = 1 },
+    .priv_defaults = &(const struct priv) { .waveheader = true },
     .options = (const struct m_option[]) {
-        OPT_STRING("file", outputfilename, M_OPT_FILE),
-        OPT_FLAG("waveheader", waveheader, 0),
-        OPT_FLAG("append", append, 0),
+        {"file", OPT_STRING(outputfilename), .flags = M_OPT_FILE},
+        {"waveheader", OPT_BOOL(waveheader)},
+        {"append", OPT_BOOL(append)},
         {0}
     },
     .options_prefix = "ao-pcm",

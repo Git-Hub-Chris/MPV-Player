@@ -26,6 +26,16 @@ void *ra_get_native_resource(struct ra *ra, const char *name)
 
 struct ra_tex *ra_tex_create(struct ra *ra, const struct ra_tex_params *params)
 {
+    switch (params->dimensions) {
+    case 1:
+        assert(params->h == 1 && params->d == 1);
+        break;
+    case 2:
+        assert(params->d == 1);
+        break;
+    default:
+        assert(params->dimensions >= 1 && params->dimensions <= 3);
+    }
     return ra->fns->tex_create(ra, params);
 }
 
@@ -104,7 +114,7 @@ struct ra_renderpass_params *ra_renderpass_params_copy(void *ta_parent,
     res->frag_shader = talloc_strdup(res, res->frag_shader);
     res->compute_shader = talloc_strdup(res, res->compute_shader);
     return res;
-};
+}
 
 struct glsl_fmt {
     enum ra_ctype ctype;
@@ -283,11 +293,10 @@ static const struct ra_format *find_plane_format(struct ra *ra, int bytes,
 // Returns false (and *out is not touched) if no format found.
 bool ra_get_imgfmt_desc(struct ra *ra, int imgfmt, struct ra_imgfmt_desc *out)
 {
-    struct ra_imgfmt_desc res = {0};
+    struct ra_imgfmt_desc res = {.component_type = RA_CTYPE_UNKNOWN};
 
     struct mp_regular_imgfmt regfmt;
     if (mp_get_regular_imgfmt(&regfmt, imgfmt)) {
-        enum ra_ctype ctype = RA_CTYPE_UNKNOWN;
         res.num_planes = regfmt.num_planes;
         res.component_bits = regfmt.component_size * 8;
         res.component_pad = regfmt.component_pad;
@@ -305,12 +314,13 @@ bool ra_get_imgfmt_desc(struct ra *ra, int imgfmt, struct ra_imgfmt_desc *out)
                 res.component_pad < 0)
                 return false;
             // Renderer restriction, but actually an unwanted corner case.
-            if (ctype != RA_CTYPE_UNKNOWN && ctype != res.planes[n]->ctype)
+            if (res.component_type != RA_CTYPE_UNKNOWN &&
+                res.component_type != res.planes[n]->ctype)
                 return false;
-            ctype = res.planes[n]->ctype;
+            res.component_type = res.planes[n]->ctype;
         }
-        res.chroma_w = regfmt.chroma_w;
-        res.chroma_h = regfmt.chroma_h;
+        res.chroma_w = 1 << regfmt.chroma_xs;
+        res.chroma_h = 1 << regfmt.chroma_ys;
         goto supported;
     }
 
@@ -330,20 +340,25 @@ supported:
     return true;
 }
 
+static const char *ctype_to_str(enum ra_ctype ctype)
+{
+    switch (ctype) {
+    case RA_CTYPE_UNORM:    return "unorm";
+    case RA_CTYPE_UINT:     return "uint ";
+    case RA_CTYPE_FLOAT:    return "float";
+    default:                return "unknown";
+    }
+}
+
 void ra_dump_tex_formats(struct ra *ra, int msgl)
 {
     if (!mp_msg_test(ra->log, msgl))
         return;
     MP_MSG(ra, msgl, "Texture formats:\n");
-    MP_MSG(ra, msgl, "  NAME       COMP*TYPE SIZE        DEPTH PER COMP.\n");
+    MP_MSG(ra, msgl, "  NAME       COMP*TYPE SIZE           DEPTH PER COMP.\n");
     for (int n = 0; n < ra->num_formats; n++) {
         const struct ra_format *fmt = ra->formats[n];
-        const char *ctype = "unknown";
-        switch (fmt->ctype) {
-        case RA_CTYPE_UNORM:    ctype = "unorm";    break;
-        case RA_CTYPE_UINT:     ctype = "uint ";    break;
-        case RA_CTYPE_FLOAT:    ctype = "float";    break;
-        }
+        const char *ctype = ctype_to_str(fmt->ctype);
         char cl[40] = "";
         for (int i = 0; i < fmt->num_components; i++) {
             mp_snprintf_cat(cl, sizeof(cl), "%s%d", i ? " " : "",
@@ -351,15 +366,17 @@ void ra_dump_tex_formats(struct ra *ra, int msgl)
             if (fmt->component_size[i] != fmt->component_depth[i])
                 mp_snprintf_cat(cl, sizeof(cl), "/%d", fmt->component_depth[i]);
         }
-        MP_MSG(ra, msgl, "  %-10s %d*%s %3dB %s %s %s {%s}\n", fmt->name,
+        MP_MSG(ra, msgl, "  %-10s %d*%s %3dB %s %s %s %s {%s}\n", fmt->name,
                fmt->num_components, ctype, fmt->pixel_size,
                fmt->luminance_alpha ? "LA" : "  ",
                fmt->linear_filter ? "LF" : "  ",
-               fmt->renderable ? "CR" : "  ", cl);
+               fmt->renderable ? "CR" : "  ",
+               fmt->storable ? "ST" : "  ", cl);
     }
     MP_MSG(ra, msgl, " LA = LUMINANCE_ALPHA hack format\n");
     MP_MSG(ra, msgl, " LF = linear filterable\n");
     MP_MSG(ra, msgl, " CR = can be used for render targets\n");
+    MP_MSG(ra, msgl, " ST = can be used for storable images\n");
 }
 
 void ra_dump_imgfmt_desc(struct ra *ra, const struct ra_imgfmt_desc *desc,
@@ -380,9 +397,10 @@ void ra_dump_imgfmt_desc(struct ra *ra, const struct ra_imgfmt_desc *desc,
         mp_snprintf_cat(pl, sizeof(pl), "%s", t);
         mp_snprintf_cat(pf, sizeof(pf), "%s", desc->planes[n]->name);
     }
-    MP_MSG(ra, msgl, "%d planes %dx%d %d/%d [%s] (%s)\n",
+    MP_MSG(ra, msgl, "%d planes %dx%d %d/%d [%s] (%s) [%s]\n",
            desc->num_planes, desc->chroma_w, desc->chroma_h,
-           desc->component_bits, desc->component_pad, pf, pl);
+           desc->component_bits, desc->component_pad, pf, pl,
+           ctype_to_str(desc->component_type));
 }
 
 void ra_dump_img_formats(struct ra *ra, int msgl)

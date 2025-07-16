@@ -19,8 +19,6 @@
 #include <assert.h>
 #include <limits.h>
 
-#include <libavutil/common.h>
-
 #include "common/common.h"
 #include "common/msg.h"
 #include "video/csputils.h"
@@ -33,7 +31,7 @@
 static const int blend_factors[SUBBITMAP_COUNT][4] = {
     [SUBBITMAP_LIBASS] = {RA_BLEND_SRC_ALPHA, RA_BLEND_ONE_MINUS_SRC_ALPHA,
                           RA_BLEND_ONE,       RA_BLEND_ONE_MINUS_SRC_ALPHA},
-    [SUBBITMAP_RGBA] =   {RA_BLEND_ONE,       RA_BLEND_ONE_MINUS_SRC_ALPHA,
+    [SUBBITMAP_BGRA] =   {RA_BLEND_ONE,       RA_BLEND_ONE_MINUS_SRC_ALPHA,
                           RA_BLEND_ONE,       RA_BLEND_ONE_MINUS_SRC_ALPHA},
 };
 
@@ -88,7 +86,7 @@ struct mpgl_osd *mpgl_osd_init(struct ra *ra, struct mp_log *log,
     };
 
     ctx->fmt_table[SUBBITMAP_LIBASS] = ra_find_unorm_format(ra, 1, 1);
-    ctx->fmt_table[SUBBITMAP_RGBA]   = ra_find_unorm_format(ra, 1, 4);
+    ctx->fmt_table[SUBBITMAP_BGRA]   = ra_find_unorm_format(ra, 1, 4);
 
     for (int n = 0; n < MAX_OSD_PARTS; n++)
         ctx->parts[n] = talloc_zero(ctx, struct mpgl_osd_part);
@@ -140,8 +138,8 @@ static bool upload_osd(struct mpgl_osd *ctx, struct mpgl_osd_part *osd,
         ra_tex_free(ra, &osd->texture);
 
         osd->format = imgs->format;
-        osd->w = FFMAX(32, req_w);
-        osd->h = FFMAX(32, req_h);
+        osd->w = MPMAX(32, req_w);
+        osd->h = MPMAX(32, req_h);
 
         MP_VERBOSE(ctx, "Reallocating OSD texture to %dx%d.\n", osd->w, osd->h);
 
@@ -217,7 +215,7 @@ bool mpgl_osd_draw_prepare(struct mpgl_osd *ctx, int index,
 
     gl_sc_uniform_texture(sc, "osdtex", part->texture);
     switch (fmt) {
-    case SUBBITMAP_RGBA: {
+    case SUBBITMAP_BGRA: {
         GLSL(color = texture(osdtex, texcoord).bgra;)
         break;
     }
@@ -227,7 +225,7 @@ bool mpgl_osd_draw_prepare(struct mpgl_osd *ctx, int index,
         break;
     }
     default:
-        abort();
+        MP_ASSERT_UNREACHABLE();
     }
 
     return true;
@@ -288,7 +286,7 @@ static void get_3d_side_by_side(int stereo_mode, int div[2])
 }
 
 void mpgl_osd_draw_finish(struct mpgl_osd *ctx, int index,
-                          struct gl_shader_cache *sc, struct ra_fbo fbo)
+                          struct gl_shader_cache *sc, const struct ra_fbo *fbo)
 {
     struct mpgl_osd_part *part = ctx->parts[index];
 
@@ -314,7 +312,7 @@ void mpgl_osd_draw_finish(struct mpgl_osd *ctx, int index,
     const int *factors = &blend_factors[part->format][0];
     gl_sc_blend(sc, factors[0], factors[1], factors[2], factors[3]);
 
-    gl_sc_dispatch_draw(sc, fbo.tex, false, vertex_vao, MP_ARRAY_SIZE(vertex_vao),
+    gl_sc_dispatch_draw(sc, fbo->tex, false, vertex_vao, MP_ARRAY_SIZE(vertex_vao),
                         sizeof(struct vertex), part->vertices, part->num_vertices);
 }
 

@@ -16,13 +16,10 @@
  */
 
 #include <string.h>
-#include <strings.h>
 #include <assert.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
-
-#include <libavutil/common.h>
 
 #include "mpv_talloc.h"
 
@@ -34,7 +31,7 @@ int bstrcmp(struct bstr str1, struct bstr str2)
 {
     int ret = 0;
     if (str1.len && str2.len)
-        ret = memcmp(str1.start, str2.start, FFMIN(str1.len, str2.len));
+        ret = memcmp(str1.start, str2.start, MPMIN(str1.len, str2.len));
 
     if (!ret) {
         if (str1.len == str2.len)
@@ -51,7 +48,7 @@ int bstrcasecmp(struct bstr str1, struct bstr str2)
 {
     int ret = 0;
     if (str1.len && str2.len)
-        ret = strncasecmp(str1.start, str2.start, FFMIN(str1.len, str2.len));
+        ret = strncasecmp(str1.start, str2.start, MPMIN(str1.len, str2.len));
 
     if (!ret) {
         if (str1.len == str2.len)
@@ -66,18 +63,25 @@ int bstrcasecmp(struct bstr str1, struct bstr str2)
 
 int bstrchr(struct bstr str, int c)
 {
-    for (int i = 0; i < str.len; i++)
-        if (str.start[i] == c)
-            return i;
-    return -1;
+    if (!str.len)
+        return -1;
+    unsigned char *pos = memchr(str.start, c, str.len);
+    return pos ? pos - str.start : -1;
 }
 
 int bstrrchr(struct bstr str, int c)
 {
+    if (!str.len)
+        return -1;
+#if HAVE_MEMRCHR
+    unsigned char *pos = memrchr(str.start, c, str.len);
+    return pos ? pos - str.start : -1;
+#else
     for (int i = str.len - 1; i >= 0; i--)
         if (str.start[i] == c)
             return i;
     return -1;
+#endif
 }
 
 int bstrcspn(struct bstr str, const char *reject)
@@ -157,9 +161,9 @@ struct bstr bstr_splice(struct bstr str, int start, int end)
         start += str.len;
     if (end < 0)
         end += str.len;
-    end = FFMIN(end, str.len);
-    start = FFMAX(start, 0);
-    end = FFMAX(end, start);
+    end = MPMIN(end, str.len);
+    start = MPMAX(start, 0);
+    end = MPMAX(end, start);
     str.start += start;
     str.len = end - start;
     return str;
@@ -169,7 +173,7 @@ long long bstrtoll(struct bstr str, struct bstr *rest, int base)
 {
     str = bstr_lstrip(str);
     char buf[51];
-    int len = FFMIN(str.len, 50);
+    int len = MPMIN(str.len, 50);
     memcpy(buf, str.start, len);
     buf[len] = 0;
     char *endptr;
@@ -183,35 +187,13 @@ double bstrtod(struct bstr str, struct bstr *rest)
 {
     str = bstr_lstrip(str);
     char buf[101];
-    int len = FFMIN(str.len, 100);
+    int len = MPMIN(str.len, 100);
     memcpy(buf, str.start, len);
     buf[len] = 0;
     char *endptr;
     double r = strtod(buf, &endptr);
     if (rest)
         *rest = bstr_cut(str, endptr - buf);
-    return r;
-}
-
-struct bstr *bstr_splitlines(void *talloc_ctx, struct bstr str)
-{
-    if (str.len == 0)
-        return NULL;
-    int count = 0;
-    for (int i = 0; i < str.len; i++)
-        if (str.start[i] == '\n')
-            count++;
-    if (str.start[str.len - 1] != '\n')
-        count++;
-    struct bstr *r = talloc_array_ptrtype(talloc_ctx, r, count);
-    unsigned char *p = str.start;
-    for (int i = 0; i < count - 1; i++) {
-        r[i].start = p;
-        while (*p++ != '\n');
-        r[i].len = p - r[i].start;
-    }
-    r[count - 1].start = p;
-    r[count - 1].len = str.start + str.len - p;
     return r;
 }
 
@@ -272,7 +254,7 @@ int bstr_parse_utf8_code_length(unsigned char b)
 {
     if (b < 128)
         return 1;
-    int bytes = 7 - av_log2(b ^ 255);
+    int bytes = 7 - mp_log2(b ^ 255);
     return (bytes >= 2 && bytes <= 4) ? bytes : -1;
 }
 
@@ -379,52 +361,45 @@ static void resize_append(void *talloc_ctx, bstr *s, size_t append_min)
     }
 }
 
-// Append the string, so that *s = *s + append. s->start is expected to be
-// a talloc allocation (which can be realloced) or NULL.
-// This function will always implicitly append a \0 after the new string for
-// convenience.
-// talloc_ctx will be used as parent context, if s->start is NULL.
 void bstr_xappend(void *talloc_ctx, bstr *s, bstr append)
 {
     if (!append.len)
         return;
     resize_append(talloc_ctx, s, append.len + 1);
-    memcpy(s->start + s->len, append.start, append.len);
+    memmove(s->start + s->len, append.start, append.len);
     s->len += append.len;
     s->start[s->len] = '\0';
 }
 
-void bstr_xappend_asprintf(void *talloc_ctx, bstr *s, const char *fmt, ...)
+int bstr_xappend_asprintf(void *talloc_ctx, bstr *s, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    bstr_xappend_vasprintf(talloc_ctx, s, fmt, ap);
+    int ret = bstr_xappend_vasprintf(talloc_ctx, s, fmt, ap);
     va_end(ap);
+    return ret;
 }
 
-// Exactly as bstr_xappend(), but with a formatted string.
-void bstr_xappend_vasprintf(void *talloc_ctx, bstr *s, const char *fmt,
-                            va_list ap)
+int bstr_xappend_vasprintf(void *talloc_ctx, bstr *s, const char *fmt,
+                           va_list ap)
 {
     int size;
     va_list copy;
     va_copy(copy, ap);
     size_t avail = talloc_get_size(s->start) - s->len;
     char *dest = s->start ? s->start + s->len : NULL;
-    char c;
-    if (avail < 1)
-        dest = &c;
-    size = vsnprintf(dest, MPMAX(avail, 1), fmt, copy);
+    size = vsnprintf(dest, avail, fmt, copy);
     va_end(copy);
 
     if (size < 0)
-        abort();
+        return size;
 
     if (avail < 1 || size + 1 > avail) {
         resize_append(talloc_ctx, s, size + 1);
         vsnprintf(s->start + s->len, size + 1, fmt, ap);
     }
     s->len += size;
+    return size;
 }
 
 bool bstr_case_startswith(struct bstr s, struct bstr prefix)
@@ -491,3 +466,23 @@ bool bstr_decode_hex(void *talloc_ctx, struct bstr hex, struct bstr *out)
     *out = (struct bstr){ .start = arr, .len = len };
     return true;
 }
+
+#ifdef _WIN32
+
+#include <windows.h>
+
+int bstr_to_wchar(void *talloc_ctx, struct bstr s, wchar_t **ret)
+{
+    int count = MultiByteToWideChar(CP_UTF8, 0, s.start, s.len, NULL, 0);
+    if (count <= 0)
+        abort();
+    wchar_t *wbuf = *ret;
+    if (!wbuf || ta_get_size(wbuf) < (count + 1) * sizeof(wchar_t))
+        wbuf = talloc_realloc(talloc_ctx, wbuf, wchar_t, count + 1);
+    MultiByteToWideChar(CP_UTF8, 0, s.start, s.len, wbuf, count);
+    wbuf[count] = L'\0';
+    *ret = wbuf;
+    return count;
+}
+
+#endif

@@ -33,7 +33,7 @@ struct chain {
     struct mp_user_filter **user_filters;
     int num_user_filters;
 
-    // Concatentated list of pre+user+post filters.
+    // Concatenated list of pre+user+post filters.
     struct mp_user_filter **all_filters;
     int num_all_filters;
     // First input/last output of all_filters[].
@@ -88,9 +88,6 @@ static void update_output_caps(struct chain *p)
             if (allowed_output_formats[n])
                 mp_autoconvert_add_imgfmt(p->convert, IMGFMT_START + n, 0);
         }
-
-        if (p->vo->hwdec_devs)
-            mp_autoconvert_add_vo_hwdec_subfmts(p->convert, p->vo->hwdec_devs);
     }
 }
 
@@ -103,23 +100,29 @@ static void check_in_format_change(struct mp_user_filter *u,
         struct mp_image *img = frame.data;
 
         if (!mp_image_params_equal(&img->params, &u->last_in_vformat)) {
-            MP_VERBOSE(p, "[%s] %s\n", u->name,
-                       mp_image_params_to_str(&img->params));
-            u->last_in_vformat = img->params;
-
             if (u == p->input) {
                 p->public.input_params = img->params;
+            } else if (u == p->output) {
+                p->public.output_params = img->params;
+            }
+
+            if (!mp_image_params_static_equal(&img->params, &u->last_in_vformat)) {
+                MP_VERBOSE(p, "[%s] %s\n", u->name,
+                           mp_image_params_to_str(&img->params));
 
                 // Unfortunately there's no good place to update these.
                 // But a common case is enabling HW decoding, which
                 // might init some support of them in the VO, and update
                 // the VO's format list.
-                update_output_caps(p);
-            } else if (u == p->output) {
-                p->public.output_params = img->params;
-            }
+                //
+                // But as this is only relevant to the "convert" filter, don't
+                // do this for the other filters as it is wasted work.
+                if (strcmp(u->name, "convert") == 0)
+                    update_output_caps(p);
 
-            p->public.reconfig_happened = true;
+                p->public.reconfig_happened = true;
+            }
+            u->last_in_vformat = img->params;
         }
     }
 
@@ -142,7 +145,7 @@ static void check_in_format_change(struct mp_user_filter *u,
     }
 }
 
-static void process_user(struct mp_filter *f)
+static void user_wrapper_process(struct mp_filter *f)
 {
     struct mp_user_filter *u = f->priv;
     struct chain *p = u->p;
@@ -209,7 +212,7 @@ static void process_user(struct mp_filter *f)
     }
 }
 
-static void reset_user(struct mp_filter *f)
+static void user_wrapper_reset(struct mp_filter *f)
 {
     struct mp_user_filter *u = f->priv;
 
@@ -217,7 +220,7 @@ static void reset_user(struct mp_filter *f)
     u->last_in_pts = u->last_out_pts = MP_NOPTS_VALUE;
 }
 
-static void destroy_user(struct mp_filter *f)
+static void user_wrapper_destroy(struct mp_filter *f)
 {
     struct mp_user_filter *u = f->priv;
 
@@ -230,9 +233,9 @@ static void destroy_user(struct mp_filter *f)
 static const struct mp_filter_info user_wrapper_filter = {
     .name = "user_filter_wrapper",
     .priv_size = sizeof(struct mp_user_filter),
-    .process = process_user,
-    .reset = reset_user,
-    .destroy = destroy_user,
+    .process = user_wrapper_process,
+    .reset = user_wrapper_reset,
+    .destroy = user_wrapper_destroy,
 };
 
 static struct mp_user_filter *create_wrapper_filter(struct chain *p)
@@ -279,7 +282,7 @@ static void relink_filter_list(struct chain *p)
     }
 }
 
-static void process(struct mp_filter *f)
+static void output_chain_process(struct mp_filter *f)
 {
     struct chain *p = f->priv;
 
@@ -308,7 +311,7 @@ static void process(struct mp_filter *f)
     }
 }
 
-static void reset(struct mp_filter *f)
+static void output_chain_reset(struct mp_filter *f)
 {
     struct chain *p = f->priv;
 
@@ -338,17 +341,17 @@ void mp_output_chain_reset_harder(struct mp_output_chain *c)
     }
 }
 
-static void destroy(struct mp_filter *f)
+static void output_chain_destroy(struct mp_filter *f)
 {
-    reset(f);
+    output_chain_reset(f);
 }
 
 static const struct mp_filter_info output_chain_filter = {
     .name = "output_chain",
     .priv_size = sizeof(struct chain),
-    .process = process,
-    .reset = reset,
-    .destroy = destroy,
+    .process = output_chain_process,
+    .reset = output_chain_reset,
+    .destroy = output_chain_destroy,
 };
 
 static double get_display_fps(struct mp_stream_info *i)
@@ -358,6 +361,13 @@ static double get_display_fps(struct mp_stream_info *i)
     if (p->vo)
         vo_control(p->vo, VOCTRL_GET_DISPLAY_FPS, &res);
     return res;
+}
+
+static void get_display_res(struct mp_stream_info *i, int *res)
+{
+    struct chain *p = i->priv;
+    if (p->vo)
+        vo_control(p->vo, VOCTRL_GET_DISPLAY_RES, res);
 }
 
 void mp_output_chain_set_vo(struct mp_output_chain *c, struct vo *vo)
@@ -457,13 +467,12 @@ bool mp_output_chain_command(struct mp_output_chain *c, const char *target,
 // supports it, reset *speed, then keep setting the speed on the other filters.
 // The purpose of this is to make sure only 1 filter changes speed.
 static void set_speed_any(struct mp_user_filter **filters, int num_filters,
-                          bool resample, double *speed)
+                          int command, double *speed)
 {
     for (int n = num_filters - 1; n >= 0; n--) {
         assert(*speed);
         struct mp_filter_command cmd = {
-            .type = resample ? MP_FILTER_COMMAND_SET_SPEED_RESAMPLE
-                             : MP_FILTER_COMMAND_SET_SPEED,
+            .type = command,
             .speed = *speed,
         };
         if (mp_filter_command(filters[n]->f, &cmd))
@@ -472,17 +481,24 @@ static void set_speed_any(struct mp_user_filter **filters, int num_filters,
 }
 
 void mp_output_chain_set_audio_speed(struct mp_output_chain *c,
-                                     double speed, double resample)
+                                     double speed, double resample, double drop)
 {
     struct chain *p = c->f->priv;
 
     // We always resample with the final libavresample instance.
-    set_speed_any(p->post_filters, p->num_post_filters, true, &resample);
+    set_speed_any(p->post_filters, p->num_post_filters,
+                  MP_FILTER_COMMAND_SET_SPEED_RESAMPLE, &resample);
 
     // If users have filters like "scaletempo" insert anywhere, use that,
     // otherwise use the builtin ones.
-    set_speed_any(p->user_filters, p->num_user_filters, false, &speed);
-    set_speed_any(p->post_filters, p->num_post_filters, false, &speed);
+    set_speed_any(p->user_filters, p->num_user_filters,
+                  MP_FILTER_COMMAND_SET_SPEED, &speed);
+    set_speed_any(p->post_filters, p->num_post_filters,
+                  MP_FILTER_COMMAND_SET_SPEED, &speed);
+    set_speed_any(p->user_filters, p->num_user_filters,
+                  MP_FILTER_COMMAND_SET_SPEED_DROP, &drop);
+    set_speed_any(p->post_filters, p->num_post_filters,
+                  MP_FILTER_COMMAND_SET_SPEED_DROP, &drop);
 }
 
 double mp_output_get_measured_total_delay(struct mp_output_chain *c)
@@ -504,31 +520,15 @@ double mp_output_get_measured_total_delay(struct mp_output_chain *c)
     return delay;
 }
 
-static bool compare_filter(struct m_obj_settings *a, struct m_obj_settings *b)
+bool mp_output_chain_deinterlace_active(struct mp_output_chain *c)
 {
-    if (a == b || !a || !b)
-        return a == b;
-
-    if (!a->name || !b->name)
-        return a->name == b->name;
-
-    if (!!a->label != !!b->label || (a->label && strcmp(a->label, b->label) != 0))
-        return false;
-
-    if (a->enabled != b->enabled)
-        return false;
-
-    if (!a->attribs || !a->attribs[0])
-        return !b->attribs || !b->attribs[0];
-
-    for (int n = 0; a->attribs[n] || b->attribs[n]; n++) {
-        if (!a->attribs[n] || !b->attribs[n])
-            return false;
-        if (strcmp(a->attribs[n], b->attribs[n]) != 0)
-            return false;
+    struct chain *p = c->f->priv;
+    for (int n = 0; n < p->num_all_filters; n++) {
+        struct mp_user_filter *u = p->all_filters[n];
+        if (strcmp(u->name, "userdeint") == 0)
+            return mp_deint_active(u->f);
     }
-
-    return true;
+    return false;
 }
 
 bool mp_output_chain_update_filters(struct mp_output_chain *c,
@@ -551,7 +551,8 @@ bool mp_output_chain_update_filters(struct mp_output_chain *c,
         struct mp_user_filter *u = NULL;
 
         for (int i = 0; i < p->num_user_filters; i++) {
-            if (!used[i] && compare_filter(entry, p->user_filters[i]->args)) {
+            if (!used[i] && m_obj_settings_equal(entry, p->user_filters[i]->args))
+            {
                 u = p->user_filters[i];
                 used[i] = true;
                 break;
@@ -628,7 +629,7 @@ bool mp_output_chain_update_filters(struct mp_output_chain *c,
 
 error:
     for (int n = 0; n < num_add; n++)
-        talloc_free(add[n]);
+        talloc_free(add[n]->wrapper);
     talloc_free(add);
     talloc_free(used);
     return false;
@@ -640,6 +641,7 @@ static void create_video_things(struct chain *p)
 
     p->stream_info.priv = p;
     p->stream_info.get_display_fps = get_display_fps;
+    p->stream_info.get_display_res = get_display_res;
 
     p->f->stream_info = &p->stream_info;
 
@@ -734,7 +736,7 @@ struct mp_output_chain *mp_output_chain_create(struct mp_filter *parent,
 
     relink_filter_list(p);
 
-    reset(f);
+    output_chain_reset(f);
 
     return c;
 }

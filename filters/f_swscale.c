@@ -40,17 +40,16 @@
 #include "filter.h"
 #include "filter_internal.h"
 
-int mp_sws_find_best_out_format(int in_format, int *out_formats,
-                                int num_out_formats)
+int mp_sws_find_best_out_format(struct mp_sws_filter *sws, int in_format,
+                                int *out_formats, int num_out_formats)
 {
-    if (sws_isSupportedInput(imgfmt2pixfmt(in_format)) < 1)
-        return 0;
+    sws->sws->force_scaler = sws->force_scaler;
 
     int best = 0;
     for (int n = 0; n < num_out_formats; n++) {
         int out_format = out_formats[n];
 
-        if (sws_isSupportedOutput(imgfmt2pixfmt(out_format)) < 1)
+        if (!mp_sws_supports_formats(sws->sws, out_format, in_format))
             continue;
 
         if (best) {
@@ -69,12 +68,14 @@ bool mp_sws_supports_input(int imgfmt)
     return sws_isSupportedInput(imgfmt2pixfmt(imgfmt));
 }
 
-static void process(struct mp_filter *f)
+static void sws_process(struct mp_filter *f)
 {
     struct mp_sws_filter *s = f->priv;
 
     if (!mp_pin_can_transfer_data(f->ppins[1], f->ppins[0]))
         return;
+
+    s->sws->force_scaler = s->force_scaler;
 
     struct mp_frame frame = mp_pin_out_read(f->ppins[0]);
     if (mp_frame_is_signaling(frame)) {
@@ -105,12 +106,6 @@ static void process(struct mp_filter *f)
 
     mp_image_copy_attributes(dst, src);
 
-    // If we convert from RGB to YUV, default to limited range.
-    if (mp_imgfmt_get_forced_csp(src->imgfmt) == MP_CSP_RGB &&
-        mp_imgfmt_get_forced_csp(dst->imgfmt) == MP_CSP_AUTO)
-    {
-        dst->params.color.levels = MP_CSP_LEVELS_TV;
-    }
     if (s->use_out_params)
         dst->params = s->out_params;
     mp_image_params_guess_csp(&dst->params);
@@ -135,7 +130,7 @@ error:
 static const struct mp_filter_info sws_filter = {
     .name = "swscale",
     .priv_size = sizeof(struct mp_sws_filter),
-    .process = process,
+    .process = sws_process,
 };
 
 struct mp_sws_filter *mp_sws_filter_create(struct mp_filter *parent)
@@ -151,10 +146,8 @@ struct mp_sws_filter *mp_sws_filter_create(struct mp_filter *parent)
     s->f = f;
     s->sws = mp_sws_alloc(s);
     s->sws->log = f->log;
+    mp_sws_enable_cmdline_opts(s->sws, f->global);
     s->pool = mp_image_pool_new(s);
-
-    s->sws->allow_zimg = true;
-    mp_sws_set_from_cmdline(s->sws, f->global);
 
     return s;
 }

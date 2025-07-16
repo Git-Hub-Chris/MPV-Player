@@ -17,9 +17,7 @@
 
 #include <string.h>
 #include <assert.h>
-
-#include <libavutil/mem.h>
-#include <libavutil/common.h>
+#include <limits.h>
 
 #include "mpv_talloc.h"
 
@@ -33,7 +31,8 @@
 void mp_blur_rgba_sub_bitmap(struct sub_bitmap *d, double gblur)
 {
     struct mp_image *tmp1 = mp_image_alloc(IMGFMT_BGRA, d->w, d->h);
-    if (tmp1) { // on OOM, skip region
+    MP_HANDLE_OOM(tmp1);
+    {
         struct mp_image s = {0};
         mp_image_setfmt(&s, IMGFMT_BGRA);
         mp_image_set_size(&s, d->w, d->h);
@@ -52,15 +51,15 @@ bool mp_sub_bitmaps_bb(struct sub_bitmaps *imgs, struct mp_rect *out_bb)
     struct mp_rect bb = {INT_MAX, INT_MAX, INT_MIN, INT_MIN};
     for (int n = 0; n < imgs->num_parts; n++) {
         struct sub_bitmap *p = &imgs->parts[n];
-        bb.x0 = FFMIN(bb.x0, p->x);
-        bb.y0 = FFMIN(bb.y0, p->y);
-        bb.x1 = FFMAX(bb.x1, p->x + p->dw);
-        bb.y1 = FFMAX(bb.y1, p->y + p->dh);
+        bb.x0 = MPMIN(bb.x0, p->x);
+        bb.y0 = MPMIN(bb.y0, p->y);
+        bb.x1 = MPMAX(bb.x1, p->x + p->dw);
+        bb.y1 = MPMAX(bb.y1, p->y + p->dh);
     }
 
     // avoid degenerate bounding box if empty
-    bb.x0 = FFMIN(bb.x0, bb.x1);
-    bb.y0 = FFMIN(bb.y0, bb.y1);
+    bb.x0 = MPMIN(bb.x0, bb.x1);
+    bb.y0 = MPMIN(bb.y0, bb.y1);
 
     *out_bb = bb;
 

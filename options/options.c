@@ -22,6 +22,7 @@
  * config for cfgparser
  */
 
+#include <float.h>
 #include <stddef.h>
 #include <sys/types.h>
 #include <limits.h>
@@ -31,24 +32,25 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <dwmapi.h>
 #endif
 
 #include "options.h"
 #include "m_config.h"
 #include "m_option.h"
 #include "common/common.h"
+#include "input/event.h"
 #include "stream/stream.h"
 #include "video/csputils.h"
+#include "video/filter/refqueue.h"
 #include "video/hwdec.h"
 #include "video/image_writer.h"
 #include "sub/osd.h"
+#include "sub/sd.h"
 #include "player/core.h"
 #include "player/command.h"
 #include "stream/stream.h"
-
-#if HAVE_DRM
-#include "video/out/drm_common.h"
-#endif
+#include "demux/demux.h"
 
 static void print_version(struct mp_log *log)
 {
@@ -56,6 +58,7 @@ static void print_version(struct mp_log *log)
 }
 
 extern const struct m_sub_options tv_params_conf;
+extern const struct m_sub_options stream_bluray_conf;
 extern const struct m_sub_options stream_cdda_conf;
 extern const struct m_sub_options stream_dvb_conf;
 extern const struct m_sub_options stream_lavf_conf;
@@ -64,14 +67,16 @@ extern const struct m_sub_options zimg_conf;
 extern const struct m_sub_options drm_conf;
 extern const struct m_sub_options demux_rawaudio_conf;
 extern const struct m_sub_options demux_rawvideo_conf;
+extern const struct m_sub_options demux_playlist_conf;
 extern const struct m_sub_options demux_lavf_conf;
 extern const struct m_sub_options demux_mkv_conf;
-extern const struct m_sub_options demux_cue_conf;
 extern const struct m_sub_options vd_lavc_conf;
 extern const struct m_sub_options ad_lavc_conf;
 extern const struct m_sub_options input_config;
 extern const struct m_sub_options encode_config;
+extern const struct m_sub_options ra_ctx_conf;
 extern const struct m_sub_options gl_video_conf;
+extern const struct m_sub_options gl_next_conf;
 extern const struct m_sub_options ao_alsa_conf;
 
 extern const struct m_sub_options demux_conf;
@@ -83,17 +88,23 @@ extern const struct m_obj_list vo_obj_list;
 
 extern const struct m_sub_options ao_conf;
 
+extern const struct m_sub_options dvd_conf;
+extern const struct m_sub_options clipboard_conf;
+
 extern const struct m_sub_options opengl_conf;
 extern const struct m_sub_options vulkan_conf;
+extern const struct m_sub_options vulkan_display_conf;
 extern const struct m_sub_options spirv_conf;
 extern const struct m_sub_options d3d11_conf;
 extern const struct m_sub_options d3d11va_conf;
 extern const struct m_sub_options angle_conf;
-extern const struct m_sub_options cocoa_conf;
 extern const struct m_sub_options macos_conf;
-extern const struct m_sub_options android_conf;
 extern const struct m_sub_options wayland_conf;
+extern const struct m_sub_options wingl_conf;
 extern const struct m_sub_options vaapi_conf;
+extern const struct m_sub_options egl_conf;
+
+extern const struct m_sub_options mp_sub_filter_opts;
 
 static const struct m_sub_options screenshot_conf = {
     .opts = image_writer_opts,
@@ -105,67 +116,130 @@ static const struct m_sub_options screenshot_conf = {
 #define OPT_BASE_STRUCT struct mp_vo_opts
 
 static const m_option_t mp_vo_opt_list[] = {
-    OPT_SETTINGSLIST("vo", video_driver_list, 0, &vo_obj_list, ),
-    OPT_SUBSTRUCT("sws", sws_opts, sws_conf, 0),
-#if HAVE_ZIMG
-    OPT_SUBSTRUCT("zimg", zimg_opts, zimg_conf, 0),
-#endif
-    OPT_FLAG("taskbar-progress", taskbar_progress, 0),
-    OPT_FLAG("snap-window", snap_window, 0),
-    OPT_FLAG("ontop", ontop, 0),
-    OPT_CHOICE_OR_INT("ontop-level", ontop_level, 0, 0, INT_MAX,
-                      ({"window", -1}, {"system", -2})),
-    OPT_FLAG("border", border, 0),
-    OPT_FLAG("fit-border", fit_border, 0),
-    OPT_FLAG("on-all-workspaces", all_workspaces, 0),
-    OPT_GEOMETRY("geometry", geometry, 0),
-    OPT_SIZE_BOX("autofit", autofit, 0),
-    OPT_SIZE_BOX("autofit-larger", autofit_larger, 0),
-    OPT_SIZE_BOX("autofit-smaller", autofit_smaller, 0),
-    OPT_DOUBLE("window-scale", window_scale, CONF_RANGE, .min = 0.001, .max = 100),
-    OPT_FLAG("force-window-position", force_window_position, 0),
-    OPT_STRING("x11-name", winname, 0),
-    OPT_FLOATRANGE("monitoraspect", force_monitor_aspect, 0, 0.0, 9.0),
-    OPT_FLOATRANGE("monitorpixelaspect", monitor_pixel_aspect, 0, 1.0/32.0, 32.0),
-    OPT_FLAG("fullscreen", fullscreen, 0),
-    OPT_ALIAS("fs", "fullscreen"),
-    OPT_FLAG("native-keyrepeat", native_keyrepeat, 0),
-    OPT_FLOATRANGE("panscan", panscan, 0, 0.0, 1.0),
-    OPT_FLOATRANGE("video-zoom", zoom, 0, -20.0, 20.0),
-    OPT_FLOATRANGE("video-pan-x", pan_x, 0, -3.0, 3.0),
-    OPT_FLOATRANGE("video-pan-y", pan_y, 0, -3.0, 3.0),
-    OPT_FLOATRANGE("video-align-x", align_x, 0, -1.0, 1.0),
-    OPT_FLOATRANGE("video-align-y", align_y, 0, -1.0, 1.0),
-    OPT_FLOATRANGE("video-margin-ratio-left", margin_x[0], 0, 0.0, 1.0),
-    OPT_FLOATRANGE("video-margin-ratio-right", margin_x[1], 0, 0.0, 1.0),
-    OPT_FLOATRANGE("video-margin-ratio-top", margin_y[0], 0, 0.0, 1.0),
-    OPT_FLOATRANGE("video-margin-ratio-bottom", margin_y[1], 0, 0.0, 1.0),
-    OPT_CHOICE("video-unscaled", unscaled, 0,
-               ({"no", 0}, {"yes", 1}, {"downscale-big", 2})),
-    OPT_INT64("wid", WinID, 0),
-    OPT_CHOICE_OR_INT("screen", screen_id, 0, 0, 32,
-                      ({"default", -1})),
-    OPT_CHOICE_OR_INT("fs-screen", fsscreen_id, 0, 0, 32,
-                      ({"all", -2}, {"current", -1})),
-    OPT_FLAG("keepaspect", keepaspect, 0),
-    OPT_FLAG("keepaspect-window", keepaspect_window, 0),
-    OPT_FLAG("hidpi-window-scale", hidpi_window_scale, 0),
-    OPT_FLAG("native-fs", native_fs, 0),
-    OPT_DOUBLE("display-fps", override_display_fps, M_OPT_MIN, .min = 0),
-    OPT_DOUBLERANGE("video-timing-offset", timing_offset, 0, 0.0, 1.0),
+    {"vo", OPT_SETTINGSLIST(video_driver_list, &vo_obj_list), .flags = UPDATE_VO},
+    {"taskbar-progress", OPT_BOOL(taskbar_progress)},
+    {"drag-and-drop", OPT_CHOICE(drag_and_drop, {"no", -2}, {"auto", -1},
+        {"replace", DND_REPLACE},
+        {"append", DND_APPEND},
+        {"insert-next", DND_INSERT_NEXT})},
+    {"snap-window", OPT_BOOL(snap_window)},
+    {"ontop", OPT_BOOL(ontop)},
+    {"ontop-level", OPT_CHOICE(ontop_level, {"window", -1}, {"system", -2},
+        {"desktop", -3}), M_RANGE(0, INT_MAX)},
+    {"border", OPT_BOOL(border)},
+    {"title-bar", OPT_BOOL(title_bar)},
+    {"on-all-workspaces", OPT_BOOL(all_workspaces)},
+    {"geometry", OPT_GEOMETRY(geometry), .force_update = true},
+    {"autofit", OPT_SIZE_BOX(autofit), .force_update = true},
+    {"autofit-larger", OPT_SIZE_BOX(autofit_larger), .force_update = true},
+    {"autofit-smaller", OPT_SIZE_BOX(autofit_smaller), .force_update = true},
+    {"auto-window-resize", OPT_BOOL(auto_window_resize)},
+    {"window-scale", OPT_DOUBLE(window_scale), M_RANGE(0.001, 100), .force_update = true},
+    {"window-minimized", OPT_BOOL(window_minimized)},
+    {"window-maximized", OPT_BOOL(window_maximized)},
+    {"focus-on-open", OPT_REMOVED("Replaced by --focus-on")},
+    {"focus-on", OPT_CHOICE(focus_on, {"never", 0}, {"open", 1}, {"all", 2})},
+    {"force-render", OPT_BOOL(force_render)},
+    {"force-window-position", OPT_BOOL(force_window_position)},
+    {"x11-name", OPT_STRING(winname)},
+    {"wayland-app-id", OPT_STRING(appid)},
+    {"monitoraspect", OPT_FLOAT(force_monitor_aspect), M_RANGE(0.0, 9.0)},
+    {"monitorpixelaspect", OPT_FLOAT(monitor_pixel_aspect),
+        M_RANGE(1.0/32.0, 32.0)},
+    {"fullscreen", OPT_BOOL(fullscreen)},
+    {"fs", OPT_ALIAS("fullscreen")},
+    {"input-cursor-passthrough", OPT_BOOL(cursor_passthrough)},
+    {"native-keyrepeat", OPT_BOOL(native_keyrepeat)},
+    {"panscan", OPT_FLOAT(panscan), M_RANGE(0.0, 1.0)},
+    {"video-zoom", OPT_FLOAT(zoom), M_RANGE(-20.0, 20.0)},
+    {"video-pan-x", OPT_FLOAT(pan_x)},
+    {"video-pan-y", OPT_FLOAT(pan_y)},
+    {"video-align-x", OPT_FLOAT(align_x), M_RANGE(-1.0, 1.0)},
+    {"video-align-y", OPT_FLOAT(align_y), M_RANGE(-1.0, 1.0)},
+    {"video-scale-x", OPT_FLOAT(scale_x), M_RANGE(0, 10000.0)},
+    {"video-scale-y", OPT_FLOAT(scale_y), M_RANGE(0, 10000.0)},
+    {"video-margin-ratio-left", OPT_FLOAT(margin_x[0]), M_RANGE(0.0, 1.0)},
+    {"video-margin-ratio-right", OPT_FLOAT(margin_x[1]), M_RANGE(0.0, 1.0)},
+    {"video-margin-ratio-top", OPT_FLOAT(margin_y[0]), M_RANGE(0.0, 1.0)},
+    {"video-margin-ratio-bottom", OPT_FLOAT(margin_y[1]), M_RANGE(0.0, 1.0)},
+    {"video-crop", OPT_RECT(video_crop), .flags = UPDATE_IMGPAR},
+    {"video-unscaled", OPT_CHOICE(unscaled,
+        {"no", 0}, {"yes", 1}, {"downscale-big", 2})},
+    {"video-recenter", OPT_BOOL(recenter)},
+    {"wid", OPT_INT64(WinID)},
+    {"screen", OPT_CHOICE(screen_id, {"default", -1}), M_RANGE(0, 32)},
+    {"screen-name", OPT_STRING(screen_name)},
+    {"fs-screen", OPT_CHOICE(fsscreen_id, {"all", -2}, {"current", -1}),
+        M_RANGE(0, 32)},
+    {"fs-screen-name", OPT_STRING(fsscreen_name)},
+    {"keepaspect", OPT_BOOL(keepaspect)},
+    {"keepaspect-window", OPT_BOOL(keepaspect_window)},
+    {"hidpi-window-scale", OPT_BOOL(hidpi_window_scale)},
+    {"native-fs", OPT_BOOL(native_fs)},
+    {"native-touch", OPT_BOOL(native_touch)},
+    {"show-in-taskbar", OPT_BOOL(show_in_taskbar)},
+    {"display-fps-override", OPT_DOUBLE(display_fps_override),
+        M_RANGE(0, DBL_MAX)},
+    {"video-timing-offset", OPT_DOUBLE(timing_offset), M_RANGE(0.0, 1.0)},
+    {"video-sync", OPT_CHOICE(video_sync,
+        {"audio", VS_DEFAULT},
+        {"display-resample", VS_DISP_RESAMPLE},
+        {"display-resample-vdrop", VS_DISP_RESAMPLE_VDROP},
+        {"display-resample-desync", VS_DISP_RESAMPLE_NONE},
+        {"display-tempo", VS_DISP_TEMPO},
+        {"display-adrop", VS_DISP_ADROP},
+        {"display-vdrop", VS_DISP_VDROP},
+        {"display-desync", VS_DISP_NONE},
+        {"desync", VS_NONE})},
 #if HAVE_X11
-    OPT_CHOICE("x11-netwm", x11_netwm, 0,
-               ({"auto", 0}, {"no", -1}, {"yes", 1})),
-    OPT_CHOICE("x11-bypass-compositor", x11_bypass_compositor, 0,
-               ({"no", 0}, {"yes", 1}, {"fs-only", 2}, {"never", 3})),
+    {"x11-netwm", OPT_CHOICE(x11_netwm, {"auto", 0}, {"no", -1}, {"yes", 1})},
+    {"x11-bypass-compositor", OPT_CHOICE(x11_bypass_compositor,
+        {"no", 0}, {"yes", 1}, {"fs-only", 2}, {"never", 3})},
+    {"x11-present", OPT_CHOICE(x11_present,
+        {"no", 0}, {"auto", 1}, {"yes", 2})},
+    {"x11-wid-title", OPT_BOOL(x11_wid_title)},
+#endif
+#if HAVE_WAYLAND
+    {"wayland-configure-bounds", OPT_CHOICE(wl_configure_bounds,
+        {"auto", -1}, {"no", 0}, {"yes", 1})},
+    {"wayland-content-type", OPT_CHOICE(wl_content_type, {"auto", -1}, {"none", 0},
+        {"photo", 1}, {"video", 2}, {"game", 3})},
+    {"wayland-disable-vsync", OPT_BOOL(wl_disable_vsync)},
+    {"wayland-edge-pixels-pointer", OPT_INT(wl_edge_pixels_pointer),
+        M_RANGE(0, INT_MAX)},
+    {"wayland-edge-pixels-touch", OPT_INT(wl_edge_pixels_touch),
+        M_RANGE(0, INT_MAX)},
+    {"wayland-present", OPT_BOOL(wl_present)},
 #endif
 #if HAVE_WIN32_DESKTOP
-    OPT_STRING("vo-mmcss-profile", mmcss_profile, 0),
+// For old MinGW-w64 compatibility
+#define DWMWCP_DEFAULT 0
+#define DWMWCP_DONOTROUND 1
+#define DWMWCP_ROUND 2
+#define DWMWCP_ROUNDSMALL 3
+
+#define DWMSBT_AUTO 0
+#define DWMSBT_NONE 1
+#define DWMSBT_MAINWINDOW 2
+#define DWMSBT_TRANSIENTWINDOW 3
+#define DWMSBT_TABBEDWINDOW 4
+
+    {"backdrop-type", OPT_CHOICE(backdrop_type, {"auto", DWMSBT_AUTO}, {"none", DWMSBT_NONE},
+        {"mica", DWMSBT_MAINWINDOW}, {"acrylic", DWMSBT_TRANSIENTWINDOW}, {"mica-alt", DWMSBT_TABBEDWINDOW})},
+    {"window-affinity", OPT_CHOICE(window_affinity, {"default", WDA_NONE},
+        {"excludefromcapture", WDA_EXCLUDEFROMCAPTURE}, {"monitor", WDA_MONITOR})},
+    {"vo-mmcss-profile", OPT_STRING(mmcss_profile)},
+    {"window-corners", OPT_CHOICE(window_corners,
+        {"default", DWMWCP_DEFAULT},
+        {"donotround", DWMWCP_DONOTROUND},
+        {"round", DWMWCP_ROUND},
+        {"roundsmall", DWMWCP_ROUNDSMALL})},
 #endif
-#if HAVE_DRM
-    OPT_SUBSTRUCT("", drm_opts, drm_conf, 0),
+#if HAVE_EGL_ANDROID
+    {"android-surface-size", OPT_SIZE_BOX(android_surface_size)},
 #endif
-    OPT_INTRANGE("swapchain-depth", swapchain_depth, 0, 1, 8),
+    {"swapchain-depth", OPT_INT(swapchain_depth), M_RANGE(1, VO_MAX_SWAPCHAIN_DEPTH)},
+    {"override-display-fps", OPT_REPLACED("display-fps-override")},
     {0}
 };
 
@@ -174,25 +248,36 @@ const struct m_sub_options vo_sub_opts = {
     .size = sizeof(struct mp_vo_opts),
     .defaults = &(const struct mp_vo_opts){
         .video_driver_list = NULL,
+        .drag_and_drop = -1,
         .monitor_pixel_aspect = 1.0,
         .screen_id = -1,
         .fsscreen_id = -1,
         .panscan = 0.0f,
-        .keepaspect = 1,
-        .keepaspect_window = 1,
-        .hidpi_window_scale = 1,
-        .native_fs = 1,
-        .taskbar_progress = 1,
-        .snap_window = 0,
-        .border = 1,
-        .fit_border = 1,
+        .scale_x = 1.0f,
+        .scale_y = 1.0f,
+        .auto_window_resize = true,
+        .keepaspect = true,
+        .keepaspect_window = true,
+        .native_fs = true,
+        .taskbar_progress = true,
+        .show_in_taskbar = true,
+        .border = true,
+        .title_bar = true,
+        .appid = "mpv",
         .WinID = -1,
         .window_scale = 1.0,
         .x11_bypass_compositor = 2,
+        .x11_present = 1,
+        .wl_configure_bounds = -1,
+        .wl_content_type = -1,
+        .wl_edge_pixels_pointer = 16,
+        .wl_edge_pixels_touch = 32,
+        .wl_present = true,
         .mmcss_profile = "Playback",
         .ontop_level = -1,
         .timing_offset = 0.050,
         .swapchain_depth = 3,
+        .focus_on = 1,
     },
 };
 
@@ -201,66 +286,107 @@ const struct m_sub_options vo_sub_opts = {
 
 const struct m_sub_options mp_subtitle_sub_opts = {
     .opts = (const struct m_option[]){
-        OPT_FLOAT("sub-delay", sub_delay, 0),
-        OPT_FLOAT("sub-fps", sub_fps, 0),
-        OPT_FLOAT("sub-speed", sub_speed, 0),
-        OPT_FLAG("sub-visibility", sub_visibility, 0),
-        OPT_FLAG("sub-forced-only", forced_subs_only, 0),
-        OPT_FLAG("stretch-dvd-subs", stretch_dvd_subs, 0),
-        OPT_FLAG("stretch-image-subs-to-screen", stretch_image_subs, 0),
-        OPT_FLAG("image-subs-video-resolution", image_subs_video_res, 0),
-        OPT_FLAG("sub-fix-timing", sub_fix_timing, 0),
-        OPT_INTRANGE("sub-pos", sub_pos, 0, 0, 100),
-        OPT_FLOATRANGE("sub-gauss", sub_gauss, 0, 0.0, 3.0),
-        OPT_FLAG("sub-gray", sub_gray, 0),
-        OPT_FLAG("sub-ass", ass_enabled, 0),
-        OPT_FLAG("sub-filter-sdh", sub_filter_SDH, 0),
-        OPT_FLAG("sub-filter-sdh-harder", sub_filter_SDH_harder, 0),
-        OPT_FLOATRANGE("sub-scale", sub_scale, 0, 0, 100),
-        OPT_FLOATRANGE("sub-ass-line-spacing", ass_line_spacing, 0, -1000, 1000),
-        OPT_FLAG("sub-use-margins", sub_use_margins, 0),
-        OPT_FLAG("sub-ass-force-margins", ass_use_margins, 0),
-        OPT_FLAG("sub-ass-vsfilter-aspect-compat", ass_vsfilter_aspect_compat, 0),
-        OPT_CHOICE("sub-ass-vsfilter-color-compat", ass_vsfilter_color_compat, 0,
-                ({"no", 0}, {"basic", 1}, {"full", 2}, {"force-601", 3})),
-        OPT_FLAG("sub-ass-vsfilter-blur-compat", ass_vsfilter_blur_compat, 0),
-        OPT_FLAG("embeddedfonts", use_embedded_fonts, 0),
-        OPT_STRINGLIST("sub-ass-force-style", ass_force_style_list, 0),
-        OPT_STRING("sub-ass-styles", ass_styles_file, M_OPT_FILE),
-        OPT_CHOICE("sub-ass-hinting", ass_hinting, 0,
-                ({"none", 0}, {"light", 1}, {"normal", 2}, {"native", 3})),
-        OPT_CHOICE("sub-ass-shaper", ass_shaper, 0,
-                ({"simple", 0}, {"complex", 1})),
-        OPT_FLAG("sub-ass-justify", ass_justify, 0),
-        OPT_CHOICE("sub-ass-override", ass_style_override, 0,
-                ({"no", 0}, {"yes", 1}, {"force", 3}, {"scale", 4}, {"strip", 5})),
-        OPT_FLAG("sub-scale-by-window", sub_scale_by_window, 0),
-        OPT_FLAG("sub-scale-with-window", sub_scale_with_window, 0),
-        OPT_FLAG("sub-ass-scale-with-window", ass_scale_with_window, 0),
-        OPT_SUBSTRUCT("sub", sub_style, sub_style_conf, 0),
-        OPT_FLAG("sub-clear-on-seek", sub_clear_on_seek, 0),
-        OPT_INTRANGE("teletext-page", teletext_page, 0, 1, 999),
+        {"sub-fps", OPT_FLOAT(sub_fps)},
+        {"sub-speed", OPT_FLOAT(sub_speed)},
+        {"sub-forced-events-only", OPT_BOOL(sub_forced_events_only)},
+        {"stretch-dvd-subs", OPT_BOOL(stretch_dvd_subs)},
+        {"stretch-image-subs-to-screen", OPT_BOOL(stretch_image_subs)},
+        {"image-subs-video-resolution", OPT_BOOL(image_subs_video_res)},
+        {"sub-fix-timing", OPT_BOOL(sub_fix_timing)},
+        {"sub-stretch-durations", OPT_BOOL(sub_stretch_durations)},
+        {"sub-gauss", OPT_FLOAT(sub_gauss), M_RANGE(0.0, 3.0)},
+        {"sub-gray", OPT_BOOL(sub_gray)},
+        {"sub-ass", OPT_BOOL(ass_enabled), .flags = UPDATE_SUB_HARD},
+        {"sub-scale", OPT_FLOAT(sub_scale), M_RANGE(0, 100)},
+        {"sub-scale-signs", OPT_BOOL(sub_scale_signs)},
+        {"sub-line-spacing", OPT_FLOAT(sub_line_spacing), M_RANGE(-1000, 1000)},
+        {"sub-ass-line-spacing", OPT_REPLACED("sub-line-spacing")},
+        {"sub-use-margins", OPT_BOOL(sub_use_margins)},
+        {"sub-ass-force-margins", OPT_BOOL(ass_use_margins)},
+        {"sub-ass-vsfilter-color-compat", OPT_CHOICE(ass_vsfilter_color_compat,
+            {"no", 0}, {"basic", 1}, {"full", 2}, {"force-601", 3})},
+        {"sub-vsfilter-bidi-compat", OPT_BOOL(sub_vsfilter_bidi_compat)},
+        {"sub-ass-vsfilter-aspect-compat", OPT_REMOVED("replaced by sub-ass-use-video-data=aspect-ratio")},
+        {"sub-ass-vsfilter-blur-compat", OPT_REMOVED("replaced by sub-ass-use-video-data=all")},
+        {"sub-ass-use-video-data", OPT_CHOICE(ass_use_video_data,
+            {"none", 0}, {"aspect-ratio", 1}, {"all", 2})},
+        {"sub-ass-video-aspect-override", OPT_ASPECT(ass_video_aspect), M_RANGE(0, 10)},
+        {"embeddedfonts", OPT_BOOL(use_embedded_fonts), .flags = UPDATE_SUB_HARD},
+        {"sub-ass-style-overrides", OPT_STRINGLIST(ass_style_override_list),
+            .flags = UPDATE_SUB_HARD},
+        {"sub-ass-styles", OPT_STRING(ass_styles_file),
+            .flags = M_OPT_FILE | UPDATE_SUB_HARD},
+        {"sub-hinting", OPT_CHOICE(sub_hinting,
+            {"none", 0}, {"light", 1}, {"normal", 2}, {"native", 3})},
+        {"sub-ass-hinting", OPT_REPLACED("sub-hinting")},
+        {"sub-shaper", OPT_CHOICE(sub_shaper, {"simple", 0}, {"complex", 1})},
+        {"sub-ass-shaper", OPT_REPLACED("sub-shaper")},
+        {"sub-ass-prune-delay", OPT_DOUBLE(ass_prune_delay), M_RANGE(-1.0, DBL_MAX)},
+        {"sub-ass-justify", OPT_BOOL(ass_justify)},
+        {"sub-scale-by-window", OPT_BOOL(sub_scale_by_window)},
+        {"sub-scale-with-window", OPT_BOOL(sub_scale_with_window)},
+        {"sub-ass-scale-with-window", OPT_BOOL(ass_scale_with_window)},
+        {"sub", OPT_SUBSTRUCT(sub_style, sub_style_conf)},
+        {"sub-clear-on-seek", OPT_BOOL(sub_clear_on_seek)},
+        {"teletext-page", OPT_INT(teletext_page), M_RANGE(-1, 999), .flags = UPDATE_SUB_FILT},
+        {"sub-past-video-end", OPT_BOOL(sub_past_video_end)},
+        {"sub-ass-force-style", OPT_REPLACED("sub-ass-style-overrides")},
+        {"sub-lavc-o", OPT_KEYVALUELIST(sub_avopts), .flags = UPDATE_SUB_HARD},
         {0}
     },
     .size = sizeof(OPT_BASE_STRUCT),
     .defaults = &(OPT_BASE_STRUCT){
-        .sub_visibility = 1,
-        .sub_pos = 100,
         .sub_speed = 1.0,
-        .ass_enabled = 1,
-        .sub_scale_by_window = 1,
-        .ass_use_margins = 0,
-        .sub_use_margins = 1,
-        .ass_scale_with_window = 0,
-        .sub_scale_with_window = 1,
-        .teletext_page = 100,
+        .ass_enabled = true,
+        .sub_scale_by_window = true,
+        .sub_use_margins = true,
+        .sub_scale_with_window = true,
+        .ass_prune_delay = -1.0,
+        .teletext_page = 0,
         .sub_scale = 1,
-        .ass_vsfilter_aspect_compat = 1,
         .ass_vsfilter_color_compat = 1,
-        .ass_vsfilter_blur_compat = 1,
-        .ass_style_override = 1,
-        .ass_shaper = 1,
-        .use_embedded_fonts = 1,
+        .ass_use_video_data = 2,
+        .ass_video_aspect = 0,
+        .sub_shaper = 1,
+        .use_embedded_fonts = true,
+    },
+    .change_flags = UPDATE_OSD,
+};
+
+#undef OPT_BASE_STRUCT
+#define OPT_BASE_STRUCT struct mp_subtitle_shared_opts
+
+const struct m_sub_options mp_subtitle_shared_sub_opts = {
+    .opts = (const struct m_option[]){
+        {"sub-delay", OPT_FLOAT(sub_delay[0])},
+        {"secondary-sub-delay", OPT_FLOAT(sub_delay[1])},
+        {"sub-pos", OPT_FLOAT(sub_pos[0]), M_RANGE(0.0, 150.0)},
+        {"secondary-sub-pos", OPT_FLOAT(sub_pos[1]), M_RANGE(0.0, 150.0)},
+        {"sub-visibility", OPT_BOOL(sub_visibility[0])},
+        {"secondary-sub-visibility", OPT_BOOL(sub_visibility[1])},
+        {"sub-ass-override", OPT_CHOICE(ass_style_override[0],
+            {"no", ASS_STYLE_OVERRIDE_NONE},
+            {"yes", ASS_STYLE_OVERRIDE_YES},
+            {"scale", ASS_STYLE_OVERRIDE_SCALE},
+            {"force", ASS_STYLE_OVERRIDE_FORCE},
+            {"strip", ASS_STYLE_OVERRIDE_STRIP}),
+            .flags = UPDATE_SUB_HARD},
+        {"secondary-sub-ass-override", OPT_CHOICE(ass_style_override[1],
+            {"no", ASS_STYLE_OVERRIDE_NONE},
+            {"yes", ASS_STYLE_OVERRIDE_YES},
+            {"scale", ASS_STYLE_OVERRIDE_SCALE},
+            {"force", ASS_STYLE_OVERRIDE_FORCE},
+            {"strip", ASS_STYLE_OVERRIDE_STRIP}),
+            .flags = UPDATE_SUB_HARD},
+        {0}
+    },
+    .size = sizeof(OPT_BASE_STRUCT),
+    .defaults = &(OPT_BASE_STRUCT){
+        .sub_visibility[0] = true,
+        .sub_visibility[1] = true,
+        .sub_pos[0] = 100,
+        .ass_style_override[0] = ASS_STYLE_OVERRIDE_SCALE,
+        .ass_style_override[1] = ASS_STYLE_OVERRIDE_STRIP,
     },
     .change_flags = UPDATE_OSD,
 };
@@ -270,40 +396,37 @@ const struct m_sub_options mp_subtitle_sub_opts = {
 
 const struct m_sub_options mp_osd_render_sub_opts = {
     .opts = (const struct m_option[]){
-        OPT_FLOATRANGE("osd-bar-align-x", osd_bar_align_x, 0, -1.0, +1.0),
-        OPT_FLOATRANGE("osd-bar-align-y", osd_bar_align_y, 0, -1.0, +1.0),
-        OPT_FLOATRANGE("osd-bar-w", osd_bar_w, 0, 1, 100),
-        OPT_FLOATRANGE("osd-bar-h", osd_bar_h, 0, 0.1, 50),
-        OPT_SUBSTRUCT("osd", osd_style, osd_style_conf, 0),
-        OPT_FLOATRANGE("osd-scale", osd_scale, 0, 0, 100),
-        OPT_FLAG("osd-scale-by-window", osd_scale_by_window, 0),
-        OPT_FLAG("force-rgba-osd-rendering", force_rgba_osd, 0),
+        {"osd", OPT_SUBSTRUCT(osd_style, osd_style_conf)},
+        {"osd-bar", OPT_SUBSTRUCT(osd_bar_style, osd_bar_style_conf)},
+        {"osd-scale", OPT_FLOAT(osd_scale), M_RANGE(0, 100)},
+        {"osd-scale-by-window", OPT_BOOL(osd_scale_by_window)},
+        {"osd-selected-color", OPT_COLOR(osd_selected_color)},
+        {"osd-selected-outline-color", OPT_COLOR(osd_selected_outline_color)},
+        {"force-rgba-osd-rendering", OPT_BOOL(force_rgba_osd)},
         {0}
     },
     .size = sizeof(OPT_BASE_STRUCT),
     .defaults = &(OPT_BASE_STRUCT){
-        .osd_bar_align_y = 0.5,
-        .osd_bar_w = 75.0,
-        .osd_bar_h = 3.125,
         .osd_scale = 1,
-        .osd_scale_by_window = 1,
+        .osd_scale_by_window = true,
+        .osd_selected_color = {250, 189, 47, 255},
+        .osd_selected_outline_color = {0, 0, 0, 255},
     },
     .change_flags = UPDATE_OSD,
 };
 
 #undef OPT_BASE_STRUCT
-#define OPT_BASE_STRUCT struct dvd_opts
+#define OPT_BASE_STRUCT struct cuda_opts
 
-const struct m_sub_options dvd_conf = {
+const struct m_sub_options cuda_conf = {
     .opts = (const struct m_option[]){
-        OPT_STRING("dvd-device", device, M_OPT_FILE),
-        OPT_INT("dvd-speed", speed, 0),
-        OPT_INTRANGE("dvd-angle", angle, 0, 1, 99),
+        {"decode-device", OPT_CHOICE(cuda_device, {"auto", -1}),
+            M_RANGE(0, INT_MAX)},
         {0}
     },
-    .size = sizeof(struct dvd_opts),
-    .defaults = &(const struct dvd_opts){
-        .angle = 1,
+    .size = sizeof(struct cuda_opts),
+    .defaults = &(const struct cuda_opts){
+        .cuda_device = -1,
     },
 };
 
@@ -312,675 +435,723 @@ const struct m_sub_options dvd_conf = {
 
 const struct m_sub_options filter_conf = {
     .opts = (const struct m_option[]){
-        OPT_FLAG("deinterlace", deinterlace, 0),
+        {"deinterlace", OPT_CHOICE(deinterlace,
+            {"no", 0}, {"yes", 1}, {"auto", -1})},
+        {"deinterlace-field-parity", OPT_CHOICE(field_parity,
+            {"tff", MP_FIELD_PARITY_TFF},
+            {"bff", MP_FIELD_PARITY_BFF},
+            {"auto", MP_FIELD_PARITY_AUTO})},
         {0}
     },
     .size = sizeof(OPT_BASE_STRUCT),
+    .defaults = &(const struct filter_opts){
+        .field_parity = MP_FIELD_PARITY_AUTO,
+    },
     .change_flags = UPDATE_IMGPAR,
 };
 
 #undef OPT_BASE_STRUCT
 #define OPT_BASE_STRUCT struct MPOpts
 
-const m_option_t mp_opts[] = {
+static const m_option_t mp_opts[] = {
     // handled in command line pre-parser (parse_commandline.c)
-    {"v", &m_option_type_dummy_flag, M_OPT_FIXED | CONF_NOCFG | M_OPT_NOPROP,
+    {"v", &m_option_type_dummy_flag, M_OPT_NOCFG | M_OPT_NOPROP,
      .offset = -1},
-    {"playlist", CONF_TYPE_STRING, CONF_NOCFG | M_OPT_MIN | M_OPT_FIXED | M_OPT_FILE,
-     .min = 1, .offset = -1},
-    {"{", &m_option_type_dummy_flag, CONF_NOCFG | M_OPT_FIXED | M_OPT_NOPROP,
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    {"playlist", CONF_TYPE_STRING, M_OPT_NOCFG | M_OPT_FILE, .offset = -1},
+#endif
+    {"{", &m_option_type_dummy_flag, M_OPT_NOCFG | M_OPT_NOPROP,
      .offset = -1},
-    {"}", &m_option_type_dummy_flag, CONF_NOCFG | M_OPT_FIXED | M_OPT_NOPROP,
+    {"}", &m_option_type_dummy_flag, M_OPT_NOCFG | M_OPT_NOPROP,
      .offset = -1},
 
     // handled in m_config.c
-    { "include", CONF_TYPE_STRING, M_OPT_FILE, .offset = -1},
-    { "profile", CONF_TYPE_STRING_LIST, 0, .offset = -1},
-    { "show-profile", CONF_TYPE_STRING, CONF_NOCFG | M_OPT_FIXED | M_OPT_NOPROP,
-      .offset = -1},
-    { "list-options", &m_option_type_dummy_flag, CONF_NOCFG | M_OPT_FIXED |
-      M_OPT_NOPROP, .offset = -1},
-    OPT_FLAG("list-properties", property_print_help,
-             CONF_NOCFG | M_OPT_FIXED | M_OPT_NOPROP),
-    { "help", CONF_TYPE_STRING, CONF_NOCFG | M_OPT_FIXED | M_OPT_NOPROP |
-              M_OPT_OPTIONAL_PARAM, .offset = -1},
-    { "h", CONF_TYPE_STRING, CONF_NOCFG | M_OPT_FIXED | M_OPT_NOPROP |
-           M_OPT_OPTIONAL_PARAM, .offset = -1},
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    {"include", CONF_TYPE_STRING, M_OPT_FILE, .offset = -1},
+#endif
+    {"profile", CONF_TYPE_STRING_LIST, 0, .offset = -1},
+    {"show-profile", CONF_TYPE_STRING, M_OPT_NOCFG | M_OPT_NOPROP |
+        M_OPT_OPTIONAL_PARAM,  .offset = -1},
+    {"list-options", &m_option_type_dummy_flag, M_OPT_NOCFG | M_OPT_NOPROP,
+        .offset = -1},
+    {"list-properties", OPT_BOOL(property_print_help),
+     .flags = M_OPT_NOCFG | M_OPT_NOPROP},
+    {"help", CONF_TYPE_STRING, M_OPT_NOCFG | M_OPT_NOPROP | M_OPT_OPTIONAL_PARAM,
+        .offset = -1},
+    {"h", CONF_TYPE_STRING, M_OPT_NOCFG | M_OPT_NOPROP | M_OPT_OPTIONAL_PARAM,
+        .offset = -1},
 
-    OPT_PRINT("list-protocols", stream_print_proto_list),
-    OPT_PRINT("version", print_version),
-    OPT_PRINT("V", print_version),
+    {"list-protocols", OPT_PRINT(stream_print_proto_list)},
+    {"version", OPT_PRINT(print_version)},
+    {"V", OPT_PRINT(print_version)},
 
-    OPT_CHOICE("player-operation-mode", operation_mode,
-               M_OPT_FIXED | M_OPT_PRE_PARSE | M_OPT_NOPROP,
-               ({"cplayer", 0}, {"pseudo-gui", 1})),
+    {"player-operation-mode", OPT_CHOICE(operation_mode,
+        {"cplayer", 0}, {"pseudo-gui", 1}),
+        .flags = M_OPT_PRE_PARSE | M_OPT_NOPROP},
 
-    OPT_FLAG("shuffle", shuffle, 0),
+    {"shuffle", OPT_BOOL(shuffle)},
 
 // ------------------------- common options --------------------
-    OPT_FLAG("quiet", quiet, 0),
-    OPT_FLAG("really-quiet", msg_really_quiet, CONF_PRE_PARSE | UPDATE_TERM),
-    OPT_FLAG("terminal", use_terminal, CONF_PRE_PARSE | UPDATE_TERM),
-    OPT_GENERAL(char**, "msg-level", msg_levels, CONF_PRE_PARSE | UPDATE_TERM,
-                .type = &m_option_type_msglevels),
-    OPT_STRING("dump-stats", dump_stats, UPDATE_TERM | CONF_PRE_PARSE | M_OPT_FILE),
-    OPT_FLAG("msg-color", msg_color, CONF_PRE_PARSE | UPDATE_TERM),
-    OPT_STRING("log-file", log_file, CONF_PRE_PARSE | M_OPT_FILE | UPDATE_TERM),
-    OPT_FLAG("msg-module", msg_module, UPDATE_TERM),
-    OPT_FLAG("msg-time", msg_time, UPDATE_TERM),
-#if HAVE_WIN32_DESKTOP
-    OPT_CHOICE("priority", w32_priority, UPDATE_PRIORITY,
-               ({"no",          0},
-                {"realtime",    REALTIME_PRIORITY_CLASS},
-                {"high",        HIGH_PRIORITY_CLASS},
-                {"abovenormal", ABOVE_NORMAL_PRIORITY_CLASS},
-                {"normal",      NORMAL_PRIORITY_CLASS},
-                {"belownormal", BELOW_NORMAL_PRIORITY_CLASS},
-                {"idle",        IDLE_PRIORITY_CLASS})),
+    {"quiet", OPT_BOOL(quiet)},
+    {"really-quiet", OPT_BOOL(msg_really_quiet),
+        .flags = M_OPT_PRE_PARSE | UPDATE_TERM},
+    {"terminal", OPT_BOOL(use_terminal), .flags = M_OPT_PRE_PARSE | UPDATE_TERM},
+    {"msg-level", OPT_MSGLEVELS(msg_levels),
+        .flags = M_OPT_PRE_PARSE | UPDATE_TERM},
+    {"dump-stats", OPT_STRING(dump_stats),
+        .flags = UPDATE_TERM | M_OPT_PRE_PARSE | M_OPT_FILE},
+    {"msg-color", OPT_BOOL(msg_color), .flags = M_OPT_PRE_PARSE | UPDATE_TERM},
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    {"log-file", OPT_STRING(log_file),
+        .flags = M_OPT_PRE_PARSE | M_OPT_FILE | UPDATE_TERM},
 #endif
-    OPT_FLAG("config", load_config, M_OPT_FIXED | CONF_PRE_PARSE),
-    OPT_STRING("config-dir", force_configdir,
-               M_OPT_FIXED | CONF_NOCFG | CONF_PRE_PARSE | M_OPT_FILE),
-    OPT_STRINGLIST("reset-on-next-file", reset_options, 0),
+    {"msg-module", OPT_BOOL(msg_module), .flags = UPDATE_TERM},
+    {"msg-time", OPT_BOOL(msg_time), .flags = UPDATE_TERM},
+#if HAVE_WIN32_DESKTOP
+    {"priority", OPT_CHOICE(w32_priority,
+        {"no",          0},
+        {"realtime",    REALTIME_PRIORITY_CLASS},
+        {"high",        HIGH_PRIORITY_CLASS},
+        {"abovenormal", ABOVE_NORMAL_PRIORITY_CLASS},
+        {"normal",      NORMAL_PRIORITY_CLASS},
+        {"belownormal", BELOW_NORMAL_PRIORITY_CLASS},
+        {"idle",        IDLE_PRIORITY_CLASS}),
+        .flags = UPDATE_PRIORITY},
+#endif
+    {"media-controls", OPT_BOOL(media_controls)},
+    {"config", OPT_BOOL(load_config), .flags = M_OPT_PRE_PARSE},
+    {"config-dir", OPT_STRING(force_configdir),
+        .flags = M_OPT_NOCFG | M_OPT_PRE_PARSE | M_OPT_FILE},
+    {"reset-on-next-file", OPT_STRINGLIST(reset_options)},
 
-#if HAVE_LUA || HAVE_JAVASCRIPT
-    OPT_PATHLIST("scripts", script_files, M_OPT_FIXED | M_OPT_FILE),
-    OPT_CLI_ALIAS("script", "scripts-append"),
-    OPT_KEYVALUELIST("script-opts", script_opts, 0),
-    OPT_FLAG("load-scripts", auto_load_scripts, 0),
+#if HAVE_LUA || HAVE_JAVASCRIPT || HAVE_CPLUGINS
+    {"scripts", OPT_PATHLIST(script_files), .flags = M_OPT_FILE},
+    {"script", OPT_CLI_ALIAS("scripts-append")},
+    {"script-opts", OPT_KEYVALUELIST(script_opts)},
+    {"script-opt", OPT_CLI_ALIAS("script-opts-append")},
+    {"load-scripts", OPT_BOOL(auto_load_scripts)},
+#endif
+#if HAVE_JAVASCRIPT
+    {"js-memory-report", OPT_BOOL(js_memory_report)},
 #endif
 #if HAVE_LUA
-    OPT_FLAG("osc", lua_load_osc, UPDATE_BUILTIN_SCRIPTS),
-    OPT_FLAG("ytdl", lua_load_ytdl, UPDATE_BUILTIN_SCRIPTS),
-    OPT_STRING("ytdl-format", lua_ytdl_format, 0),
-    OPT_KEYVALUELIST("ytdl-raw-options", lua_ytdl_raw_options, 0),
-    OPT_FLAG("load-stats-overlay", lua_load_stats, UPDATE_BUILTIN_SCRIPTS),
+    {"osc", OPT_BOOL(lua_load_osc), .flags = UPDATE_BUILTIN_SCRIPTS},
+    {"ytdl", OPT_BOOL(lua_load_ytdl), .flags = UPDATE_BUILTIN_SCRIPTS},
+    {"ytdl-format", OPT_STRING(lua_ytdl_format)},
+    {"ytdl-raw-options", OPT_KEYVALUELIST(lua_ytdl_raw_options)},
+    {"load-stats-overlay", OPT_BOOL(lua_load_stats),
+        .flags = UPDATE_BUILTIN_SCRIPTS},
+    {"load-console", OPT_BOOL(lua_load_console),
+        .flags = UPDATE_BUILTIN_SCRIPTS},
+    {"load-osd-console", OPT_REPLACED("load-console")},
+    {"load-auto-profiles",
+        OPT_CHOICE(lua_load_auto_profiles, {"no", 0}, {"yes", 1}, {"auto", -1}),
+        .flags = UPDATE_BUILTIN_SCRIPTS},
+    {"load-select", OPT_BOOL(lua_load_select), .flags = UPDATE_BUILTIN_SCRIPTS},
 #endif
 
 // ------------------------- stream options --------------------
 
 #if HAVE_DVDNAV
-    OPT_SUBSTRUCT("", dvd_opts, dvd_conf, 0),
+    {"dvd", OPT_SUBSTRUCT(dvd_opts, dvd_conf)},
 #endif
-    OPT_CHOICE_OR_INT("edition", edition_id, 0, 0, 8190,
-                      ({"auto", -1})),
+    {"edition", OPT_CHOICE(edition_id, {"auto", -1}), M_RANGE(0, 8190)},
 #if HAVE_LIBBLURAY
-    OPT_STRING("bluray-device", bluray_device, M_OPT_FILE),
+    {"bluray", OPT_SUBSTRUCT(stream_bluray_opts, stream_bluray_conf)},
 #endif /* HAVE_LIBBLURAY */
 
 // ------------------------- demuxer options --------------------
 
-    OPT_CHOICE_OR_INT("frames", play_frames, 0, 0, INT_MAX, ({"all", -1})),
+    {"frames", OPT_CHOICE(play_frames, {"all", -1}), M_RANGE(0, INT_MAX)},
 
-    OPT_REL_TIME("start", play_start, 0),
-    OPT_REL_TIME("end", play_end, 0),
-    OPT_REL_TIME("length", play_length, 0),
+    {"start", OPT_REL_TIME(play_start)},
+    {"end", OPT_REL_TIME(play_end)},
+    {"length", OPT_REL_TIME(play_length)},
 
-    OPT_CHOICE("play-dir", play_dir, 0,
-               ({"forward", 1}, {"+", 1}, {"backward", -1}, {"-", -1})),
-    OPT_BYTE_SIZE("video-reversal-buffer", video_reverse_size, 0, 0, (size_t)-1),
-    OPT_BYTE_SIZE("audio-reversal-buffer", audio_reverse_size, 0, 0, (size_t)-1),
+    {"play-direction", OPT_CHOICE(play_dir,
+        {"forward", 1}, {"+", 1}, {"backward", -1}, {"-", -1})},
 
-    OPT_FLAG("rebase-start-time", rebase_start_time, 0),
+    {"rebase-start-time", OPT_BOOL(rebase_start_time)},
 
-    OPT_TIME("ab-loop-a", ab_loop[0], 0, .min = MP_NOPTS_VALUE),
-    OPT_TIME("ab-loop-b", ab_loop[1], 0, .min = MP_NOPTS_VALUE),
+    {"ab-loop-a", OPT_TIME(ab_loop[0]), .flags = M_OPT_ALLOW_NO},
+    {"ab-loop-b", OPT_TIME(ab_loop[1]), .flags = M_OPT_ALLOW_NO},
+    {"ab-loop-count", OPT_CHOICE(ab_loop_count, {"inf", -1}),
+        M_RANGE(0, INT_MAX), .force_update = true},
 
-    OPT_CHOICE_OR_INT("playlist-start", playlist_pos, 0, 0, INT_MAX,
-                      ({"auto", -1}, {"no", -1})),
+    {"playlist-start", OPT_CHOICE(playlist_pos, {"auto", -1}, {"no", -1}),
+        M_RANGE(0, INT_MAX)},
 
-    OPT_FLAG("pause", pause, 0),
-    OPT_CHOICE("keep-open", keep_open, 0,
-               ({"no", 0},
-                {"yes", 1},
-                {"always", 2})),
-    OPT_FLAG("keep-open-pause", keep_open_pause, 0),
-    OPT_DOUBLE("image-display-duration", image_display_duration,
-               M_OPT_RANGE, 0, INFINITY),
-
-    OPT_CHOICE("index", index_mode, 0, ({"default", 1}, {"recreate", 0})),
+    {"pause", OPT_BOOL(pause)},
+    {"keep-open", OPT_CHOICE(keep_open,
+        {"no", 0},
+        {"yes", 1},
+        {"always", 2})},
+    {"keep-open-pause", OPT_BOOL(keep_open_pause)},
+    {"image-display-duration", OPT_DOUBLE(image_display_duration),
+        M_RANGE(0, INFINITY)},
 
     // select audio/video/subtitle stream
-    OPT_TRACKCHOICE("aid", stream_id[0][STREAM_AUDIO]),
-    OPT_TRACKCHOICE("vid", stream_id[0][STREAM_VIDEO]),
-    OPT_TRACKCHOICE("sid", stream_id[0][STREAM_SUB]),
-    OPT_TRACKCHOICE("secondary-sid", stream_id[1][STREAM_SUB]),
-    OPT_ALIAS("sub", "sid"),
-    OPT_ALIAS("video", "vid"),
-    OPT_ALIAS("audio", "aid"),
-    OPT_STRINGLIST("alang", stream_lang[STREAM_AUDIO], 0),
-    OPT_STRINGLIST("slang", stream_lang[STREAM_SUB], 0),
-    OPT_STRINGLIST("vlang", stream_lang[STREAM_VIDEO], 0),
-    OPT_FLAG("track-auto-selection", stream_auto_sel, 0),
+    // keep in sync with num_ptracks[] and MAX_PTRACKS
+    {"aid", OPT_TRACKCHOICE(stream_id[0][STREAM_AUDIO])},
+    {"vid", OPT_TRACKCHOICE(stream_id[0][STREAM_VIDEO])},
+    {"sid", OPT_TRACKCHOICE(stream_id[0][STREAM_SUB])},
+    {"secondary-sid", OPT_TRACKCHOICE(stream_id[1][STREAM_SUB])},
+    {"sub", OPT_ALIAS("sid")},
+    {"video", OPT_ALIAS("vid")},
+    {"audio", OPT_ALIAS("aid")},
+    {"alang", OPT_STRINGLIST(stream_lang[STREAM_AUDIO])},
+    {"slang", OPT_STRINGLIST(stream_lang[STREAM_SUB])},
+    {"vlang", OPT_STRINGLIST(stream_lang[STREAM_VIDEO])},
+    {"track-auto-selection", OPT_BOOL(stream_auto_sel)},
+    {"subs-with-matching-audio", OPT_CHOICE(subs_with_matching_audio, {"no", 0},
+        {"forced", 1}, {"yes", 2})},
+    {"subs-match-os-language", OPT_BOOL(subs_match_os_language)},
+    {"subs-fallback", OPT_CHOICE(subs_fallback, {"no", 0}, {"default", 1}, {"yes", 2})},
+    {"subs-fallback-forced", OPT_CHOICE(subs_fallback_forced, {"no", 0},
+        {"yes", 1}, {"always", 2})},
 
-    OPT_STRING("lavfi-complex", lavfi_complex, UPDATE_LAVFI_COMPLEX),
+    {"lavfi-complex", OPT_STRING(lavfi_complex), .flags = UPDATE_LAVFI_COMPLEX},
 
-    OPT_CHOICE("audio-display", audio_display, 0,
-               ({"no", 0}, {"attachment", 1})),
+    {"audio-display", OPT_CHOICE(audio_display, {"no", 0},
+        {"embedded-first", 1}, {"external-first", 2})},
 
-    OPT_CHOICE_OR_INT("hls-bitrate", hls_bitrate, 0, 0, INT_MAX,
-                      ({"no", -1}, {"min", 0}, {"max", INT_MAX})),
+    {"hls-bitrate", OPT_CHOICE(hls_bitrate,
+        {"no", -1}, {"min", 0}, {"max", INT_MAX}), M_RANGE(0, INT_MAX)},
 
-    OPT_STRINGLIST("display-tags", display_tags, 0),
+    {"display-tags", OPT_STRINGLIST(display_tags)},
 
 #if HAVE_CDDA
-    OPT_SUBSTRUCT("cdda", stream_cdda_opts, stream_cdda_conf, 0),
-    OPT_STRING("cdrom-device", cdrom_device, M_OPT_FILE),
+    {"cdda", OPT_SUBSTRUCT(stream_cdda_opts, stream_cdda_conf)},
 #endif
 
     // demuxer.c - select audio/sub file/demuxer
-    OPT_PATHLIST("audio-files", audio_files, M_OPT_FILE),
-    OPT_CLI_ALIAS("audio-file", "audio-files-append"),
-    OPT_STRING("demuxer", demuxer_name, 0),
-    OPT_STRING("audio-demuxer", audio_demuxer_name, 0),
-    OPT_STRING("sub-demuxer", sub_demuxer_name, 0),
-    OPT_FLAG("demuxer-thread", demuxer_thread, 0),
-    OPT_DOUBLE("demuxer-termination-timeout", demux_termination_timeout, 0),
-    OPT_FLAG("demuxer-cache-wait", demuxer_cache_wait, 0),
-    OPT_FLAG("prefetch-playlist", prefetch_open, 0),
-    OPT_FLAG("cache-pause", cache_pause, 0),
-    OPT_FLAG("cache-pause-initial", cache_pause_initial, 0),
-    OPT_FLOAT("cache-pause-wait", cache_pause_wait, M_OPT_MIN, .min = 0),
+    {"demuxer", OPT_STRING(demuxer_name), .help = demuxer_help},
+    {"audio-demuxer", OPT_STRING(audio_demuxer_name), .help = demuxer_help},
+    {"sub-demuxer", OPT_STRING(sub_demuxer_name), .help = demuxer_help},
+    {"demuxer-thread", OPT_BOOL(demuxer_thread)},
+    {"demuxer-termination-timeout", OPT_DOUBLE(demux_termination_timeout)},
+    {"demuxer-cache-wait", OPT_BOOL(demuxer_cache_wait)},
+    {"prefetch-playlist", OPT_BOOL(prefetch_open)},
+    {"cache-pause", OPT_BOOL(cache_pause)},
+    {"cache-pause-initial", OPT_BOOL(cache_pause_initial)},
+    {"cache-pause-wait", OPT_FLOAT(cache_pause_wait), M_RANGE(0, DBL_MAX)},
 
-    OPT_DOUBLE("mf-fps", mf_fps, 0),
-    OPT_STRING("mf-type", mf_type, 0),
 #if HAVE_DVBIN
-    OPT_SUBSTRUCT("dvbin", stream_dvb_opts, stream_dvb_conf, 0),
+    {"dvbin", OPT_SUBSTRUCT(stream_dvb_opts, stream_dvb_conf)},
 #endif
-    OPT_SUBSTRUCT("", stream_lavf_opts, stream_lavf_conf, 0),
+    {"", OPT_SUBSTRUCT(stream_lavf_opts, stream_lavf_conf)},
 
 // ------------------------- a-v sync options --------------------
 
     // set A-V sync correction speed (0=disables it):
-    OPT_FLOATRANGE("mc", default_max_pts_correction, 0, 0, 100),
+    {"mc", OPT_FLOAT(default_max_pts_correction), M_RANGE(0, 100)},
 
-    // force video/audio rate:
-    OPT_DOUBLE("fps", force_fps, CONF_MIN, .min = 0),
-    OPT_INTRANGE("audio-samplerate", force_srate, UPDATE_AUDIO, 0, 16*48000),
-    OPT_CHANNELS("audio-channels", audio_output_channels, UPDATE_AUDIO),
-    OPT_AUDIOFORMAT("audio-format", audio_output_format, UPDATE_AUDIO),
-    OPT_DOUBLE("speed", playback_speed, M_OPT_RANGE, .min = 0.01, .max = 100.0),
+    {"audio-samplerate", OPT_INT(force_srate), .flags = UPDATE_AUDIO,
+        M_RANGE(0, 16*48000)},
+    {"audio-channels", OPT_CHANNELS(audio_output_channels), .flags = UPDATE_AUDIO},
+    {"audio-format", OPT_AUDIOFORMAT(audio_output_format), .flags = UPDATE_AUDIO},
+    {"speed", OPT_DOUBLE(playback_speed), M_RANGE(0.01, 100.0)},
+    {"pitch", OPT_DOUBLE(playback_pitch), M_RANGE(0.01, 100.0)},
 
-    OPT_FLAG("audio-pitch-correction", pitch_correction, 0),
+    {"audio-pitch-correction", OPT_BOOL(pitch_correction)},
 
     // set a-v distance
-    OPT_FLOAT("audio-delay", audio_delay, 0),
+    {"audio-delay", OPT_FLOAT(audio_delay)},
 
 // ------------------------- codec/vfilter options --------------------
 
-    OPT_SETTINGSLIST("af-defaults", af_defs, 0, &af_obj_list,
-                     .deprecation_message = "use --af + enable/disable flags"),
-    OPT_SETTINGSLIST("af", af_settings, 0, &af_obj_list, ),
-    OPT_SETTINGSLIST("vf-defaults", vf_defs, 0, &vf_obj_list,
-                     .deprecation_message = "use --vf + enable/disable flags"),
-    OPT_SETTINGSLIST("vf", vf_settings, 0, &vf_obj_list, ),
+    {"af", OPT_SETTINGSLIST(af_settings, &af_obj_list)},
+    {"vf", OPT_SETTINGSLIST(vf_settings, &vf_obj_list)},
 
-    OPT_SUBSTRUCT("", filter_opts, filter_conf, 0),
+    {"", OPT_SUBSTRUCT(filter_opts, filter_conf)},
 
-    OPT_STRING("ad", audio_decoders, 0),
-    OPT_STRING("vd", video_decoders, 0),
+    {"", OPT_SUBSTRUCT(dec_wrapper, dec_wrapper_conf)},
+    {"", OPT_SUBSTRUCT(vd_lavc_params, vd_lavc_conf)},
+    {"ad-lavc", OPT_SUBSTRUCT(ad_lavc_params, ad_lavc_conf)},
 
-    OPT_STRING("audio-spdif", audio_spdif, 0),
-
-    OPT_ASPECT("video-aspect-override", movie_aspect, UPDATE_IMGPAR | M_OPT_RANGE,
-               .min = -1, .max = 10),
-    OPT_CHOICE("video-aspect-method", aspect_method, UPDATE_IMGPAR,
-               ({"bitstream", 1}, {"container", 2})),
-
-    OPT_SUBSTRUCT("", vd_lavc_params, vd_lavc_conf, 0),
-    OPT_SUBSTRUCT("ad-lavc", ad_lavc_params, ad_lavc_conf, 0),
-
-    OPT_SUBSTRUCT("", demux_lavf, demux_lavf_conf, 0),
-    OPT_SUBSTRUCT("demuxer-rawaudio", demux_rawaudio, demux_rawaudio_conf, 0),
-    OPT_SUBSTRUCT("demuxer-rawvideo", demux_rawvideo, demux_rawvideo_conf, 0),
-    OPT_SUBSTRUCT("demuxer-mkv", demux_mkv, demux_mkv_conf, 0),
-    OPT_SUBSTRUCT("demuxer-cue", demux_cue, demux_cue_conf, 0),
+    {"", OPT_SUBSTRUCT(demux_lavf, demux_lavf_conf)},
+    {"demuxer-rawaudio", OPT_SUBSTRUCT(demux_rawaudio, demux_rawaudio_conf)},
+    {"demuxer-rawvideo", OPT_SUBSTRUCT(demux_rawvideo, demux_rawvideo_conf)},
+    {"", OPT_SUBSTRUCT(demux_playlist, demux_playlist_conf)},
+    {"demuxer-mkv", OPT_SUBSTRUCT(demux_mkv, demux_mkv_conf)},
 
 // ------------------------- subtitles options --------------------
 
-    OPT_PATHLIST("sub-files", sub_name, M_OPT_FILE),
-    OPT_CLI_ALIAS("sub-file", "sub-files-append"),
-    OPT_PATHLIST("sub-file-paths", sub_paths, M_OPT_FILE),
-    OPT_PATHLIST("audio-file-paths", audiofile_paths, M_OPT_FILE),
-    OPT_PATHLIST("external-files", external_files, M_OPT_FILE),
-    OPT_CLI_ALIAS("external-file", "external-files-append"),
-    OPT_FLAG("autoload-files", autoload_files, 0),
-    OPT_CHOICE("sub-auto", sub_auto, 0,
-               ({"no", -1}, {"exact", 0}, {"fuzzy", 1}, {"all", 2})),
-    OPT_CHOICE("audio-file-auto", audiofile_auto, 0,
-               ({"no", -1}, {"exact", 0}, {"fuzzy", 1}, {"all", 2})),
+    {"sub-files", OPT_PATHLIST(sub_name), .flags = M_OPT_FILE},
+    {"sub-file", OPT_CLI_ALIAS("sub-files-append")},
+    {"audio-files", OPT_PATHLIST(audio_files), .flags = M_OPT_FILE},
+    {"audio-file", OPT_CLI_ALIAS("audio-files-append")},
+    {"cover-art-files", OPT_PATHLIST(coverart_files), .flags = M_OPT_FILE},
+    {"cover-art-file", OPT_CLI_ALIAS("cover-art-files-append")},
 
-    OPT_SUBSTRUCT("", subs_rend, mp_subtitle_sub_opts, 0),
-    OPT_SUBSTRUCT("", osd_rend, mp_osd_render_sub_opts, 0),
+    {"sub-file-paths", OPT_PATHLIST(sub_paths), .flags = M_OPT_FILE},
+    {"audio-file-paths", OPT_PATHLIST(audiofile_paths), .flags = M_OPT_FILE},
 
-    OPT_FLAG("osd-bar", osd_bar_visible, UPDATE_OSD),
+    {"external-files", OPT_PATHLIST(external_files), .flags = M_OPT_FILE},
+    {"external-file", OPT_CLI_ALIAS("external-files-append")},
+    {"autoload-files", OPT_BOOL(autoload_files)},
+
+    {"sub-auto", OPT_CHOICE(sub_auto,
+        {"no", -1}, {"exact", 0}, {"fuzzy", 1}, {"all", 2})},
+    {"sub-auto-exts", OPT_STRINGLIST(sub_auto_exts), .flags = UPDATE_SUB_EXTS},
+    {"audio-file-auto", OPT_CHOICE(audiofile_auto,
+        {"no", -1}, {"exact", 0}, {"fuzzy", 1}, {"all", 2})},
+    {"audio-exts", OPT_STRINGLIST(audio_exts)},
+    {"audio-file-auto-exts", OPT_ALIAS("audio-exts")},
+    {"cover-art-auto", OPT_CHOICE(coverart_auto,
+        {"no", -1}, {"exact", 0}, {"fuzzy", 1}, {"all", 2})},
+    {"image-exts", OPT_STRINGLIST(image_exts)},
+    {"cover-art-auto-exts", OPT_ALIAS("image-exts")},
+    {"cover-art-whitelist", OPT_STRINGLIST(coverart_whitelist)},
+    {"video-exts", OPT_STRINGLIST(video_exts)},
+    {"archive-exts", OPT_STRINGLIST(archive_exts)},
+    {"playlist-exts", OPT_STRINGLIST(playlist_exts)},
+
+    {"", OPT_SUBSTRUCT(subs_rend, mp_subtitle_sub_opts)},
+    {"", OPT_SUBSTRUCT(subs_shared, mp_subtitle_shared_sub_opts)},
+    {"sub-filter", OPT_SUBSTRUCT(subs_filt, mp_sub_filter_opts)},
+    {"", OPT_SUBSTRUCT(osd_rend, mp_osd_render_sub_opts)},
+
+    {"osd-bar", OPT_BOOL(osd_bar_visible), .flags = UPDATE_OSD},
 
 //---------------------- libao/libvo options ------------------------
-    OPT_SUBSTRUCT("", ao_opts, ao_conf, 0),
-    OPT_FLAG("audio-exclusive", audio_exclusive, UPDATE_AUDIO),
-    OPT_FLAG("audio-fallback-to-null", ao_null_fallback, 0),
-    OPT_FLAG("audio-stream-silence", audio_stream_silence, 0),
-    OPT_FLOATRANGE("audio-wait-open", audio_wait_open, 0, 0, 60),
-    OPT_CHOICE("force-window", force_vo, 0,
-               ({"no", 0}, {"yes", 1}, {"immediate", 2})),
+    {"", OPT_SUBSTRUCT(ao_opts, ao_conf)},
+    {"audio-exclusive", OPT_BOOL(audio_exclusive), .flags = UPDATE_AUDIO},
+    {"audio-fallback-to-null", OPT_BOOL(ao_null_fallback)},
+    {"audio-stream-silence", OPT_BOOL(audio_stream_silence)},
+    {"audio-wait-open", OPT_FLOAT(audio_wait_open), M_RANGE(0, 60)},
+    {"force-window", OPT_CHOICE(force_vo,
+        {"no", 0}, {"yes", 1}, {"immediate", 2})},
 
-    OPT_FLOATRANGE("volume-max", softvol_max, 0, 100, 1000),
+    {"volume-max", OPT_FLOAT(softvol_max), M_RANGE(100, 1000)},
     // values <0 for volume and mute are legacy and ignored
-    OPT_FLOATRANGE("volume", softvol_volume, UPDATE_VOL, -1, 1000),
-    OPT_CHOICE("mute", softvol_mute, UPDATE_VOL,
-               ({"no", 0},
-                {"auto", 0},
-                {"yes", 1})),
-    OPT_CHOICE("replaygain", rgain_mode, UPDATE_VOL,
-               ({"no", 0},
-                {"track", 1},
-                {"album", 2})),
-    OPT_FLOATRANGE("replaygain-preamp", rgain_preamp, UPDATE_VOL, -15, 15),
-    OPT_FLAG("replaygain-clip", rgain_clip, UPDATE_VOL),
-    OPT_FLOATRANGE("replaygain-fallback", rgain_fallback, UPDATE_VOL, -200, 60),
-    OPT_CHOICE("gapless-audio", gapless_audio, 0,
-               ({"no", 0},
-                {"yes", 1},
-                {"weak", -1})),
+    {"volume", OPT_FLOAT(softvol_volume), .flags = UPDATE_VOL,
+        M_RANGE(-1, 1000)},
+    {"volume-gain-max", OPT_FLOAT(softvol_gain_max), M_RANGE(0, 150)},
+    {"volume-gain-min", OPT_FLOAT(softvol_gain_min), M_RANGE(-150, 0)},
+    {"volume-gain", OPT_FLOAT(softvol_gain), .flags = UPDATE_VOL,
+        M_RANGE(-150, 150)},
+    {"mute", OPT_BOOL(softvol_mute), .flags = UPDATE_VOL},
+    {"replaygain", OPT_CHOICE(rgain_mode,
+        {"no", 0},
+        {"track", 1},
+        {"album", 2}),
+        .flags = UPDATE_VOL},
+    {"replaygain-preamp", OPT_FLOAT(rgain_preamp), .flags = UPDATE_VOL,
+        M_RANGE(-150, 150)},
+    {"replaygain-clip", OPT_BOOL(rgain_clip), .flags = UPDATE_VOL},
+    {"replaygain-fallback", OPT_FLOAT(rgain_fallback), .flags = UPDATE_VOL,
+        M_RANGE(-200, 60)},
+    {"gapless-audio", OPT_CHOICE(gapless_audio,
+        {"no", 0},
+        {"yes", 1},
+        {"weak", -1})},
 
-    OPT_STRING("title", wintitle, 0),
-    OPT_STRING("force-media-title", media_title, 0),
-    OPT_CHOICE_OR_INT("video-rotate", video_rotate, UPDATE_IMGPAR, 0, 359,
-                      ({"no", -1})),
+    {"title", OPT_STRING(wintitle)},
+    {"force-media-title", OPT_STRING(media_title)},
 
-    OPT_CHOICE_OR_INT("cursor-autohide", cursor_autohide_delay, 0,
-                      0, 30000, ({"no", -1}, {"always", -2})),
-    OPT_FLAG("cursor-autohide-fs-only", cursor_autohide_fs, 0),
-    OPT_FLAG("stop-screensaver", stop_screensaver, UPDATE_SCREENSAVER),
+    {"cursor-autohide", OPT_CHOICE(cursor_autohide_delay,
+        {"no", -1}, {"always", -2}), M_RANGE(0, 30000)},
+    {"cursor-autohide-fs-only", OPT_BOOL(cursor_autohide_fs)},
+    {"stop-screensaver", OPT_CHOICE(stop_screensaver,
+        {"no", 0},
+        {"yes", 1},
+        {"always", 2}),
+        .flags = UPDATE_SCREENSAVER},
 
-    OPT_SUBSTRUCT("", video_equalizer, mp_csp_equalizer_conf, 0),
+    {"", OPT_SUBSTRUCT(video_equalizer, mp_csp_equalizer_conf)},
 
-    OPT_FLAG("use-filedir-conf", use_filedir_conf, 0),
-    OPT_CHOICE("osd-level", osd_level, 0,
-               ({"0", 0}, {"1", 1}, {"2", 2}, {"3", 3})),
-    OPT_CHOICE("osd-on-seek", osd_on_seek, 0,
-               ({"no", 0},
-                {"bar", 1},
-                {"msg", 2},
-                {"msg-bar", 3})),
-    OPT_INTRANGE("osd-duration", osd_duration, 0, 0, 3600000),
-    OPT_FLAG("osd-fractions", osd_fractions, 0),
+    {"use-filedir-conf", OPT_BOOL(use_filedir_conf)},
+    {"osd-level", OPT_CHOICE(osd_level,
+        {"0", 0}, {"1", 1}, {"2", 2}, {"3", 3})},
+    {"osd-on-seek", OPT_CHOICE(osd_on_seek,
+        {"no", 0},
+        {"bar", 1},
+        {"msg", 2},
+        {"msg-bar", 3})},
+    {"osd-duration", OPT_INT(osd_duration), M_RANGE(0, 3600000)},
+    {"osd-fractions", OPT_BOOL(osd_fractions)},
 
-    OPT_DOUBLE("sstep", step_sec, CONF_MIN, 0),
+    {"sstep", OPT_DOUBLE(step_sec), M_RANGE(0, DBL_MAX)},
 
-    OPT_CHOICE("framedrop", frame_dropping, 0,
-               ({"no", 0},
-                {"vo", 1},
-                {"decoder", 2},
-                {"decoder+vo", 3})),
-    OPT_FLAG("video-latency-hacks", video_latency_hacks, 0),
+    {"framedrop", OPT_CHOICE(frame_dropping,
+        {"no", 0},
+        {"vo", 1},
+        {"decoder", 2},
+        {"decoder+vo", 3})},
+    {"video-latency-hacks", OPT_BOOL(video_latency_hacks)},
 
-    OPT_FLAG("untimed", untimed, 0),
+    {"untimed", OPT_BOOL(untimed)},
 
-    OPT_STRING("stream-dump", stream_dump, M_OPT_FILE),
+    {"stream-dump", OPT_STRING(stream_dump), .flags = M_OPT_FILE},
 
-    OPT_FLAG("stop-playback-on-init-failure", stop_playback_on_init_failure, 0),
+    {"stop-playback-on-init-failure", OPT_BOOL(stop_playback_on_init_failure)},
 
-    OPT_CHOICE_OR_INT("loop-playlist", loop_times, 0, 1, 10000,
-                      ({"no", 1},
-                       {"inf", -1}, {"yes", -1},
-                       {"force", -2})),
-    OPT_CHOICE_OR_INT("loop-file", loop_file, 0, 0, 10000,
-                      ({"no", 0},
-                       {"yes", -1},
-                       {"inf", -1})),
-    OPT_ALIAS("loop", "loop-file"),
+    {"loop-playlist", OPT_CHOICE(loop_times,
+        {"no", 1},
+        {"inf", -1}, {"yes", -1},
+        {"force", -2}),
+        M_RANGE(1, 10000)},
+    {"loop-file", OPT_CHOICE(loop_file,
+        {"no", 0},
+        {"inf", -1},
+        {"yes", -1}),
+        M_RANGE(0, 10000), .force_update = true},
+    {"loop", OPT_ALIAS("loop-file")},
 
-    OPT_FLAG("resume-playback", position_resume, 0),
-    OPT_FLAG("save-position-on-quit", position_save_on_quit, 0),
-    OPT_FLAG("write-filename-in-watch-later-config", write_filename_in_watch_later_config, 0),
-    OPT_FLAG("ignore-path-in-watch-later-config", ignore_path_in_watch_later_config, 0),
-    OPT_STRING("watch-later-directory", watch_later_directory, M_OPT_FILE),
+    {"resume-playback", OPT_BOOL(position_resume)},
+    {"resume-playback-check-mtime", OPT_BOOL(position_check_mtime)},
+    {"save-position-on-quit", OPT_BOOL(position_save_on_quit)},
+    {"write-filename-in-watch-later-config",
+        OPT_BOOL(write_filename_in_watch_later_config)},
+    {"ignore-path-in-watch-later-config",
+        OPT_BOOL(ignore_path_in_watch_later_config)},
+    {"watch-later-dir", OPT_STRING(watch_later_dir),
+        .flags = M_OPT_FILE},
+    {"watch-later-directory", OPT_ALIAS("watch-later-dir")},
+    {"watch-later-options", OPT_STRINGLIST(watch_later_options)},
 
-    OPT_FLAG("ordered-chapters", ordered_chapters, 0),
-    OPT_STRING("ordered-chapters-files", ordered_chapters_files, M_OPT_FILE),
-    OPT_INTRANGE("chapter-merge-threshold", chapter_merge_threshold, 0, 0, 10000),
+    {"ordered-chapters", OPT_BOOL(ordered_chapters)},
+    {"ordered-chapters-files", OPT_STRING(ordered_chapters_files),
+        .flags = M_OPT_FILE},
+    {"chapter-merge-threshold", OPT_INT(chapter_merge_threshold),
+        M_RANGE(0, 10000)},
 
-    OPT_DOUBLE("chapter-seek-threshold", chapter_seek_threshold, 0),
+    {"chapter-seek-threshold", OPT_DOUBLE(chapter_seek_threshold)},
 
-    OPT_STRING("chapters-file", chapter_file, M_OPT_FILE),
+    {"chapters-file", OPT_STRING(chapter_file), .flags = M_OPT_FILE},
 
-    OPT_FLAG("load-unsafe-playlists", load_unsafe_playlists, 0),
-    OPT_FLAG("merge-files", merge_files, 0),
+    {"merge-files", OPT_BOOL(merge_files)},
 
     // a-v sync stuff:
-    OPT_FLAG("correct-pts", correct_pts, 0),
-    OPT_FLAG("initial-audio-sync", initial_audio_sync, 0),
-    OPT_CHOICE("video-sync", video_sync, 0,
-               ({"audio", VS_DEFAULT},
-                {"display-resample", VS_DISP_RESAMPLE},
-                {"display-resample-vdrop", VS_DISP_RESAMPLE_VDROP},
-                {"display-resample-desync", VS_DISP_RESAMPLE_NONE},
-                {"display-adrop", VS_DISP_ADROP},
-                {"display-vdrop", VS_DISP_VDROP},
-                {"display-desync", VS_DISP_NONE},
-                {"desync", VS_NONE})),
-    OPT_DOUBLE("video-sync-max-video-change", sync_max_video_change,
-               M_OPT_MIN, .min = 0),
-    OPT_DOUBLE("video-sync-max-audio-change", sync_max_audio_change,
-               M_OPT_MIN | M_OPT_MAX, .min = 0, .max = 1),
-    OPT_DOUBLE("video-sync-adrop-size", sync_audio_drop_size,
-               M_OPT_MIN | M_OPT_MAX, .min = 0, .max = 1),
-    OPT_CHOICE("hr-seek", hr_seek, 0,
-               ({"no", -1}, {"absolute", 0}, {"yes", 1}, {"always", 1})),
-    OPT_FLOAT("hr-seek-demuxer-offset", hr_seek_demuxer_offset, 0),
-    OPT_FLAG("hr-seek-framedrop", hr_seek_framedrop, 0),
-    OPT_CHOICE_OR_INT("autosync", autosync, 0, 0, 10000,
-                      ({"no", -1})),
+    {"initial-audio-sync", OPT_BOOL(initial_audio_sync)},
+    {"video-sync-max-video-change", OPT_DOUBLE(sync_max_video_change),
+        M_RANGE(0, DBL_MAX)},
+    {"video-sync-max-audio-change", OPT_DOUBLE(sync_max_audio_change),
+        M_RANGE(0, 1)},
+    {"video-sync-max-factor", OPT_INT(sync_max_factor), M_RANGE(1, 10)},
+    {"hr-seek", OPT_CHOICE(hr_seek,
+        {"no", -1}, {"absolute", 0}, {"yes", 1}, {"always", 1}, {"default", 2})},
+    {"hr-seek-demuxer-offset", OPT_FLOAT(hr_seek_demuxer_offset)},
+    {"hr-seek-framedrop", OPT_BOOL(hr_seek_framedrop)},
+    {"autosync", OPT_CHOICE(autosync, {"no", -1}), M_RANGE(0, 10000)},
 
-    OPT_CHOICE("term-osd", term_osd, 0,
-               ({"force", 1},
-                {"auto", 2},
-                {"no", 0})),
+    {"term-osd", OPT_CHOICE(term_osd,
+        {"force", 1}, {"auto", 2}, {"no", 0}), .flags = UPDATE_OSD},
 
-    OPT_FLAG("term-osd-bar", term_osd_bar, 0),
-    OPT_STRING("term-osd-bar-chars", term_osd_bar_chars, 0),
+    {"term-osd-bar", OPT_BOOL(term_osd_bar), .flags = UPDATE_OSD},
+    {"term-osd-bar-chars", OPT_STRING(term_osd_bar_chars), .flags = UPDATE_OSD},
+    {"term-title", OPT_STRING(term_title), .flags = UPDATE_OSD},
 
-    OPT_STRING("term-playing-msg", playing_msg, 0),
-    OPT_STRING("osd-playing-msg", osd_playing_msg, 0),
-    OPT_STRING("term-status-msg", status_msg, 0),
-    OPT_STRING("osd-status-msg", osd_status_msg, 0),
-    OPT_STRING("osd-msg1", osd_msg[0], 0),
-    OPT_STRING("osd-msg2", osd_msg[1], 0),
-    OPT_STRING("osd-msg3", osd_msg[2], 0),
+    {"term-playing-msg", OPT_STRING(playing_msg)},
+    {"osd-playing-msg", OPT_STRING(osd_playing_msg)},
+    {"osd-playing-msg-duration", OPT_INT(osd_playing_msg_duration),
+        M_RANGE(0, 3600000)},
+    {"term-status-msg", OPT_STRING(status_msg), .flags = UPDATE_OSD},
+    {"osd-status-msg", OPT_STRING(osd_status_msg), .flags = UPDATE_OSD},
+    {"osd-msg1", OPT_STRING(osd_msg[0]), .flags = UPDATE_OSD},
+    {"osd-msg2", OPT_STRING(osd_msg[1]), .flags = UPDATE_OSD},
+    {"osd-msg3", OPT_STRING(osd_msg[2]), .flags = UPDATE_OSD},
 
-    OPT_FLAG("video-osd", video_osd, 0),
+    {"osd-playlist-entry", OPT_CHOICE(playlist_entry_name,
+        {"title", 0}, {"filename", 1}, {"both", 2})},
 
-    OPT_CHOICE("idle", player_idle_mode, 0,
-               ({"no",   0},
-                {"once", 1},
-                {"yes",  2})),
+    {"video-osd", OPT_BOOL(video_osd), .flags = UPDATE_OSD},
 
-    OPT_FLAG("input-terminal", consolecontrols, UPDATE_TERM),
+    {"idle", OPT_CHOICE(player_idle_mode,
+        {"no",   0}, {"once", 1}, {"yes",  2})},
 
-    OPT_STRING("input-file", input_file, M_OPT_FILE | UPDATE_INPUT),
-    OPT_STRING("input-ipc-server", ipc_path, M_OPT_FILE | UPDATE_INPUT),
+    {"input-commands", OPT_STRINGLIST(input_commands)},
+    {"input-terminal", OPT_BOOL(consolecontrols), .flags = UPDATE_TERM},
 
-    OPT_SUBSTRUCT("screenshot", screenshot_image_opts, screenshot_conf, 0),
-    OPT_STRING("screenshot-template", screenshot_template, 0),
-    OPT_STRING("screenshot-directory", screenshot_directory, M_OPT_FILE),
+    {"input-ipc-server", OPT_STRING(ipc_path), .flags = M_OPT_FILE},
+    {"input-ipc-client", OPT_STRING(ipc_client)},
 
-    OPT_STRING("record-file", record_file, M_OPT_FILE, .deprecation_message =
-               "use --stream-record or the dump-cache command"),
+    {"screenshot", OPT_SUBSTRUCT(screenshot_image_opts, screenshot_conf)},
+    {"screenshot-template", OPT_STRING(screenshot_template)},
+    {"screenshot-dir", OPT_STRING(screenshot_dir),
+        .flags = M_OPT_FILE},
+    {"screenshot-directory", OPT_ALIAS("screenshot-dir")},
+    {"screenshot-sw", OPT_BOOL(screenshot_sw)},
 
-    OPT_SUBSTRUCT("", resample_opts, resample_conf, 0),
+    {"", OPT_SUBSTRUCT(resample_opts, resample_conf)},
 
-    OPT_SUBSTRUCT("", input_opts, input_config, 0),
+    {"", OPT_SUBSTRUCT(input_opts, input_config)},
 
-    OPT_SUBSTRUCT("", vo, vo_sub_opts, 0),
-    OPT_SUBSTRUCT("", demux_opts, demux_conf, 0),
-    OPT_SUBSTRUCT("", demux_cache_opts, demux_cache_conf, 0),
+    {"clipboard", OPT_SUBSTRUCT(clipboard_opts, clipboard_conf)},
 
-    OPT_SUBSTRUCT("", gl_video_opts, gl_video_conf, 0),
-    OPT_SUBSTRUCT("", spirv_opts, spirv_conf, 0),
+    {"", OPT_SUBSTRUCT(vo, vo_sub_opts)},
+    {"", OPT_SUBSTRUCT(demux_opts, demux_conf)},
+    {"", OPT_SUBSTRUCT(demux_cache_opts, demux_cache_conf)},
+    {"", OPT_SUBSTRUCT(stream_opts, stream_conf)},
+
+    {"", OPT_SUBSTRUCT(ra_ctx_opts, ra_ctx_conf)},
+    {"", OPT_SUBSTRUCT(gl_video_opts, gl_video_conf)},
+    {"", OPT_SUBSTRUCT(gl_next_opts, gl_next_conf)},
+    {"", OPT_SUBSTRUCT(spirv_opts, spirv_conf)},
 
 #if HAVE_GL
-    OPT_SUBSTRUCT("", opengl_opts, opengl_conf, 0),
+    {"", OPT_SUBSTRUCT(opengl_opts, opengl_conf)},
+#endif
+
+#if HAVE_EGL || HAVE_EGL_ANDROID || HAVE_EGL_ANGLE_WIN32
+    {"egl", OPT_SUBSTRUCT(egl_opts, egl_conf)},
 #endif
 
 #if HAVE_VULKAN
-    OPT_SUBSTRUCT("", vulkan_opts, vulkan_conf, 0),
+    {"", OPT_SUBSTRUCT(vulkan_opts, vulkan_conf)},
+#if HAVE_VK_KHR_DISPLAY
+    {"", OPT_SUBSTRUCT(vulkan_display_opts, vulkan_display_conf)},
+#endif
 #endif
 
 #if HAVE_D3D11
-    OPT_SUBSTRUCT("", d3d11_opts, d3d11_conf, 0),
+    {"", OPT_SUBSTRUCT(d3d11_opts, d3d11_conf)},
 #if HAVE_D3D_HWACCEL
-    OPT_SUBSTRUCT("", d3d11va_opts, d3d11va_conf, 0),
+    {"", OPT_SUBSTRUCT(d3d11va_opts, d3d11va_conf)},
 #endif
 #endif
 
 #if HAVE_EGL_ANGLE_WIN32
-    OPT_SUBSTRUCT("", angle_opts, angle_conf, 0),
+    {"", OPT_SUBSTRUCT(angle_opts, angle_conf)},
 #endif
 
-#if HAVE_GL_COCOA
-    OPT_SUBSTRUCT("", cocoa_opts, cocoa_conf, 0),
+#if HAVE_COCOA
+    {"", OPT_SUBSTRUCT(macos_opts, macos_conf)},
 #endif
 
-#if HAVE_MACOS_COCOA_CB
-    OPT_SUBSTRUCT("", macos_opts, macos_conf, 0),
-#endif
-
-#if HAVE_EGL_ANDROID
-    OPT_SUBSTRUCT("", android_opts, android_conf, 0),
-#endif
-
-#if HAVE_WAYLAND
-    OPT_SUBSTRUCT("", wayland_opts, wayland_conf, 0),
+#if HAVE_DRM
+    {"", OPT_SUBSTRUCT(drm_opts, drm_conf)},
 #endif
 
 #if HAVE_GL_WIN32
-    OPT_CHOICE("opengl-dwmflush", wingl_dwm_flush, 0,
-               ({"no", -1}, {"auto", 0}, {"windowed", 1}, {"yes", 2})),
+    {"", OPT_SUBSTRUCT(wingl_opts, wingl_conf)},
 #endif
 
 #if HAVE_CUDA_HWACCEL
-    OPT_CHOICE_OR_INT("cuda-decode-device", cuda_device, 0,
-                      0, INT_MAX, ({"auto", -1})),
+    {"cuda", OPT_SUBSTRUCT(cuda_opts, cuda_conf)},
 #endif
 
 #if HAVE_VAAPI
-    OPT_SUBSTRUCT("vaapi", vaapi_opts, vaapi_conf, 0),
+    {"vaapi", OPT_SUBSTRUCT(vaapi_opts, vaapi_conf)},
 #endif
 
-    OPT_SUBSTRUCT("", encode_opts, encode_config, 0),
+    {"sws", OPT_SUBSTRUCT(sws_opts, sws_conf)},
 
-    OPT_REMOVED("a52drc", "use --ad-lavc-ac3drc=level"),
-    OPT_REMOVED("afm", "use --ad=..."),
-    OPT_REPLACED("aspect", "video-aspect-override"),
-    OPT_REMOVED("ass-bottom-margin", "use --vf=sub=bottom:top"),
-    OPT_REPLACED("ass", "sub-ass"),
-    OPT_REPLACED("audiofile", "audio-file"),
-    OPT_REMOVED("benchmark", "use --untimed (no stats)"),
-    OPT_REMOVED("capture", NULL),
-    OPT_REMOVED("stream-capture", NULL),
-    OPT_REMOVED("channels", "use --audio-channels (changed semantics)"),
-    OPT_REPLACED("cursor-autohide-delay", "cursor-autohide"),
-    OPT_REPLACED("delay", "audio-delay"),
-    OPT_REMOVED("dumpstream", "use --stream-dump=<filename>"),
-    OPT_REPLACED("dvdangle", "dvd-angle"),
-    OPT_REPLACED("endpos", "length"),
-    OPT_REPLACED("font", "osd-font"),
-    OPT_REPLACED("forcedsubsonly", "sub-forced-only"),
-    OPT_REPLACED("format", "audio-format"),
-    OPT_REMOVED("hardframedrop", NULL),
-    OPT_REMOVED("identify", "use TOOLS/mpv_identify.sh"),
-    OPT_REMOVED("lavdopts", "use --vd-lavc-..."),
-    OPT_REMOVED("lavfdopts", "use --demuxer-lavf-..."),
-    OPT_REPLACED("lua", "script"),
-    OPT_REPLACED("lua-opts", "script-opts"),
-    OPT_REMOVED("mixer-channel", "use AO suboptions (alsa, oss)"),
-    OPT_REMOVED("mixer", "use AO suboptions (alsa, oss)"),
-    OPT_REPLACED("mouse-movements", "input-cursor"),
-    OPT_REPLACED("msgcolor", "msg-color"),
-    OPT_REMOVED("msglevel", "use --msg-level (changed semantics)"),
-    OPT_REPLACED("msgmodule", "msg-module"),
-    OPT_REPLACED("name", "x11-name"),
-    OPT_REPLACED("noar", "no-input-appleremote"),
-    OPT_REPLACED("noautosub", "no-sub-auto"),
-    OPT_REPLACED("noconsolecontrols", "no-input-terminal"),
-    OPT_REPLACED("nosound", "no-audio"),
-    OPT_REPLACED("osdlevel", "osd-level"),
-    OPT_REMOVED("panscanrange", "use --video-zoom, --video-pan-x/y"),
-    OPT_REPLACED("playing-msg", "term-playing-msg"),
-    OPT_REMOVED("pp", NULL),
-    OPT_REMOVED("pphelp", NULL),
-    OPT_REMOVED("rawaudio", "use --demuxer-rawaudio-..."),
-    OPT_REMOVED("rawvideo", "use --demuxer-rawvideo-..."),
-    OPT_REPLACED("spugauss", "sub-gauss"),
-    OPT_REPLACED("srate", "audio-samplerate"),
-    OPT_REPLACED("ss", "start"),
-    OPT_REPLACED("stop-xscreensaver", "stop-screensaver"),
-    OPT_REPLACED("sub-fuzziness", "sub-auto"),
-    OPT_REPLACED("subcp", "sub-codepage"),
-    OPT_REPLACED("subdelay", "sub-delay"),
-    OPT_REPLACED("subfile", "sub-file"),
-    OPT_REPLACED("subfont-text-scale", "sub-scale"),
-    OPT_REPLACED("subfont", "sub-text-font"),
-    OPT_REPLACED("subfps", "sub-fps"),
-    OPT_REPLACED("subpos", "sub-pos"),
-    OPT_REPLACED("tvscan", "tv-scan"),
-    OPT_REMOVED("use-filename-title", "use --title='${filename}'"),
-    OPT_REMOVED("vc", "use --vd=..., --hwdec=..."),
-    OPT_REMOVED("vobsub", "use --sub-file (pass the .idx file)"),
-    OPT_REMOVED("xineramascreen", "use --screen (different values)"),
-    OPT_REMOVED("xy", "use --autofit"),
-    OPT_REMOVED("zoom", "Inverse available as ``--video-unscaled"),
-    OPT_REPLACED("media-keys", "input-media-keys"),
-    OPT_REPLACED("right-alt-gr", "input-right-alt-gr"),
-    OPT_REPLACED("autosub", "sub-auto"),
-    OPT_REPLACED("autosub-match", "sub-auto"),
-    OPT_REPLACED("status-msg", "term-status-msg"),
-    OPT_REPLACED("idx", "index"),
-    OPT_REPLACED("forceidx", "index"),
-    OPT_REMOVED("cache-pause-below", "for 'no', use --no-cache-pause"),
-    OPT_REMOVED("no-cache-pause-below", "use --no-cache-pause"),
-    OPT_REMOVED("volstep", "edit input.conf directly instead"),
-    OPT_REMOVED("fixed-vo", "--fixed-vo=yes is now the default"),
-    OPT_REPLACED("mkv-subtitle-preroll", "demuxer-mkv-subtitle-preroll"),
-    OPT_REPLACED("ass-use-margins", "sub-use-margins"),
-    OPT_REPLACED("media-title", "force-media-title"),
-    OPT_REPLACED("input-unix-socket", "input-ipc-server"),
-    OPT_REPLACED("softvol-max", "volume-max"),
-    OPT_REMOVED("bluray-angle", "this didn't do anything for a few releases"),
-    OPT_REPLACED("playlist-pos", "playlist-start"),
-    OPT_REPLACED("sub-text-font", "sub-font"),
-    OPT_REPLACED("sub-text-font-size", "sub-font-size"),
-    OPT_REPLACED("sub-text-color", "sub-color"),
-    OPT_REPLACED("sub-text-border-color", "sub-border-color"),
-    OPT_REPLACED("sub-text-shadow-color", "sub-shadow-color"),
-    OPT_REPLACED("sub-text-back-color", "sub-back-color"),
-    OPT_REPLACED("sub-text-border-size", "sub-border-size"),
-    OPT_REPLACED("sub-text-shadow-offset", "sub-shadow-offset"),
-    OPT_REPLACED("sub-text-spacing", "sub-spacing"),
-    OPT_REPLACED("sub-text-margin-x", "sub-margin-x"),
-    OPT_REPLACED("sub-text-margin-y", "sub-margin-y"),
-    OPT_REPLACED("sub-text-align-x", "sub-align-x"),
-    OPT_REPLACED("sub-text-align-y", "sub-align-y"),
-    OPT_REPLACED("sub-text-blur", "sub-blur"),
-    OPT_REPLACED("sub-text-bold", "sub-bold"),
-    OPT_REPLACED("sub-text-italic", "sub-italic"),
-    OPT_REPLACED("ass-line-spacing", "sub-ass-line-spacing"),
-    OPT_REPLACED("ass-force-margins", "sub-ass-force-margins"),
-    OPT_REPLACED("ass-vsfilter-aspect-compat", "sub-ass-vsfilter-aspect-compat"),
-    OPT_REPLACED("ass-vsfilter-color-compat", "sub-ass-vsfilter-color-compat"),
-    OPT_REPLACED("ass-vsfilter-blur-compat", "sub-ass-vsfilter-blur-compat"),
-    OPT_REPLACED("ass-force-style", "sub-ass-force-style"),
-    OPT_REPLACED("ass-styles", "sub-ass-styles"),
-    OPT_REPLACED("ass-hinting", "sub-ass-hinting"),
-    OPT_REPLACED("ass-shaper", "sub-ass-shaper"),
-    OPT_REPLACED("ass-style-override", "sub-ass-style-override"),
-    OPT_REPLACED("ass-scale-with-window", "sub-ass-scale-with-window"),
-    OPT_REPLACED("sub-ass-style-override", "sub-ass-override"),
-    OPT_REMOVED("fs-black-out-screens", NULL),
-    OPT_REPLACED("sub-paths", "sub-file-paths"),
-    OPT_REMOVED("heartbeat-cmd", "use Lua scripting instead"),
-    OPT_REMOVED("no-ometadata", "use --no-ocopy-metadata"),
-    OPT_REMOVED("video-stereo-mode", "removed, try --vf=stereo3d"),
-    OPT_REMOVED("chapter", "use '--start=#123' '--end=#124' (for chapter 123)"),
-    OPT_REPLACED("video-aspect", "video-aspect-override"),
+#if HAVE_ZIMG
+    {"zimg", OPT_SUBSTRUCT(zimg_opts, zimg_conf)},
+#endif
 
+    {"", OPT_SUBSTRUCT(encode_opts, encode_config)},
+
+    {"play-dir", OPT_REPLACED("play-direction")},
     {0}
 };
 
-const struct MPOpts mp_default_opts = {
-    .use_terminal = 1,
-    .msg_color = 1,
-    .audio_decoders = NULL,
-    .video_decoders = NULL,
+static const struct MPOpts mp_default_opts = {
+    .use_terminal = true,
+    .msg_color = true,
     .softvol_max = 130,
     .softvol_volume = 100,
-    .softvol_mute = 0,
+    .softvol_gain_max = 12,
+    .softvol_gain_min = -96,
+    .softvol_gain = 0,
     .gapless_audio = -1,
     .wintitle = "${?media-title:${media-title}}${!media-title:No file} - mpv",
     .stop_screensaver = 1,
     .cursor_autohide_delay = 1000,
-    .video_osd = 1,
+    .video_osd = true,
     .osd_level = 1,
     .osd_on_seek = 1,
     .osd_duration = 1000,
 #if HAVE_LUA
-    .lua_load_osc = 1,
-    .lua_load_ytdl = 1,
+    .lua_load_osc = true,
+    .lua_load_ytdl = true,
     .lua_ytdl_format = NULL,
     .lua_ytdl_raw_options = NULL,
-    .lua_load_stats = 1,
+    .lua_load_stats = true,
+    .lua_load_console = true,
+    .lua_load_auto_profiles = -1,
+    .lua_load_select = true,
 #endif
-    .auto_load_scripts = 1,
+    .auto_load_scripts = true,
     .loop_times = 1,
-    .ordered_chapters = 1,
+    .ordered_chapters = true,
     .chapter_merge_threshold = 100,
     .chapter_seek_threshold = 5.0,
-    .hr_seek_framedrop = 1,
+    .hr_seek = 2,
+    .hr_seek_framedrop = true,
     .sync_max_video_change = 1,
     .sync_max_audio_change = 0.125,
-    .sync_audio_drop_size = 0.020,
-    .load_config = 1,
-    .position_resume = 1,
-    .autoload_files = 1,
-    .demuxer_thread = 1,
+    .sync_max_factor = 5,
+    .load_config = true,
+    .position_resume = true,
+    .autoload_files = true,
+    .demuxer_thread = true,
     .demux_termination_timeout = 0.1,
     .hls_bitrate = INT_MAX,
-    .cache_pause = 1,
+    .cache_pause = true,
     .cache_pause_wait = 1.0,
     .ab_loop = {MP_NOPTS_VALUE, MP_NOPTS_VALUE},
+    .ab_loop_count = -1,
     .edition_id = -1,
     .default_max_pts_correction = -1,
-    .correct_pts = 1,
-    .initial_audio_sync = 1,
+    .initial_audio_sync = true,
     .frame_dropping = 1,
     .term_osd = 2,
     .term_osd_bar_chars = "[-+-]",
-    .consolecontrols = 1,
+    .consolecontrols = true,
     .playlist_pos = -1,
     .play_frames = -1,
-    .rebase_start_time = 1,
-    .keep_open = 0,
-    .keep_open_pause = 1,
-    .image_display_duration = 1.0,
+    .rebase_start_time = true,
+    .keep_open_pause = true,
+    .image_display_duration = 5.0,
     .stream_id = { { [STREAM_AUDIO] = -1,
                      [STREAM_VIDEO] = -1,
                      [STREAM_SUB] = -1, },
                    { [STREAM_AUDIO] = -2,
                      [STREAM_VIDEO] = -2,
                      [STREAM_SUB] = -2, }, },
-    .stream_auto_sel = 1,
+    .stream_auto_sel = true,
+    .subs_with_matching_audio = 2,
+    .subs_match_os_language = true,
+    .subs_fallback = 1,
+    .subs_fallback_forced = 1,
     .audio_display = 1,
     .audio_output_format = 0,  // AF_FORMAT_UNKNOWN
     .playback_speed = 1.,
-    .pitch_correction = 1,
-    .movie_aspect = -1.,
-    .aspect_method = 2,
-    .sub_auto = 0,
+    .playback_pitch = 1.,
+    .pitch_correction = true,
     .audiofile_auto = -1,
-    .osd_bar_visible = 1,
+    .osd_bar_visible = true,
     .screenshot_template = "mpv-shot%n",
     .play_dir = 1,
-    .video_reverse_size = 1 * 1024 * 1024 * 1024,
-    .audio_reverse_size = 64 * 1024 * 1024,
+    .media_controls = true,
+    .video_exts = (char *[]){
+        "3g2", "3gp", "avi", "flv", "m2ts", "m4v", "mj2", "mkv", "mov", "mp4",
+        "mpeg", "mpg", "ogv", "rmvb", "ts", "webm", "wmv", "y4m", NULL
+    },
+    .audio_exts = (char *[]){
+        "aac", "ac3", "aiff", "ape", "au", "dts", "eac3", "flac", "m4a", "mka",
+        "mp3", "oga", "ogg", "ogm", "opus", "thd", "wav", "wav", "wma", "wv", NULL
+    },
+    .image_exts = (char *[]){
+        "avif", "bmp", "gif", "heic", "heif", "j2k", "jp2", "jpeg", "jpg",
+        "jxl", "png", "qoi", "svg", "tga", "tif", "tiff", "webp", NULL
+    },
+    .archive_exts = (char *[]){
+        "zip", "rar", "7z", "cbz", "cbr", NULL
+    },
+    .playlist_exts = (char *[]){
+        "m3u", "m3u8", "pls", "edl", NULL
+    },
+
+    .sub_auto_exts = (char *[]){
+        "ass",
+        "idx",
+        "lrc",
+        "mks",
+        "pgs",
+        "rt",
+        "sbv",
+        "scc",
+        "smi",
+        "srt",
+        "ssa",
+        "sub",
+        "sup",
+        "utf",
+        "utf-8",
+        "utf8",
+        "vtt",
+        NULL
+    },
+
+    // Stolen from: vlc/-/blob/master/modules/meta_engine/folder.c#L40
+    // sorted by priority (descending)
+    .coverart_whitelist = (char *[]){
+        "AlbumArt",
+        "Album",
+        "cover",
+        "front",
+        "AlbumArtSmall",
+        "Folder",
+        ".folder",
+        "thumb",
+        NULL
+    },
 
     .audio_output_channels = {
         .set = 1,
         .auto_safe = 1,
     },
 
-    .index_mode = 1,
-
-    .mf_fps = 1.0,
-
-    .display_tags = (char **)(const char*[]){
+    .display_tags = (char *[]){
         "Artist", "Album", "Album_Artist", "Comment", "Composer",
         "Date", "Description", "Genre", "Performer", "Rating",
         "Series", "Title", "Track", "icy-title", "service_name",
+        "Uploader", "Channel_URL",
         NULL
     },
 
     .cuda_device = -1,
+
+    .watch_later_options = (char *[]){
+        "start",
+        "speed",
+        "pitch",
+        "edition",
+        "volume",
+        "mute",
+        "audio-delay",
+        "gamma",
+        "brightness",
+        "contrast",
+        "saturation",
+        "hue",
+        "deinterlace",
+        "vf",
+        "af",
+        "panscan",
+        "aid",
+        "vid",
+        "sid",
+        "sub-delay",
+        "sub-speed",
+        "sub-pos",
+        "sub-visibility",
+        "sub-scale",
+        "sub-use-margins",
+        "sub-ass-force-margins",
+        "sub-ass-use-video-data",
+        "sub-ass-override",
+        "secondary-sid",
+        "secondary-sub-delay",
+        "secondary-sub-pos",
+        "secondary-sub-ass-override",
+        "secondary-sub-visibility",
+        "ab-loop-a",
+        "ab-loop-b",
+        "video-aspect-override",
+        "video-aspect-method",
+        "video-unscaled",
+        "video-pan-x",
+        "video-pan-y",
+        "video-rotate",
+        "video-crop",
+        "video-zoom",
+        "video-scale-x",
+        "video-scale-y",
+        "video-align-x",
+        "video-align-y",
+        NULL
+    },
+};
+
+const struct m_sub_options mp_opt_root = {
+    .opts = mp_opts,
+    .size = sizeof(struct MPOpts),
+    .defaults = &mp_default_opts,
 };
 
 #endif /* MPLAYER_CFG_MPLAYER_H */

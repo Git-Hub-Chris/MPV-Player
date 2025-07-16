@@ -18,6 +18,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "filter.h"
 
@@ -32,29 +33,8 @@ struct mp_decoder_wrapper {
     // Filter with no input and 1 output, which returns the decoded data.
     struct mp_filter *f;
 
-    // For informational purposes.
-    char *decoder_desc;
-
     // Can be set by user.
     struct mp_recorder_sink *recorder_sink;
-    int play_dir;
-
-    // --- for STREAM_VIDEO
-
-    // FPS from demuxer or from user override
-    float fps;
-
-    // Framedrop control for playback (not used for hr seek etc.)
-    int attempt_framedrops; // try dropping this many frames
-    int dropped_frames; // total frames _probably_ dropped
-
-    // --- for STREAM_AUDIO
-
-    // Prefer spdif wrapper over real decoders.
-    bool try_spdif;
-
-    // A pts reset was observed (audio only, heuristic).
-    bool pts_reset;
 };
 
 // Create the decoder wrapper for the given stream, plus underlying decoder.
@@ -62,6 +42,23 @@ struct mp_decoder_wrapper {
 // wrapper is destroyed.
 struct mp_decoder_wrapper *mp_decoder_wrapper_create(struct mp_filter *parent,
                                                      struct sh_stream *src);
+
+// Legacy decoder framedrop control.
+void mp_decoder_wrapper_set_frame_drops(struct mp_decoder_wrapper *d, int num);
+int mp_decoder_wrapper_get_frames_dropped(struct mp_decoder_wrapper *d);
+
+double mp_decoder_wrapper_get_container_fps(struct mp_decoder_wrapper *d);
+
+// Whether to prefer spdif wrapper over real decoders on next reinit.
+void mp_decoder_wrapper_set_spdif_flag(struct mp_decoder_wrapper *d, bool spdif);
+
+// Whether to decode only 1 frame and then stop, and cache the frame across resets.
+void mp_decoder_wrapper_set_coverart_flag(struct mp_decoder_wrapper *d, bool c);
+
+// True if a pts reset was observed (audio only, heuristic).
+bool mp_decoder_wrapper_get_pts_reset(struct mp_decoder_wrapper *d);
+
+void mp_decoder_wrapper_set_play_dir(struct mp_decoder_wrapper *d, int dir);
 
 struct mp_decoder_list *video_decoder_list(void);
 struct mp_decoder_list *audio_decoder_list(void);
@@ -77,6 +74,7 @@ enum dec_ctrl {
     VDCTRL_GET_BFRAMES,
     // framedrop mode: 0=none, 1=standard, 2=hrseek
     VDCTRL_SET_FRAMEDROP,
+    VDCTRL_CHECK_FORCED_EOF,
 };
 
 int mp_decoder_wrapper_control(struct mp_decoder_wrapper *d,
@@ -109,11 +107,15 @@ extern const struct mp_decoder_fns vd_lavc;
 extern const struct mp_decoder_fns ad_lavc;
 extern const struct mp_decoder_fns ad_spdif;
 
-// Convenience wrapper for lavc based decoders. eof_flag must be set to false
-// on init and resets.
-void lavc_process(struct mp_filter *f, bool *eof_flag,
-                  bool (*send)(struct mp_filter *f, struct demux_packet *pkt),
-                  bool (*receive)(struct mp_filter *f, struct mp_frame *res));
+// Convenience wrapper for lavc based decoders. Treat lavc_state as private;
+// init to all-0 on init and resets.
+struct lavc_state {
+    bool eof_returned;
+    bool packets_sent;
+};
+void lavc_process(struct mp_filter *f, struct lavc_state *state,
+                  int (*send)(struct mp_filter *f, struct demux_packet *pkt),
+                  int (*receive)(struct mp_filter *f, struct mp_frame *res));
 
 // ad_spdif.c
 struct mp_decoder_list *select_spdif_codec(const char *codec, const char *pref);

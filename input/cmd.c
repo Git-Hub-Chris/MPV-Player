@@ -25,6 +25,7 @@
 
 #include "cmd.h"
 #include "input.h"
+#include "misc/json.h"
 
 #include "libmpv/client.h"
 
@@ -50,9 +51,11 @@ static const struct flag cmd_flags[] = {
     {"osd-auto",            MP_ON_OSD_FLAGS, MP_ON_OSD_AUTO},
     {"expand-properties",   0,               MP_EXPAND_PROPERTIES},
     {"raw",                 MP_EXPAND_PROPERTIES, 0},
-    {"repeatable",          0,               MP_ALLOW_REPEAT},
+    {"repeatable",          MP_DISALLOW_REPEAT, MP_ALLOW_REPEAT},
+    {"nonrepeatable",       MP_ALLOW_REPEAT,    MP_DISALLOW_REPEAT},
+    {"nonscalable",         0,               MP_DISALLOW_SCALE},
     {"async",               MP_SYNC_CMD,     MP_ASYNC_CMD},
-    {"sync",                MP_ASYNC_CMD,     MP_SYNC_CMD},
+    {"sync",                MP_ASYNC_CMD,    MP_SYNC_CMD},
     {0}
 };
 
@@ -335,11 +338,34 @@ static int pctx_read_token(struct parse_ctx *ctx, bstr *out)
             return -1;
         }
         if (!bstr_eatstart0(&ctx->str, "\"")) {
-            MP_ERR(ctx, "Unterminated quotes: ...>%.*s<.\n", BSTR_P(start));
+            MP_ERR(ctx, "Unterminated double quote: ...>%.*s<.\n", BSTR_P(start));
             return -1;
         }
         return 1;
     }
+    if (bstr_eatstart0(&ctx->str, "'")) {
+        int next = bstrchr(ctx->str, '\'');
+        if (next < 0) {
+            MP_ERR(ctx, "Unterminated single quote: ...>%.*s<.\n", BSTR_P(start));
+            return -1;
+        }
+        *out = bstr_splice(ctx->str, 0, next);
+        ctx->str = bstr_cut(ctx->str, next+1);
+        return 1;
+    }
+    if (ctx->start.len > 1 && bstr_eatstart0(&ctx->str, "`")) {
+        char endquote[2] = {ctx->str.start[0], '`'};
+        ctx->str = bstr_cut(ctx->str, 1);
+        int next = bstr_find(ctx->str, (bstr){endquote, 2});
+        if (next < 0) {
+            MP_ERR(ctx, "Unterminated custom quote: ...>%.*s<.\n", BSTR_P(start));
+            return -1;
+        }
+        *out = bstr_splice(ctx->str, 0, next);
+        ctx->str = bstr_cut(ctx->str, next+2);
+        return 1;
+    }
+
     return read_token(ctx->str, &ctx->str, out) ? 1 : 0;
 }
 
@@ -413,7 +439,7 @@ static struct mp_cmd *parse_cmd_str(struct mp_log *log, void *tmp,
     }
 
     bstr orig = {ctx->start.start, ctx->str.start - ctx->start.start};
-    cmd->original = bstrdup(cmd, bstr_strip(orig));
+    cmd->original = bstrto0(cmd, bstr_strip(orig));
 
     *str = ctx->str;
     return cmd;
@@ -449,7 +475,6 @@ mp_cmd_t *mp_input_parse_cmd_str(struct mp_log *log, bstr str, const char *loc)
             *list = (struct mp_cmd) {
                 .name = (char *)mp_cmd_list.name,
                 .def = &mp_cmd_list,
-                .original = bstrdup(list, original),
             };
             talloc_steal(list, cmd);
             struct mp_cmd_arg arg = {0};
@@ -467,6 +492,16 @@ mp_cmd_t *mp_input_parse_cmd_str(struct mp_log *log, bstr str, const char *loc)
         talloc_steal(cmd, sub);
         *p_prev = sub;
         p_prev = &sub->queue_next;
+    }
+
+    cmd->original = bstrto0(cmd, bstr_strip(
+                        bstr_splice(original, 0, str.start - original.start)));
+
+    str = bstr_strip(str);
+    if (bstr_eatstart0(&str, "#") && !bstr_startswith0(str, "#")) {
+        str = bstr_strip(str);
+        if (str.len)
+            cmd->desc = bstrto0(cmd, str);
     }
 
 done:
@@ -509,8 +544,11 @@ mp_cmd_t *mp_cmd_clone(mp_cmd_t *cmd)
         ret->args[i].type = cmd->args[i].type;
         m_option_copy(ret->args[i].type, &ret->args[i].v, &cmd->args[i].v);
     }
-    ret->original = bstrdup(ret, cmd->original);
+    ret->original = talloc_strdup(ret, cmd->original);
+    ret->desc = talloc_strdup(ret, cmd->desc);
+    ret->sender = NULL;
     ret->key_name = talloc_strdup(ret, ret->key_name);
+    ret->key_text = talloc_strdup(ret, ret->key_text);
 
     if (cmd->def == &mp_cmd_list) {
         struct mp_cmd *prev = NULL;
@@ -531,6 +569,15 @@ mp_cmd_t *mp_cmd_clone(mp_cmd_t *cmd)
     return ret;
 }
 
+static int get_arg_count(const struct mp_cmd_def *cmd)
+{
+    for (int i = MP_CMD_DEF_MAX_ARGS - 1; i >= 0; i--) {
+        if (cmd->args[i].type)
+            return i + 1;
+    }
+    return 0;
+}
+
 void mp_cmd_dump(struct mp_log *log, int msgl, char *header, struct mp_cmd *cmd)
 {
     if (!mp_msg_test(log, msgl))
@@ -542,11 +589,20 @@ void mp_cmd_dump(struct mp_log *log, int msgl, char *header, struct mp_cmd *cmd)
         return;
     }
     mp_msg(log, msgl, "%s, flags=%d, args=[", cmd->name, cmd->flags);
+    int argc = get_arg_count(cmd->def);
     for (int n = 0; n < cmd->nargs; n++) {
+        const char *argname = cmd->def->args[MPMIN(n, argc - 1)].name;
         char *s = m_option_print(cmd->args[n].type, &cmd->args[n].v);
         if (n)
             mp_msg(log, msgl, ", ");
-        mp_msg(log, msgl, "%s", s ? s : "(NULL)");
+        struct mpv_node node = {
+            .format = MPV_FORMAT_STRING,
+            .u.string = s ? s : "(NULL)",
+        };
+        char *esc = NULL;
+        json_write(&esc, &node);
+        mp_msg(log, msgl, "%s=%s", argname, esc ? esc : "<error>");
+        talloc_free(esc);
         talloc_free(s);
     }
     mp_msg(log, msgl, "]\n");
@@ -554,20 +610,23 @@ void mp_cmd_dump(struct mp_log *log, int msgl, char *header, struct mp_cmd *cmd)
 
 bool mp_input_is_repeatable_cmd(struct mp_cmd *cmd)
 {
-    return (cmd->def->allow_auto_repeat) || cmd->def == &mp_cmd_list ||
+    if (cmd->def == &mp_cmd_list && cmd->args[0].v.p)
+        cmd = cmd->args[0].v.p;  // list - only 1st cmd is considered
+
+    return (cmd->def->allow_auto_repeat && !(cmd->flags & MP_DISALLOW_REPEAT)) ||
            (cmd->flags & MP_ALLOW_REPEAT);
 }
 
 bool mp_input_is_scalable_cmd(struct mp_cmd *cmd)
 {
-    return cmd->def->scalable;
+    return cmd->def->scalable && !(cmd->flags & MP_DISALLOW_SCALE);
 }
 
 void mp_print_cmd_list(struct mp_log *out)
 {
     for (int i = 0; mp_cmds[i].name; i++) {
         const struct mp_cmd_def *def = &mp_cmds[i];
-        mp_info(out, "%-20.20s", def->name);
+        mp_info(out, "%-25s", def->name);
         for (int j = 0; j < MP_CMD_DEF_MAX_ARGS && def->args[j].type; j++) {
             const struct m_option *arg = &def->args[j];
             bool is_opt = arg->defval || (arg->flags & MP_CMD_OPT_ARG);
@@ -579,31 +638,3 @@ void mp_print_cmd_list(struct mp_log *out)
         mp_info(out, "\n");
     }
 }
-
-static int parse_cycle_dir(struct mp_log *log, const struct m_option *opt,
-                           struct bstr name, struct bstr param, void *dst)
-{
-    double val;
-    if (bstrcmp0(param, "up") == 0) {
-        val = +1;
-    } else if (bstrcmp0(param, "down") == 0) {
-        val = -1;
-    } else {
-        return m_option_type_double.parse(log, opt, name, param, dst);
-    }
-    *(double *)dst = val;
-    return 1;
-}
-
-static void copy_opt(const m_option_t *opt, void *dst, const void *src)
-{
-    if (dst && src)
-        memcpy(dst, src, opt->type->size);
-}
-
-const struct m_option_type m_option_type_cycle_dir = {
-    .name = "up|down",
-    .parse = parse_cycle_dir,
-    .copy = copy_opt,
-    .size = sizeof(double),
-};

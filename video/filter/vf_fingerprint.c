@@ -15,6 +15,8 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <math.h>
+
 #include "common/common.h"
 #include "common/tags.h"
 #include "filters/filter.h"
@@ -31,8 +33,8 @@
 
 struct f_opts {
     int type;
-    int clear;
-    int print;
+    bool clear;
+    bool print;
 };
 
 const struct m_opt_choice_alternatives type_names[] = {
@@ -43,15 +45,15 @@ const struct m_opt_choice_alternatives type_names[] = {
 
 #define OPT_BASE_STRUCT struct f_opts
 static const struct m_option f_opts_list[] = {
-    OPT_CHOICE_C("type", type, 0, type_names),
-    OPT_FLAG("clear-on-query", clear, 0),
-    OPT_FLAG("print", print, 0),
+    {"type", OPT_CHOICE_C(type, type_names)},
+    {"clear-on-query", OPT_BOOL(clear)},
+    {"print", OPT_BOOL(print)},
     {0}
 };
 
 static const struct f_opts f_opts_def = {
     .type = 16,
-    .clear = 1,
+    .clear = true,
 };
 
 struct print_entry {
@@ -100,9 +102,10 @@ static void f_process(struct mp_filter *f)
 
     // Try to achieve minimum conversion, even if it makes the fingerprints less
     // "portable" across source video.
+    p->scaled->params.repr = mpi->params.repr;
     p->scaled->params.color = mpi->params.color;
     // Make output always full range; no reason to lose precision.
-    p->scaled->params.color.levels = MP_CSP_LEVELS_PC;
+    p->scaled->params.repr.levels = PL_COLOR_LEVELS_FULL;
 
     if (!mp_zimg_convert(p->zimg, p->scaled, mpi)) {
         if (!p->fallback_warning) {
@@ -204,6 +207,14 @@ static struct mp_filter *f_create(struct mp_filter *parent, void *options)
     MP_HANDLE_OOM(p->sws);
     p->zimg = mp_zimg_alloc();
     talloc_steal(p, p->zimg);
+    p->zimg->opts = (struct zimg_opts){
+        .scaler = ZIMG_RESIZE_BILINEAR,
+        .scaler_params = {NAN, NAN},
+        .scaler_chroma_params = {NAN, NAN},
+        .scaler_chroma = ZIMG_RESIZE_BILINEAR,
+        .dither = ZIMG_DITHER_NONE,
+        .fast = true,
+    };
     return f;
 }
 

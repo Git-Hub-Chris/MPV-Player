@@ -18,14 +18,13 @@
 #ifndef MPLAYER_X11_COMMON_H
 #define MPLAYER_X11_COMMON_H
 
-#include <stdint.h>
+#include <stdatomic.h>
 #include <stdbool.h>
-#include <pthread.h>
+#include <stdint.h>
+
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
-#include "osdep/atomic.h"
-#include "osdep/semaphore.h"
 
 #include "common/common.h"
 
@@ -44,12 +43,15 @@ struct xrandr_display {
     double fps;
     char *name;
     bool overlaps;
-    int atom_id;
+    int atom_id; // offset by location of primary
+    int screen;
 };
 
 struct vo_x11_state {
     struct mp_log *log;
     struct input_ctx *input_ctx;
+    struct m_config_cache *opts_cache;
+    struct mp_vo_opts *opts;
     Display *display;
     int event_fd;
     int wakeup_pipe[2];
@@ -60,23 +62,24 @@ struct vo_x11_state {
     int display_is_local;
     int ws_width;
     int ws_height;
-    int dpi_scale;
+    double dpi_scale;
     struct mp_rect screenrc;
     char *window_title;
 
     struct xrandr_display displays[MAX_DISPLAYS];
     int num_displays;
-    int current_icc_screen;
+    int current_screen;
 
     int xrandr_event;
+    bool has_mesa;
 
     bool screensaver_enabled;
     bool dpms_touched;
     double screensaver_time_last;
-    pthread_t screensaver_thread;
-    bool screensaver_thread_running;
-    sem_t screensaver_sem;
-    atomic_bool screensaver_terminate;
+
+    struct mp_present *present;
+    bool use_present;
+    int present_code;
 
     XIM xim;
     XIC xic;
@@ -85,9 +88,12 @@ struct vo_x11_state {
     Colormap colormap;
 
     int wm_type;
+    bool hidden; // _NET_WM_STATE_HIDDEN
     bool window_hidden; // the window was mapped at least once
     bool pseudo_mapped; // not necessarily mapped, but known window size
     int fs;     // whether we assume the window is in fullscreen mode
+
+    bool init_fs; // whether mpv was launched with --fs
 
     bool mouse_cursor_visible; // whether we want the cursor to be visible (only
                                // takes effect when the window is focused)
@@ -98,6 +104,7 @@ struct vo_x11_state {
     // Current actual window position (updated on window move/resize events).
     struct mp_rect winrc;
     double current_display_fps;
+    struct m_geometry last_geometry;
 
     int pending_vo_events;
 
@@ -130,22 +137,24 @@ struct vo_x11_state {
     Atom dnd_requested_action;
     Window dnd_src_window;
 
-    /* dragging the window */
-    bool win_drag_button1_down;
-
     Atom icc_profile_property;
+
+    XEvent last_button_event;
 };
 
-int vo_x11_init(struct vo *vo);
+bool vo_x11_init(struct vo *vo);
 void vo_x11_uninit(struct vo *vo);
 void vo_x11_check_events(struct vo *vo);
 bool vo_x11_screen_is_composited(struct vo *vo);
 bool vo_x11_create_vo_window(struct vo *vo, XVisualInfo *vis,
                              const char *classname);
 void vo_x11_config_vo_window(struct vo *vo);
+bool vo_x11_check_visible(struct vo *vo);
 int vo_x11_control(struct vo *vo, int *events, int request, void *arg);
+void vo_x11_present(struct vo *vo);
+void vo_x11_sync_swap(struct vo *vo);
 void vo_x11_wakeup(struct vo *vo);
-void vo_x11_wait_events(struct vo *vo, int64_t until_time_us);
+void vo_x11_wait_events(struct vo *vo, int64_t until_time_ns);
 
 void vo_x11_silence_xlib(int dir);
 

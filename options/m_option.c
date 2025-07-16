@@ -22,16 +22,15 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
 #include <inttypes.h>
-#include <unistd.h>
 #include <assert.h>
 
 #include <libavutil/common.h>
-#include <libavutil/avstring.h>
 
 #include "libmpv/client.h"
 #include "player/client.h"
@@ -41,8 +40,9 @@
 #include "common/msg.h"
 #include "common/msg_control.h"
 #include "misc/json.h"
+#include "misc/node.h"
 #include "m_option.h"
-#include "m_config.h"
+#include "m_config_frontend.h"
 
 #if HAVE_DOS_PATHS
 #define OPTION_PATH_SEPARATOR ';'
@@ -51,6 +51,39 @@
 #endif
 
 const char m_option_path_separator = OPTION_PATH_SEPARATOR;
+
+// For integer types: since min/max are floats and may not be able to represent
+// the real min/max, and since opt.min/.max may use +/-INFINITY, some care has
+// to be taken. (Also tricky rounding.)
+#define OPT_INT_MIN(opt, T, Tm) ((opt)->min < (opt)->max \
+    ? ((opt)->min <= (double)(Tm) ? (Tm) : (T)((opt)->min)) : (Tm))
+#define OPT_INT_MAX(opt, T, Tm) ((opt)->min < (opt)->max \
+    ? ((opt)->max >= (double)(Tm) ? (Tm) : (T)((opt)->max)) : (Tm))
+
+int m_option_parse(struct mp_log *log, const m_option_t *opt,
+                   struct bstr name, struct bstr param, void *dst)
+{
+    int r = M_OPT_INVALID;
+    if (bstr_equals0(param, "help") && opt->help) {
+        r = opt->help(log, opt, name);
+        if (r < 0)
+            return r;
+    }
+
+    r = opt->type->parse(log, opt, name, param, dst);
+    if (r < 0)
+        return r;
+
+    if (opt->validate) {
+        r = opt->validate(log, opt, name, dst);
+        if (r < 0) {
+            if (opt->type->free)
+                opt->type->free(dst);
+            return r;
+        }
+    }
+    return 1;
+}
 
 char *m_option_strerror(int code)
 {
@@ -77,22 +110,13 @@ int m_option_required_params(const m_option_t *opt)
     if (opt->flags & M_OPT_OPTIONAL_PARAM)
         return 0;
     if (opt->type == &m_option_type_choice) {
-        struct m_opt_choice_alternatives *alt;
+        const struct m_opt_choice_alternatives *alt;
         for (alt = opt->priv; alt->name; alt++) {
             if (strcmp(alt->name, "yes") == 0)
                 return 0;
         }
     }
     return 1;
-}
-
-const m_option_t *m_option_list_find(const m_option_t *list, const char *name)
-{
-    for (int i = 0; list[i].name; i++) {
-        if (strcmp(list[i].name, name) == 0)
-            return &list[i];
-    }
-    return NULL;
 }
 
 int m_option_set_node_or_string(struct mp_log *log, const m_option_t *opt,
@@ -118,11 +142,11 @@ static void copy_opt(const m_option_t *opt, void *dst, const void *src)
         memcpy(dst, src, opt->type->size);
 }
 
-// Flag
+// Bool
 
-#define VAL(x) (*(int *)(x))
+#define VAL(x) (*(bool *)(x))
 
-static int parse_flag(struct mp_log *log, const m_option_t *opt,
+static int parse_bool(struct mp_log *log, const m_option_t *opt,
                       struct bstr name, struct bstr param, void *dst)
 {
     if (bstr_equals0(param, "yes") || !param.len) {
@@ -149,12 +173,12 @@ static int parse_flag(struct mp_log *log, const m_option_t *opt,
     return is_help ? M_OPT_EXIT : M_OPT_INVALID;
 }
 
-static char *print_flag(const m_option_t *opt, const void *val)
+static char *print_bool(const m_option_t *opt, const void *val)
 {
     return talloc_strdup(NULL, VAL(val) ? "yes" : "no");
 }
 
-static void add_flag(const m_option_t *opt, void *val, double add, bool wrap)
+static void add_bool(const m_option_t *opt, void *val, double add, bool wrap)
 {
     if (fabs(add) < 0.5)
         return;
@@ -163,7 +187,7 @@ static void add_flag(const m_option_t *opt, void *val, double add, bool wrap)
     VAL(val) = state ? 1 : 0;
 }
 
-static int flag_set(const m_option_t *opt, void *dst, struct mpv_node *src)
+static int bool_set(const m_option_t *opt, void *dst, struct mpv_node *src)
 {
     if (src->format != MPV_FORMAT_FLAG)
         return M_OPT_UNKNOWN;
@@ -171,7 +195,7 @@ static int flag_set(const m_option_t *opt, void *dst, struct mpv_node *src)
     return 1;
 }
 
-static int flag_get(const m_option_t *opt, void *ta_parent,
+static int bool_get(const m_option_t *opt, void *ta_parent,
                     struct mpv_node *dst, void *src)
 {
     dst->format = MPV_FORMAT_FLAG;
@@ -179,6 +203,73 @@ static int flag_get(const m_option_t *opt, void *ta_parent,
     return 1;
 }
 
+static bool bool_equal(const m_option_t *opt, void *a, void *b)
+{
+    return VAL(a) == VAL(b);
+}
+
+const m_option_type_t m_option_type_bool = {
+    .name  = "Flag", // same as m_option_type_flag; transparent to user
+    .size  = sizeof(bool),
+    .flags = M_OPT_TYPE_OPTIONAL_PARAM | M_OPT_TYPE_CHOICE,
+    .parse = parse_bool,
+    .print = print_bool,
+    .copy  = copy_opt,
+    .add   = add_bool,
+    .set   = bool_set,
+    .get   = bool_get,
+    .equal = bool_equal,
+};
+
+#undef VAL
+
+// Flag
+
+#define VAL(x) (*(int *)(x))
+
+static int parse_flag(struct mp_log *log, const m_option_t *opt,
+                      struct bstr name, struct bstr param, void *dst)
+{
+    bool bdst = false;
+    int r = parse_bool(log, opt, name, param, &bdst);
+    if (dst)
+        VAL(dst) = bdst;
+    return r;
+}
+
+static char *print_flag(const m_option_t *opt, const void *val)
+{
+    return print_bool(opt, &(bool){VAL(val)});
+}
+
+static void add_flag(const m_option_t *opt, void *val, double add, bool wrap)
+{
+    bool bval = VAL(val);
+    add_bool(opt, &bval, add, wrap);
+    VAL(val) = bval;
+}
+
+static int flag_set(const m_option_t *opt, void *dst, struct mpv_node *src)
+{
+    bool bdst = false;
+    int r = bool_set(opt, &bdst, src);
+    if (r >= 0)
+        VAL(dst) = bdst;
+    return r;
+}
+
+static int flag_get(const m_option_t *opt, void *ta_parent,
+                    struct mpv_node *dst, void *src)
+{
+    return bool_get(opt, ta_parent, dst, &(bool){VAL(src)});
+}
+
+static bool flag_equal(const m_option_t *opt, void *a, void *b)
+{
+    return VAL(a) == VAL(b);
+}
+
+// Only exists for libmpv interopability and should not be used anywhere.
 const m_option_type_t m_option_type_flag = {
     // need yes or no in config files
     .name  = "Flag",
@@ -190,22 +281,26 @@ const m_option_type_t m_option_type_flag = {
     .add   = add_flag,
     .set   = flag_set,
     .get   = flag_get,
+    .equal = flag_equal,
 };
 
 // Integer
 
 #undef VAL
 
-static int clamp_longlong(const m_option_t *opt, void *val)
+static int clamp_longlong(const m_option_t *opt, long long i_min, long long i_max,
+                          void *val)
 {
     long long v = *(long long *)val;
     int r = 0;
-    if ((opt->flags & M_OPT_MAX) && (v > opt->max)) {
-        v = opt->max;
+    long long min = OPT_INT_MIN(opt, long long, i_min);
+    long long max = OPT_INT_MAX(opt, long long, i_max);
+    if (v > max) {
+        v = max;
         r = M_OPT_OUT_OF_RANGE;
     }
-    if ((opt->flags & M_OPT_MIN) && (v < opt->min)) {
-        v = opt->min;
+    if (v < min) {
+        v = min;
         r = M_OPT_OUT_OF_RANGE;
     }
     *(long long *)val = v;
@@ -213,6 +308,7 @@ static int clamp_longlong(const m_option_t *opt, void *val)
 }
 
 static int parse_longlong(struct mp_log *log, const m_option_t *opt,
+                          long long i_min, long long i_max,
                           struct bstr name, struct bstr param, void *dst)
 {
     if (param.len == 0)
@@ -228,15 +324,17 @@ static int parse_longlong(struct mp_log *log, const m_option_t *opt,
         return M_OPT_INVALID;
     }
 
-    if ((opt->flags & M_OPT_MIN) && (tmp_int < opt->min)) {
-        mp_err(log, "The %.*s option must be >= %d: %.*s\n",
-               BSTR_P(name), (int) opt->min, BSTR_P(param));
+    long long min = OPT_INT_MIN(opt, long long, i_min);
+    if (tmp_int < min) {
+        mp_err(log, "The %.*s option must be >= %lld: %.*s\n",
+               BSTR_P(name), min, BSTR_P(param));
         return M_OPT_OUT_OF_RANGE;
     }
 
-    if ((opt->flags & M_OPT_MAX) && (tmp_int > opt->max)) {
-        mp_err(log, "The %.*s option must be <= %d: %.*s\n",
-               BSTR_P(name), (int) opt->max, BSTR_P(param));
+    long long max = OPT_INT_MAX(opt, long long, i_max);
+    if (tmp_int > max) {
+        mp_err(log, "The %.*s option must be <= %lld: %.*s\n",
+               BSTR_P(name), max, BSTR_P(param));
         return M_OPT_OUT_OF_RANGE;
     }
 
@@ -249,7 +347,7 @@ static int parse_longlong(struct mp_log *log, const m_option_t *opt,
 static int clamp_int64(const m_option_t *opt, void *val)
 {
     long long tmp = *(int64_t *)val;
-    int r = clamp_longlong(opt, &tmp);
+    int r = clamp_longlong(opt, INT64_MIN, INT64_MAX, &tmp);
     *(int64_t *)val = tmp;
     return r;
 }
@@ -258,7 +356,7 @@ static int parse_int(struct mp_log *log, const m_option_t *opt,
                      struct bstr name, struct bstr param, void *dst)
 {
     long long tmp;
-    int r = parse_longlong(log, opt, name, param, &tmp);
+    int r = parse_longlong(log, opt, INT_MIN, INT_MAX, name, param, &tmp);
     if (r >= 0 && dst)
         *(int *)dst = tmp;
     return r;
@@ -268,7 +366,7 @@ static int parse_int64(struct mp_log *log, const m_option_t *opt,
                        struct bstr name, struct bstr param, void *dst)
 {
     long long tmp;
-    int r = parse_longlong(log, opt, name, param, &tmp);
+    int r = parse_longlong(log, opt, INT64_MIN, INT64_MAX, name, param, &tmp);
     if (r >= 0 && dst)
         *(int64_t *)dst = tmp;
     return r;
@@ -285,14 +383,16 @@ static void add_int64(const m_option_t *opt, void *val, double add, bool wrap)
 {
     int64_t v = *(int64_t *)val;
 
+    clamp_int64(opt, &v);
+
     v = v + add;
 
     bool is64 = opt->type->size == sizeof(int64_t);
     int64_t nmin = is64 ? INT64_MIN : INT_MIN;
     int64_t nmax = is64 ? INT64_MAX : INT_MAX;
 
-    int64_t min = (opt->flags & M_OPT_MIN) ? opt->min : nmin;
-    int64_t max = (opt->flags & M_OPT_MAX) ? opt->max : nmax;
+    int64_t min = OPT_INT_MIN(opt, int64_t, nmin);
+    int64_t max = OPT_INT_MAX(opt, int64_t, nmax);
 
     if (v < min)
         v = wrap ? max : min;
@@ -315,7 +415,7 @@ static void multiply_int64(const m_option_t *opt, void *val, double f)
     int64_t iv = v;
     if (v < INT64_MIN)
         iv = INT64_MIN;
-    if (v > INT64_MAX)
+    if (v >= (double)INT64_MAX)
         iv = INT64_MAX;
     *(int64_t *)val = iv;
     clamp_int64(opt, val);
@@ -333,9 +433,9 @@ static int int64_set(const m_option_t *opt, void *dst, struct mpv_node *src)
     if (src->format != MPV_FORMAT_INT64)
         return M_OPT_UNKNOWN;
     int64_t val = src->u.int64;
-    if ((opt->flags & M_OPT_MIN) && val < opt->min)
+    if (val < OPT_INT_MIN(opt, int64_t, INT64_MIN))
         return M_OPT_OUT_OF_RANGE;
-    if ((opt->flags & M_OPT_MAX) && val > opt->max)
+    if (val > OPT_INT_MAX(opt, int64_t, INT64_MAX))
         return M_OPT_OUT_OF_RANGE;
     *(int64_t *)dst = val;
     return 1;
@@ -369,8 +469,19 @@ static int int_get(const m_option_t *opt, void *ta_parent,
     return 1;
 }
 
+static bool int_equal(const m_option_t *opt, void *a, void *b)
+{
+    return *(int *)a == *(int *)b;
+}
+
+static bool int64_equal(const m_option_t *opt, void *a, void *b)
+{
+    return *(int64_t *)a == *(int64_t *)b;
+}
+
 const m_option_type_t m_option_type_int = {
     .name  = "Integer",
+    .flags = M_OPT_TYPE_USES_RANGE,
     .size  = sizeof(int),
     .parse = parse_int,
     .print = print_int,
@@ -379,10 +490,12 @@ const m_option_type_t m_option_type_int = {
     .multiply = multiply_int,
     .set   = int_set,
     .get   = int_get,
+    .equal = int_equal,
 };
 
 const m_option_type_t m_option_type_int64 = {
     .name  = "Integer64",
+    .flags = M_OPT_TYPE_USES_RANGE,
     .size  = sizeof(int64_t),
     .parse = parse_int64,
     .print = print_int,
@@ -391,6 +504,7 @@ const m_option_type_t m_option_type_int64 = {
     .multiply = multiply_int64,
     .set   = int64_set,
     .get   = int64_get,
+    .equal = int64_equal,
 };
 
 static int parse_byte_size(struct mp_log *log, const m_option_t *opt,
@@ -436,15 +550,17 @@ static int parse_byte_size(struct mp_log *log, const m_option_t *opt,
 
     tmp_int *= unit;
 
-    if ((opt->flags & M_OPT_MIN) && (tmp_int < opt->min)) {
-        mp_err(log, "The %.*s option must be >= %d: %.*s\n",
-               BSTR_P(name), (int) opt->min, BSTR_P(param));
+    int64_t min = OPT_INT_MIN(opt, int64_t, INT64_MIN);
+    if (tmp_int < min) {
+        mp_err(log, "The %.*s option must be >= %"PRId64": %.*s\n",
+               BSTR_P(name), min, BSTR_P(param));
         return M_OPT_OUT_OF_RANGE;
     }
 
-    if ((opt->flags & M_OPT_MAX) && (tmp_int > opt->max)) {
-        mp_err(log, "The %.*s option must be <= %d: %.*s\n",
-               BSTR_P(name), (int) opt->max, BSTR_P(param));
+    int64_t max = OPT_INT_MAX(opt, int64_t, INT64_MAX);
+    if (tmp_int > max) {
+        mp_err(log, "The %.*s option must be <= %"PRId64": %.*s\n",
+               BSTR_P(name), max, BSTR_P(param));
         return M_OPT_OUT_OF_RANGE;
     }
 
@@ -479,6 +595,7 @@ static char *pretty_print_byte_size(const m_option_t *opt, const void *val)
 
 const m_option_type_t m_option_type_byte_size = {
     .name  = "ByteSize",
+    .flags = M_OPT_TYPE_USES_RANGE,
     .size  = sizeof(int64_t),
     .parse = parse_byte_size,
     .print = print_int,
@@ -488,59 +605,7 @@ const m_option_type_t m_option_type_byte_size = {
     .multiply = multiply_int64,
     .set   = int64_set,
     .get   = int64_get,
-};
-
-static int parse_intpair(struct mp_log *log, const struct m_option *opt,
-                         struct bstr name, struct bstr param, void *dst)
-{
-    if (param.len == 0)
-        return M_OPT_MISSING_PARAM;
-
-    struct bstr s = param;
-    int end = -1;
-    int start = bstrtoll(s, &s, 10);
-    if (s.len == param.len)
-        goto bad;
-    if (s.len > 0) {
-        if (!bstr_startswith0(s, "-"))
-            goto bad;
-        s = bstr_cut(s, 1);
-    }
-    if (s.len > 0)
-        end = bstrtoll(s, &s, 10);
-    if (s.len > 0)
-        goto bad;
-
-    if (dst) {
-        int *p = dst;
-        p[0] = start;
-        p[1] = end;
-    }
-
-    return 1;
-
-bad:
-    mp_err(log, "Invalid integer range "
-           "specification for option %.*s: %.*s\n",
-           BSTR_P(name), BSTR_P(param));
-    return M_OPT_INVALID;
-}
-
-static char *print_intpair(const m_option_t *opt, const void *val)
-{
-    const int *p = val;
-    char *res = talloc_asprintf(NULL, "%d", p[0]);
-    if (p[1] != -1)
-        res = talloc_asprintf_append(res, "-%d", p[1]);
-    return res;
-}
-
-const struct m_option_type m_option_type_intpair = {
-    .name  = "Int[-Int]",
-    .size  = sizeof(int[2]),
-    .parse = parse_intpair,
-    .print = print_intpair,
-    .copy  = copy_opt,
+    .equal = int64_equal,
 };
 
 const char *m_opt_choice_str(const struct m_opt_choice_alternatives *choices,
@@ -555,17 +620,17 @@ const char *m_opt_choice_str(const struct m_opt_choice_alternatives *choices,
 
 static void print_choice_values(struct mp_log *log, const struct m_option *opt)
 {
-    struct m_opt_choice_alternatives *alt = opt->priv;
+    const struct m_opt_choice_alternatives *alt = opt->priv;
     for ( ; alt->name; alt++)
         mp_info(log, "    %s\n", alt->name[0] ? alt->name : "(passing nothing)");
-    if ((opt->flags & M_OPT_MIN) && (opt->flags & M_OPT_MAX))
+    if (opt->min < opt->max)
         mp_info(log, "    %g-%g (integer range)\n", opt->min, opt->max);
 }
 
 static int parse_choice(struct mp_log *log, const struct m_option *opt,
                         struct bstr name, struct bstr param, void *dst)
 {
-    struct m_opt_choice_alternatives *alt = opt->priv;
+    const struct m_opt_choice_alternatives *alt = opt->priv;
     for ( ; alt->name; alt++) {
         if (!bstrcmp0(param, alt->name))
             break;
@@ -585,9 +650,11 @@ static int parse_choice(struct mp_log *log, const struct m_option *opt,
         }
         if (param.len == 0)
             return M_OPT_MISSING_PARAM;
-        if ((opt->flags & M_OPT_MIN) && (opt->flags & M_OPT_MAX)) {
+        if (opt->min < opt->max) {
             long long val;
-            if (parse_longlong(mp_null_log, opt, name, param, &val) == 1) {
+            if (parse_longlong(mp_null_log, opt, INT_MIN, INT_MAX, name, param,
+                               &val) == 1)
+            {
                 if (dst)
                     *(int *)dst = val;
                 return 1;
@@ -610,13 +677,13 @@ static void choice_get_min_max(const struct m_option *opt, int *min, int *max)
     assert(opt->type == &m_option_type_choice);
     *min = INT_MAX;
     *max = INT_MIN;
-    for (struct m_opt_choice_alternatives *alt = opt->priv; alt->name; alt++) {
-        *min = FFMIN(*min, alt->value);
-        *max = FFMAX(*max, alt->value);
+    for (const struct m_opt_choice_alternatives *alt = opt->priv; alt->name; alt++) {
+        *min = MPMIN(*min, alt->value);
+        *max = MPMAX(*max, alt->value);
     }
-    if ((opt->flags & M_OPT_MIN) && (opt->flags & M_OPT_MAX)) {
-        *min = FFMIN(*min, opt->min);
-        *max = FFMAX(*max, opt->max);
+    if (opt->min < opt->max) {
+        *min = MPMIN(*min, opt->min);
+        *max = MPMAX(*max, opt->max);
     }
 }
 
@@ -641,7 +708,7 @@ static void add_choice(const m_option_t *opt, void *val, double add, bool wrap)
     if (fabs(add) < 0.5)
         return;
 
-    if ((opt->flags & M_OPT_MIN) && (opt->flags & M_OPT_MAX)) {
+    if (opt->min < opt->max) {
         int newval = ival + add;
         if (ival >= opt->min && ival <= opt->max &&
             newval >= opt->min && newval <= opt->max)
@@ -654,7 +721,7 @@ static void add_choice(const m_option_t *opt, void *val, double add, bool wrap)
         }
     }
 
-    for (struct m_opt_choice_alternatives *alt = opt->priv; alt->name; alt++)
+    for (const struct m_opt_choice_alternatives *alt = opt->priv; alt->name; alt++)
         check_choice(dir, ival, &found, &best, alt->value);
 
     if (!found) {
@@ -687,29 +754,30 @@ static int choice_set(const m_option_t *opt, void *dst, struct mpv_node *src)
     return r;
 }
 
-static struct m_opt_choice_alternatives *get_choice(const m_option_t *opt,
-                                                    const void *val, int *out_val)
+static const struct m_opt_choice_alternatives *get_choice(const m_option_t *opt,
+                                                          const void *val,
+                                                          int *out_val)
 {
     int v = *(int *)val;
-    struct m_opt_choice_alternatives *alt;
+    const struct m_opt_choice_alternatives *alt;
     for (alt = opt->priv; alt->name; alt++) {
         if (alt->value == v)
             return alt;
     }
-    if ((opt->flags & M_OPT_MIN) && (opt->flags & M_OPT_MAX)) {
+    if (opt->min < opt->max) {
         if (v >= opt->min && v <= opt->max) {
             *out_val = v;
             return NULL;
         }
     }
-    abort();
+    MP_ASSERT_UNREACHABLE();
 }
 
 static int choice_get(const m_option_t *opt, void *ta_parent,
                       struct mpv_node *dst, void *src)
 {
     int ival = 0;
-    struct m_opt_choice_alternatives *alt = get_choice(opt, src, &ival);
+    const struct m_opt_choice_alternatives *alt = get_choice(opt, src, &ival);
     // If a choice string looks like a number, return it as number
     if (alt) {
         char *end = NULL;
@@ -741,7 +809,7 @@ static int choice_get(const m_option_t *opt, void *ta_parent,
 static char *print_choice(const m_option_t *opt, const void *val)
 {
     int ival = 0;
-    struct m_opt_choice_alternatives *alt = get_choice(opt, val, &ival);
+    const struct m_opt_choice_alternatives *alt = get_choice(opt, val, &ival);
     return alt ? talloc_strdup(NULL, alt->name)
                : talloc_asprintf(NULL, "%d", ival);
 }
@@ -749,18 +817,19 @@ static char *print_choice(const m_option_t *opt, const void *val)
 const struct m_option_type m_option_type_choice = {
     .name  = "Choice",
     .size  = sizeof(int),
-    .flags = M_OPT_TYPE_CHOICE,
+    .flags = M_OPT_TYPE_CHOICE | M_OPT_TYPE_USES_RANGE,
     .parse = parse_choice,
     .print = print_choice,
     .copy  = copy_opt,
     .add   = add_choice,
     .set   = choice_set,
     .get   = choice_get,
+    .equal = int_equal,
 };
 
 static int apply_flag(const struct m_option *opt, int *val, bstr flag)
 {
-    struct m_opt_choice_alternatives *alt;
+    const struct m_opt_choice_alternatives *alt;
     for (alt = opt->priv; alt->name; alt++) {
         if (bstr_equals0(flag, alt->name)) {
             if (*val & alt->value)
@@ -774,8 +843,8 @@ static int apply_flag(const struct m_option *opt, int *val, bstr flag)
 
 static const char *find_next_flag(const struct m_option *opt, int *val)
 {
-    struct m_opt_choice_alternatives *best = NULL;
-    struct m_opt_choice_alternatives *alt;
+    const struct m_opt_choice_alternatives *best = NULL;
+    const struct m_opt_choice_alternatives *alt;
     for (alt = opt->priv; alt->name; alt++) {
         if (alt->value && (alt->value & (*val)) == alt->value) {
             if (!best || av_popcount64(alt->value) > av_popcount64(best->value))
@@ -802,7 +871,7 @@ static int parse_flags(struct mp_log *log, const struct m_option *opt,
             mp_fatal(log, "Invalid flag for option %.*s: %.*s\n",
                      BSTR_P(name), BSTR_P(flag));
             mp_info(log, "Valid flags are:\n");
-            struct m_opt_choice_alternatives *alt;
+            const struct m_opt_choice_alternatives *alt;
             for (alt = opt->priv; alt->name; alt++)
                 mp_info(log, "    %s\n", alt->name);
             mp_info(log, "Flags can usually be combined with '+'.\n");
@@ -878,6 +947,7 @@ const struct m_option_type m_option_type_flags = {
     .copy  = copy_opt,
     .set   = flags_set,
     .get   = flags_get,
+    .equal = int_equal,
 };
 
 // Float
@@ -889,13 +959,15 @@ static int clamp_double(const m_option_t *opt, void *val)
 {
     double v = VAL(val);
     int r = 0;
-    if ((opt->flags & M_OPT_MAX) && (v > opt->max)) {
-        v = opt->max;
-        r = M_OPT_OUT_OF_RANGE;
-    }
-    if ((opt->flags & M_OPT_MIN) && (v < opt->min)) {
-        v = opt->min;
-        r = M_OPT_OUT_OF_RANGE;
+    if (opt->min < opt->max) {
+        if (v > opt->max) {
+            v = opt->max;
+            r = M_OPT_OUT_OF_RANGE;
+        }
+        if (v < opt->min) {
+            v = opt->min;
+            r = M_OPT_OUT_OF_RANGE;
+        }
     }
     // (setting max/min to INFINITY/-INFINITY is allowed)
     if (!isfinite(v) && v != opt->max && v != opt->min) {
@@ -950,12 +1022,12 @@ static char *print_double(const m_option_t *opt, const void *val)
     return talloc_asprintf(NULL, "%f", f);
 }
 
-static char *print_double_f3(const m_option_t *opt, const void *val)
+static char *pretty_print_double(const m_option_t *opt, const void *val)
 {
     double f = VAL(val);
     if (isnan(f))
         return print_double(opt, val);
-    return talloc_asprintf(NULL, "%.3f", f);
+    return mp_format_double(NULL, f, 4, false, false, !(opt->flags & M_OPT_FIXED_LEN_PRINT));
 }
 
 static void add_double(const m_option_t *opt, void *val, double add, bool wrap)
@@ -964,8 +1036,8 @@ static void add_double(const m_option_t *opt, void *val, double add, bool wrap)
 
     v = v + add;
 
-    double min = (opt->flags & M_OPT_MIN) ? opt->min : -INFINITY;
-    double max = (opt->flags & M_OPT_MAX) ? opt->max : +INFINITY;
+    double min = opt->min < opt->max ? opt->min : -INFINITY;
+    double max = opt->min < opt->max ? opt->max : +INFINITY;
 
     if (v < min)
         v = wrap ? max : min;
@@ -1012,18 +1084,54 @@ static int double_get(const m_option_t *opt, void *ta_parent,
     return 1;
 }
 
+static bool double_equal(const m_option_t *opt, void *a, void *b)
+{
+    double fa = VAL(a), fb = VAL(b);
+    if (isnan(fa) || isnan(fb))
+        return isnan(fa) == isnan(fb);
+    return fa == fb;
+}
+
 const m_option_type_t m_option_type_double = {
     // double precision float or ratio (numerator[:/]denominator)
     .name  = "Double",
+    .flags = M_OPT_TYPE_USES_RANGE,
     .size  = sizeof(double),
     .parse = parse_double,
     .print = print_double,
-    .pretty_print = print_double_f3,
+    .pretty_print = pretty_print_double,
     .copy  = copy_opt,
     .add = add_double,
     .multiply = multiply_double,
     .set   = double_set,
     .get   = double_get,
+    .equal = double_equal,
+};
+
+static int parse_double_aspect(struct mp_log *log, const m_option_t *opt,
+                               struct bstr name, struct bstr param, void *dst)
+{
+    if (bstr_equals0(param, "no")) {
+        if (dst)
+            VAL(dst) = 0.0;
+        return 1;
+    }
+    return parse_double(log, opt, name, param, dst);
+}
+
+const m_option_type_t m_option_type_aspect = {
+    .name  = "Aspect",
+    .size  = sizeof(double),
+    .flags = M_OPT_TYPE_CHOICE | M_OPT_TYPE_USES_RANGE,
+    .parse = parse_double_aspect,
+    .print = print_double,
+    .pretty_print = pretty_print_double,
+    .copy  = copy_opt,
+    .add = add_double,
+    .multiply = multiply_double,
+    .set   = double_set,
+    .get   = double_get,
+    .equal = double_equal,
 };
 
 #undef VAL
@@ -1045,10 +1153,10 @@ static char *print_float(const m_option_t *opt, const void *val)
     return print_double(opt, &tmp);
 }
 
-static char *print_float_f3(const m_option_t *opt, const void *val)
+static char *pretty_print_float(const m_option_t *opt, const void *val)
 {
     double tmp = VAL(val);
-    return print_double_f3(opt, &tmp);
+    return pretty_print_double(opt, &tmp);
 }
 
 static void add_float(const m_option_t *opt, void *val, double add, bool wrap)
@@ -1081,43 +1189,25 @@ static int float_get(const m_option_t *opt, void *ta_parent,
     return double_get(opt, ta_parent, dst, &tmp);
 }
 
+static bool float_equal(const m_option_t *opt, void *a, void *b)
+{
+    return double_equal(opt, &(double){VAL(a)}, &(double){VAL(b)});
+}
+
 const m_option_type_t m_option_type_float = {
     // floating point number or ratio (numerator[:/]denominator)
     .name  = "Float",
+    .flags = M_OPT_TYPE_USES_RANGE,
     .size  = sizeof(float),
     .parse = parse_float,
     .print = print_float,
-    .pretty_print = print_float_f3,
+    .pretty_print = pretty_print_float,
     .copy  = copy_opt,
     .add = add_float,
     .multiply = multiply_float,
     .set   = float_set,
     .get   = float_get,
-};
-
-static int parse_float_aspect(struct mp_log *log, const m_option_t *opt,
-                              struct bstr name, struct bstr param, void *dst)
-{
-    if (bstr_equals0(param, "no")) {
-        if (dst)
-            VAL(dst) = 0.0f;
-        return 1;
-    }
-    return parse_float(log, opt, name, param, dst);
-}
-
-const m_option_type_t m_option_type_aspect = {
-    .name  = "Aspect",
-    .size  = sizeof(float),
-    .flags = M_OPT_TYPE_CHOICE,
-    .parse = parse_float_aspect,
-    .print = print_float,
-    .pretty_print = print_float_f3,
-    .copy  = copy_opt,
-    .add = add_float,
-    .multiply = multiply_float,
-    .set   = float_set,
-    .get   = float_get,
+    .equal = float_equal,
 };
 
 ///////////// String
@@ -1125,39 +1215,9 @@ const m_option_type_t m_option_type_aspect = {
 #undef VAL
 #define VAL(x) (*(char **)(x))
 
-static int clamp_str(const m_option_t *opt, void *val)
-{
-    char *v = VAL(val);
-    int len = v ? strlen(v) : 0;
-    if ((opt->flags & M_OPT_MIN) && (len < opt->min))
-        return M_OPT_OUT_OF_RANGE;
-    if ((opt->flags & M_OPT_MAX) && (len > opt->max))
-        return M_OPT_OUT_OF_RANGE;
-    return 0;
-}
-
 static int parse_str(struct mp_log *log, const m_option_t *opt,
                      struct bstr name, struct bstr param, void *dst)
 {
-    m_opt_string_validate_fn validate = opt->priv;
-    if (validate) {
-        int r = validate(log, opt, name, param);
-        if (r < 0)
-            return r;
-    }
-
-    if ((opt->flags & M_OPT_MIN) && (param.len < opt->min)) {
-        mp_err(log, "Parameter must be >= %d chars: %.*s\n",
-               (int) opt->min, BSTR_P(param));
-        return M_OPT_OUT_OF_RANGE;
-    }
-
-    if ((opt->flags & M_OPT_MAX) && (param.len > opt->max)) {
-        mp_err(log, "Parameter must be <= %d chars: %.*s\n",
-               (int) opt->max, BSTR_P(param));
-        return M_OPT_OUT_OF_RANGE;
-    }
-
     if (dst) {
         talloc_free(VAL(dst));
         VAL(dst) = bstrdup0(NULL, param);
@@ -1173,10 +1233,8 @@ static char *print_str(const m_option_t *opt, const void *val)
 
 static void copy_str(const m_option_t *opt, void *dst, const void *src)
 {
-    if (dst && src) {
-        talloc_free(VAL(dst));
-        VAL(dst) = talloc_strdup(NULL, VAL(src));
-    }
+    if (dst && src)
+        talloc_replace(NULL, VAL(dst), VAL(src));
 }
 
 static int str_set(const m_option_t *opt, void *dst, struct mpv_node *src)
@@ -1184,7 +1242,7 @@ static int str_set(const m_option_t *opt, void *dst, struct mpv_node *src)
     if (src->format != MPV_FORMAT_STRING)
         return M_OPT_UNKNOWN;
     char *s = src->u.string;
-    int r = s ? clamp_str(opt, &s) : M_OPT_INVALID;
+    int r = s ? 0 : M_OPT_INVALID;
     if (r >= 0)
         copy_str(opt, dst, &s);
     return r;
@@ -1196,6 +1254,11 @@ static int str_get(const m_option_t *opt, void *ta_parent,
     dst->format = MPV_FORMAT_STRING;
     dst->u.string = talloc_strdup(ta_parent, VAL(src) ? VAL(src) : "");
     return 1;
+}
+
+static bool str_equal(const m_option_t *opt, void *a, void *b)
+{
+    return bstr_equals(bstr0(VAL(a)), bstr0(VAL(b)));
 }
 
 static void free_str(void *src)
@@ -1215,6 +1278,7 @@ const m_option_type_t m_option_type_string = {
     .free  = free_str,
     .set   = str_set,
     .get   = str_get,
+    .equal = str_equal,
 };
 
 //////////// String list
@@ -1225,10 +1289,10 @@ const m_option_type_t m_option_type_string = {
 #define OP_NONE 0
 #define OP_ADD 1
 #define OP_PRE 2
-#define OP_DEL 3
-#define OP_CLR 4
-#define OP_TOGGLE 5
-#define OP_ADD_STR 6
+#define OP_CLR 3
+#define OP_TOGGLE 4
+#define OP_APPEND 5
+#define OP_REMOVE 6
 
 static void free_str_list(void *dst)
 {
@@ -1253,6 +1317,15 @@ static int str_list_add(char **add, int n, void *dst, int pre)
     for (ln = 0; lst && lst[ln]; ln++)
         /**/;
 
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (ln >= 100) {
+        while (n--)
+            talloc_free(add[n]);
+        talloc_free(add);
+        return 0;
+    }
+#endif
+
     lst = talloc_realloc(NULL, lst, char *, n + ln + 1);
 
     if (pre) {
@@ -1266,55 +1339,6 @@ static int str_list_add(char **add, int n, void *dst, int pre)
     talloc_free(add);
 
     VAL(dst) = lst;
-
-    return 1;
-}
-
-static int str_list_del(struct mp_log *log, char **del, int n, void *dst)
-{
-    char **lst, *ep;
-    int i, ln, s;
-    long idx;
-
-    lst = VAL(dst);
-
-    for (ln = 0; lst && lst[ln]; ln++)
-        /**/;
-    s = ln;
-
-    for (i = 0; del[i] != NULL; i++) {
-        idx = strtol(del[i], &ep, 0);
-        if (*ep) {
-            mp_err(log, "Invalid index: %s\n", del[i]);
-            talloc_free(del[i]);
-            continue;
-        }
-        talloc_free(del[i]);
-        if (idx < 0 || idx >= ln) {
-            mp_err(log, "Index %ld is out of range.\n", idx);
-            continue;
-        } else if (!lst[idx])
-            continue;
-        talloc_free(lst[idx]);
-        lst[idx] = NULL;
-        s--;
-    }
-    talloc_free(del);
-
-    if (s == 0) {
-        talloc_free(lst);
-        VAL(dst) = NULL;
-        return 1;
-    }
-
-    // Don't bother shrinking the list allocation
-    for (i = 0, n = 0; i < ln; i++) {
-        if (!lst[i])
-            continue;
-        lst[n] = lst[i];
-        n++;
-    }
-    lst[s] = NULL;
 
     return 1;
 }
@@ -1365,24 +1389,36 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
         multi = false;
     } else if (bstr_endswith0(name, "-pre")) {
         op = OP_PRE;
-    } else if (bstr_endswith0(name, "-del")) {
-        op = OP_DEL;
     } else if (bstr_endswith0(name, "-clr")) {
         op = OP_CLR;
     } else if (bstr_endswith0(name, "-set")) {
         op = OP_NONE;
     } else if (bstr_endswith0(name, "-toggle")) {
+        op = OP_TOGGLE;
+    } else if (bstr_endswith0(name, "-remove")) {
+        op = OP_REMOVE;
+    }
+
+    if (op == OP_TOGGLE || op == OP_REMOVE) {
         if (dst) {
             char **list = VAL(dst);
-            int index = find_list_bstr(list, param);
-            if (index >= 0) {
-                char *old = list[index];
-                for (int n = index; list[n]; n++)
-                    list[n] = list[n + 1];
-                talloc_free(old);
+            bool found = false;
+            int index = 0;
+            do {
+                index = find_list_bstr(list, param);
+                if (index >= 0) {
+                    found = true;
+                    char *old = list[index];
+                    for (int n = index; list[n]; n++)
+                        list[n] = list[n + 1];
+                    talloc_free(old);
+                }
+            } while (index >= 0);
+            if (found)
                 return 1;
-            }
         }
+        if (op == OP_REMOVE)
+            return 1; // ignore if not found
         op = OP_ADD;
         multi = false;
     }
@@ -1410,9 +1446,6 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
     }
     if (n == 0 && op != OP_NONE)
         return M_OPT_INVALID;
-    if (((opt->flags & M_OPT_MIN) && (n < opt->min)) ||
-        ((opt->flags & M_OPT_MAX) && (n > opt->max)))
-        return M_OPT_OUT_OF_RANGE;
 
     if (!dst)
         return 1;
@@ -1423,6 +1456,10 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
     n = 0;
 
     while (1) {
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+        if (n >= 100)
+            break;
+#endif
         struct bstr el = get_nextsep(&str, separator, 1);
         res[n] = bstrdup0(NULL, el);
         n++;
@@ -1443,8 +1480,6 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
         return str_list_add(res, n, dst, 0);
     case OP_PRE:
         return str_list_add(res, n, dst, 1);
-    case OP_DEL:
-        return str_list_del(log, res, n, dst);
     }
 
     if (VAL(dst))
@@ -1487,6 +1522,7 @@ static char *print_str_list(const m_option_t *opt, const void *src)
 {
     char **lst = NULL;
     char *ret = NULL;
+    const char sep = opt->priv ? *(char *)opt->priv : OPTION_LIST_SEPARATOR;
 
     if (!(src && VAL(src)))
         return talloc_strdup(NULL, "");
@@ -1494,7 +1530,7 @@ static char *print_str_list(const m_option_t *opt, const void *src)
 
     for (int i = 0; lst[i]; i++) {
         if (ret)
-            ret = talloc_strdup_append_buffer(ret, ",");
+            ret = talloc_strndup_append_buffer(ret, &sep, 1);
         ret = talloc_strdup_append_buffer(ret, lst[i]);
     }
     return ret;
@@ -1540,6 +1576,26 @@ static int parse_str_list(struct mp_log *log, const m_option_t *opt,
     return parse_str_list_impl(log, opt, name, param, dst, OP_NONE);
 }
 
+static bool str_list_equal(const m_option_t *opt, void *a, void *b)
+{
+    char **la = VAL(a);
+    char **lb = VAL(b);
+
+    bool a_empty = !la || !la[0];
+    bool b_empty = !lb || !lb[0];
+    if (a_empty || b_empty)
+        return a_empty == b_empty;
+
+    for (int n = 0; la[n] || lb[n]; n++) {
+        if (!la[n] || !lb[n])
+            return false;
+        if (strcmp(la[n], lb[n]) != 0)
+            return false;
+    }
+
+    return true;
+}
+
 const m_option_type_t m_option_type_string_list = {
     .name  = "String list",
     .size  = sizeof(char **),
@@ -1549,20 +1605,43 @@ const m_option_type_t m_option_type_string_list = {
     .free  = free_str_list,
     .get   = str_list_get,
     .set   = str_list_set,
+    .equal = str_list_equal,
     .actions = (const struct m_option_action[]){
         {"add"},
         {"append"},
         {"clr",         M_OPT_TYPE_OPTIONAL_PARAM},
-        {"del"},
         {"pre"},
         {"set"},
         {"toggle"},
+        {"remove"},
         {0}
     },
 };
 
 static int read_subparam(struct mp_log *log, bstr optname, char *termset,
                          bstr *str, bstr *out_subparam);
+
+static int keyvalue_list_find_key(char **lst, bstr str)
+{
+    for (int n = 0; lst && lst[n] && lst[n + 1]; n += 2) {
+        if (bstr_equals0(str, lst[n]))
+            return n / 2;
+    }
+    return -1;
+}
+
+static void keyvalue_list_del_key(char **lst, int index)
+{
+    int count = 0;
+    for (int n = 0; lst && lst[n]; n++)
+        count++;
+    assert(index * 2 + 1 < count);
+    count += 1; // terminating item
+    talloc_free(lst[index * 2 + 0]);
+    talloc_free(lst[index * 2 + 1]);
+    MP_TARRAY_REMOVE_AT(lst, count, index * 2 + 1);
+    MP_TARRAY_REMOVE_AT(lst, count, index * 2 + 0);
+}
 
 static int parse_keyvalue_list(struct mp_log *log, const m_option_t *opt,
                                struct bstr name, struct bstr param, void *dst)
@@ -1580,6 +1659,14 @@ static int parse_keyvalue_list(struct mp_log *log, const m_option_t *opt,
         append = true;
     } else if (bstr_endswith0(name, "-append")) {
         append = full_value = true;
+    } else if (bstr_endswith0(name, "-remove")) {
+        lst = dst ? VAL(dst) : NULL;
+        int index = dst ? keyvalue_list_find_key(lst, param) : -1;
+        if (index >= 0) {
+            keyvalue_list_del_key(lst, index);
+            VAL(dst) = lst;
+        }
+        return 1;
     }
 
     if (append && dst) {
@@ -1602,23 +1689,33 @@ static int parse_keyvalue_list(struct mp_log *log, const m_option_t *opt,
             val = param;
             param.len = 0;
         } else {
-            r = read_subparam(log, name, ",:", &param, &val);
+            r = read_subparam(log, name, ",", &param, &val);
             if (r < 0)
                 break;
         }
         if (dst) {
+            int index = keyvalue_list_find_key(lst, key);
+            if (index >= 0) {
+                keyvalue_list_del_key(lst, index);
+                num -= 2;
+            }
             MP_TARRAY_APPEND(NULL, lst, num, bstrto0(NULL, key));
             MP_TARRAY_APPEND(NULL, lst, num, bstrto0(NULL, val));
+            MP_TARRAY_APPEND(NULL, lst, num, NULL);
+            num -= 1;
         }
 
         if (!bstr_eatstart0(&param, ",") && !bstr_eatstart0(&param, ":"))
             break;
+
+        if (append) {
+            mp_warn(log, "Passing more than 1 argument to %.*s is deprecated!\n",
+                    BSTR_P(name));
+        }
     }
-    if (dst)
-        MP_TARRAY_APPEND(NULL, lst, num, NULL);
 
     if (param.len) {
-        mp_err(log, "Unparseable garbage at end of option value: '%.*s'\n",
+        mp_err(log, "Unparsable garbage at end of option value: '%.*s'\n",
                BSTR_P(param));
         r = M_OPT_INVALID;
     }
@@ -1698,10 +1795,12 @@ const m_option_type_t m_option_type_keyvalue_list = {
     .free  = free_str_list,
     .get   = keyvalue_list_get,
     .set   = keyvalue_list_set,
+    .equal = str_list_equal,
     .actions = (const struct m_option_action[]){
         {"add"},
         {"append"},
         {"set"},
+        {"remove"},
         {0}
     },
 };
@@ -1726,7 +1825,7 @@ static int parse_msglevels(struct mp_log *log, const m_option_t *opt,
                            struct bstr name, struct bstr param, void *dst)
 {
     if (bstr_equals0(param, "help")) {
-        mp_info(log, "Syntax:\n\n   --msglevel=module1=level,module2=level,...\n\n"
+        mp_info(log, "Syntax:\n\n   --msg-level=module1=level,module2=level,...\n\n"
                      "'module' is output prefix as shown with -v, or a prefix\n"
                      "of it. level is one of:\n\n"
                      "  fatal error warn info status v debug trace\n\n"
@@ -1770,6 +1869,7 @@ const m_option_type_t m_option_type_msglevels = {
     .free  = free_str_list,
     .get   = keyvalue_list_get,
     .set   = set_msglevels,
+    .equal = str_list_equal,
 };
 
 static int parse_print(struct mp_log *log, const m_option_t *opt,
@@ -1807,7 +1907,7 @@ const m_option_type_t m_option_type_dummy_flag = {
 
 // Read s sub-option name, or a positional sub-opt value.
 // termset is a string containing the set of chars that terminate an option.
-// Return 0 on succes, M_OPT_ error code otherwise.
+// Return 0 on success, M_OPT_ error code otherwise.
 // optname is for error reporting.
 static int read_subparam(struct mp_log *log, bstr optname, char *termset,
                          bstr *str, bstr *out_subparam)
@@ -1982,12 +2082,20 @@ static char *print_color(const m_option_t *opt, const void *val)
     return talloc_asprintf(NULL, "#%02X%02X%02X%02X", c->a, c->r, c->g, c->b);
 }
 
+static bool color_equal(const m_option_t *opt, void *a, void *b)
+{
+    struct m_color *ca = a;
+    struct m_color *cb = b;
+    return ca->a == cb->a && ca->r == cb->r && ca->g == cb->g && ca->b == cb->b;
+}
+
 const m_option_type_t m_option_type_color = {
     .name  = "Color",
     .size  = sizeof(struct m_color),
     .parse = parse_color,
     .print = print_color,
     .copy  = copy_opt,
+    .equal = color_equal,
 };
 
 
@@ -2016,7 +2124,7 @@ static bool parse_geometry_str(struct m_geometry *gm, bstr s)
     if (s.len == 0)
         return true;
     // Approximate grammar:
-    // [[W][xH]][{+-}X{+-}Y] | [X:Y]
+    // [[W][xH]][{+-}X{+-}Y][/WS] | [X:Y]
     // (meaning: [optional] {one character of} one|alternative)
     // Every number can be followed by '%'
     int num;
@@ -2051,6 +2159,14 @@ static bool parse_geometry_str(struct m_geometry *gm, bstr s)
             READ_NUM(x, x_per);
             READ_SIGN(y_sign);
             READ_NUM(y, y_per);
+        }
+        if (bstr_eatstart0(&s, "/")) {
+            bstr rest;
+            long long v = bstrtoll(s, &rest, 10);
+            if (s.len == rest.len || v < 1 || v > INT_MAX)
+                goto error;
+            s = rest;
+            gm->ws = v;
         }
     } else {
         gm->xy_valid = true;
@@ -2088,6 +2204,8 @@ static char *print_geometry(const m_option_t *opt, const void *val)
             res = talloc_asprintf_append(res, gm->y_sign ? "-" : "+");
             APPEND_PER(y, y_per);
         }
+        if (gm->ws > 0)
+            res = talloc_asprintf_append(res, "/%d", gm->ws);
     }
     return res;
 }
@@ -2099,7 +2217,7 @@ static char *print_geometry(const m_option_t *opt, const void *val)
 // scrw,scrh: width and height of the current screen
 // The input parameters should be set to a centered window (default fallbacks).
 void m_geometry_apply(int *xpos, int *ypos, int *widw, int *widh,
-                      int scrw, int scrh, struct m_geometry *gm)
+                      int scrw, int scrh, bool center, struct m_geometry *gm)
 {
     if (gm->wh_valid) {
         int prew = *widw, preh = *widh;
@@ -2114,10 +2232,10 @@ void m_geometry_apply(int *xpos, int *ypos, int *widw, int *widh,
         } else if (!(gm->w > 0) && gm->h > 0) {
             *widw = *widh * asp;
         }
-        // Center window after resize. If valid x:y values are passed to
-        // geometry, then those values will be overriden.
-        *xpos += prew / 2 - *widw / 2;
-        *ypos += preh / 2 - *widh / 2;
+        if (center) {
+            *xpos += prew / 2 - *widw / 2;
+            *ypos += preh / 2 - *widh / 2;
+        }
     }
 
     if (gm->xy_valid) {
@@ -2164,12 +2282,25 @@ exit:
     return is_help ? M_OPT_EXIT : M_OPT_INVALID;
 }
 
+static bool geometry_equal(const m_option_t *opt, void *a, void *b)
+{
+    struct m_geometry *ga = a;
+    struct m_geometry *gb = b;
+    return ga->x == gb->x && ga->y == gb->y && ga->w == gb->w && ga->h == gb->h &&
+           ga->xy_valid == gb->xy_valid && ga->wh_valid == gb->wh_valid &&
+           ga->w_per == gb->w_per && ga->h_per == gb->h_per &&
+           ga->x_per == gb->x_per && ga->y_per == gb->y_per &&
+           ga->x_sign == gb->x_sign && ga->y_sign == gb->y_sign &&
+           ga->ws == gb->ws;
+}
+
 const m_option_type_t m_option_type_geometry = {
     .name  = "Window geometry",
     .size  = sizeof(struct m_geometry),
     .parse = parse_geometry,
     .print = print_geometry,
     .copy  = copy_opt,
+    .equal = geometry_equal,
 };
 
 static int parse_size_box(struct mp_log *log, const m_option_t *opt,
@@ -2206,16 +2337,73 @@ const m_option_type_t m_option_type_size_box = {
     .parse = parse_size_box,
     .print = print_geometry,
     .copy  = copy_opt,
+    .equal = geometry_equal,
 };
 
+void m_rect_apply(struct mp_rect *rc, int w, int h, struct m_geometry *gm)
+{
+    *rc = (struct mp_rect){0, 0, w, h};
+    if (!w || !h)
+        return;
+    m_geometry_apply(&rc->x0, &rc->y0, &rc->x1, &rc->y1, w, h, true, gm);
+    if (!gm->xy_valid && gm->wh_valid && rc->x1 == 0 && rc->y1 == 0)
+        return;
+    if (!gm->wh_valid || rc->x1 == 0 || rc->x1 == INT_MIN)
+        rc->x1 = w - rc->x0;
+    if (!gm->wh_valid || rc->y1 == 0 || rc->y1 == INT_MIN)
+        rc->y1 = h - rc->y0;
+    if (gm->wh_valid && (gm->w || gm->h))
+        rc->x1 += rc->x0;
+    if (gm->wh_valid && (gm->w || gm->h))
+        rc->y1 += rc->y0;
+}
+
+static int parse_rect(struct mp_log *log, const m_option_t *opt,
+                      struct bstr name, struct bstr param, void *dst)
+{
+    bool is_help = bstr_equals0(param, "help");
+    if (is_help)
+        goto exit;
+
+    struct m_geometry gm;
+    if (!parse_geometry_str(&gm, param))
+        goto exit;
+
+    bool invalid = gm.x_sign || gm.y_sign || gm.ws;
+    invalid |= gm.wh_valid && (gm.w < 0 || gm.h < 0);
+    invalid |= gm.wh_valid && !gm.xy_valid && gm.w <= 0 && gm.h <= 0;
+
+    if (invalid)
+        goto exit;
+
+    if (dst)
+        *((struct m_geometry *)dst) = gm;
+
+    return 1;
+
+exit:
+    if (!is_help) {
+        mp_err(log, "Option %.*s: invalid rect: '%.*s'\n",
+               BSTR_P(name), BSTR_P(param));
+    }
+    mp_info(log, "Valid format: W[%%][xH[%%]][+x+y]\n");
+    return is_help ? M_OPT_EXIT : M_OPT_INVALID;
+}
+
+const m_option_type_t m_option_type_rect = {
+    .name  = "Video rect",
+    .size  = sizeof(struct m_geometry),
+    .parse = parse_rect,
+    .print = print_geometry,
+    .copy  = copy_opt,
+    .equal = geometry_equal,
+};
 
 #include "video/img_format.h"
 
 static int parse_imgfmt(struct mp_log *log, const m_option_t *opt,
                         struct bstr name, struct bstr param, void *dst)
 {
-    bool accept_no = opt->min < 0;
-
     if (param.len == 0)
         return M_OPT_MISSING_PARAM;
 
@@ -2224,15 +2412,14 @@ static int parse_imgfmt(struct mp_log *log, const m_option_t *opt,
         char **list = mp_imgfmt_name_list();
         for (int i = 0; list[i]; i++)
             mp_info(log, " %s", list[i]);
-        if (accept_no)
-            mp_info(log, " no");
+        mp_info(log, " no");
         mp_info(log, "\n");
         talloc_free(list);
         return M_OPT_EXIT;
     }
 
     unsigned int fmt = mp_imgfmt_from_name(param);
-    if (!fmt && !(accept_no && bstr_equals0(param, "no"))) {
+    if (!fmt && !bstr_equals0(param, "no")) {
         mp_err(log, "Option %.*s: unknown format name: '%.*s'\n",
                BSTR_P(name), BSTR_P(param));
         return M_OPT_INVALID;
@@ -2256,6 +2443,7 @@ const m_option_type_t m_option_type_imgfmt = {
     .parse = parse_imgfmt,
     .print = print_imgfmt,
     .copy  = copy_opt,
+    .equal = int_equal,
 };
 
 static int parse_fourcc(struct mp_log *log, const m_option_t *opt,
@@ -2297,6 +2485,7 @@ const m_option_type_t m_option_type_fourcc = {
     .parse = parse_fourcc,
     .print = print_fourcc,
     .copy  = copy_opt,
+    .equal = int_equal,
 };
 
 #include "audio/format.h"
@@ -2344,6 +2533,7 @@ const m_option_type_t m_option_type_afmt = {
     .parse = parse_afmt,
     .print = print_afmt,
     .copy  = copy_opt,
+    .equal = int_equal,
 };
 
 #include "audio/chmap.h"
@@ -2351,8 +2541,7 @@ const m_option_type_t m_option_type_afmt = {
 static int parse_channels(struct mp_log *log, const m_option_t *opt,
                           struct bstr name, struct bstr param, void *dst)
 {
-    // see OPT_CHANNELS for semantics.
-    bool limited = opt->min;
+    bool limited = opt->flags & M_OPT_CHANNELS_LIMITED;
 
     struct m_channels res = {0};
 
@@ -2397,6 +2586,7 @@ static int parse_channels(struct mp_log *log, const m_option_t *opt,
     }
 
     if (dst) {
+        opt->type->free(dst);
         *(struct m_channels *)dst = res;
     } else {
         talloc_free(res.chmaps);
@@ -2446,36 +2636,70 @@ static void copy_channels(const m_option_t *opt, void *dst, const void *src)
         talloc_memdup(NULL, ch->chmaps, sizeof(ch->chmaps[0]) * ch->num_chmaps);
 }
 
+static bool channels_equal(const m_option_t *opt, void *a, void *b)
+{
+    struct m_channels *ca = a;
+    struct m_channels *cb = b;
+
+    if (ca->set         != cb->set ||
+        ca->auto_safe   != cb->auto_safe ||
+        ca->num_chmaps  != cb->num_chmaps)
+        return false;
+
+    for (int n = 0; n < ca->num_chmaps; n++) {
+        if (!mp_chmap_equals(&ca->chmaps[n], &cb->chmaps[n]))
+            return false;
+    }
+
+    return true;
+}
+
 const m_option_type_t m_option_type_channels = {
     .name  = "Audio channels or channel map",
     .size  = sizeof(struct m_channels),
     .parse = parse_channels,
     .print = print_channels,
     .copy  = copy_channels,
-    .free = free_channels,
+    .free  = free_channels,
+    .equal = channels_equal,
 };
 
 static int parse_timestring(struct bstr str, double *time, char endchar)
 {
-    int a, b, len;
-    double d;
+    int len;
+    unsigned h, m;
+    double s;
     *time = 0; /* ensure initialization for error cases */
-    if (bstr_sscanf(str, "%d:%d:%lf%n", &a, &b, &d, &len) >= 3)
-        *time = 3600 * a + 60 * b + d;
-    else if (bstr_sscanf(str, "%d:%lf%n", &a, &d, &len) >= 2)
-        *time = 60 * a + d;
-    else if (bstr_sscanf(str, "%lf%n", &d, &len) >= 1)
-        *time = d;
-    else
+    bool neg = bstr_eatstart0(&str, "-");
+    if (!neg)
+        bstr_eatstart0(&str, "+");
+    bool sci = bstr_find0(str, "e-") >= 0 || bstr_find0(str, "e+") >= 0;
+    /* non-scientific notation timestamps shouldn't contain anymore +/- after this point */
+    if (!sci && (bstrchr(str, '-') >= 0 || bstrchr(str, '+') >= 0))
+        return 0;
+    if (bstr_sscanf(str, "%u:%u:%lf%n", &h, &m, &s, &len) >= 3) {
+        if (m >= 60 || s >= 60)
+            return 0; /* minutes or seconds are out of range */
+        *time = 3600.0 * h + 60 * m + s;
+    } else if (bstr_sscanf(str, "%u:%lf%n", &m, &s, &len) >= 2) {
+        if (s >= 60)
+            return 0; /* seconds are out of range */
+        *time = 60.0 * m + s;
+    } else if (bstr_sscanf(str, "%lf%n", &s, &len) >= 1) {
+        *time = s;
+    } else {
         return 0;  /* unsupported time format */
+    }
     if (len < str.len && str.start[len] != endchar)
         return 0;  /* invalid extra characters at the end */
     if (!isfinite(*time))
         return 0;
+    if (neg)
+        *time = -*time;
     return len;
 }
 
-#define HAS_NOPTS(opt) ((opt)->min == MP_NOPTS_VALUE)
+#define HAS_NOPTS(opt) ((opt)->flags & M_OPT_ALLOW_NO)
 
 static int parse_time(struct mp_log *log, const m_option_t *opt,
                       struct bstr name, struct bstr param, void *dst)
@@ -2545,6 +2769,7 @@ const m_option_type_t m_option_type_time = {
     .add   = add_double,
     .set   = time_set,
     .get   = time_get,
+    .equal = double_equal,
 };
 
 
@@ -2611,8 +2836,7 @@ static char *print_rel_time(const m_option_t *opt, const void *val)
     case REL_TIME_ABSOLUTE:
         return talloc_asprintf(NULL, "%g", t->pos);
     case REL_TIME_RELATIVE:
-        return talloc_asprintf(NULL, "%s%g",
-            (t->pos >= 0) ? "+" : "-", fabs(t->pos));
+        return talloc_asprintf(NULL, "%+g", t->pos);
     case REL_TIME_CHAPTER:
         return talloc_asprintf(NULL, "#%g", t->pos);
     case REL_TIME_PERCENT:
@@ -2621,12 +2845,20 @@ static char *print_rel_time(const m_option_t *opt, const void *val)
     return talloc_strdup(NULL, "none");
 }
 
+static bool rel_time_equal(const m_option_t *opt, void *a, void *b)
+{
+    struct m_rel_time *ta = a;
+    struct m_rel_time *tb = b;
+    return ta->type == tb->type && ta->pos == tb->pos;
+}
+
 const m_option_type_t m_option_type_rel_time = {
     .name  = "Relative time or percent position",
     .size  = sizeof(struct m_rel_time),
     .parse = parse_rel_time,
     .print = print_rel_time,
     .copy  = copy_opt,
+    .equal = rel_time_equal,
 };
 
 
@@ -2664,27 +2896,13 @@ static void obj_setting_free(m_obj_settings_t *item)
 }
 
 // If at least one item has a label, compare labels only - otherwise ignore them.
-static bool obj_setting_equals(m_obj_settings_t *a, m_obj_settings_t *b)
+static bool obj_setting_match(m_obj_settings_t *a, m_obj_settings_t *b)
 {
     bstr la = bstr0(a->label), lb = bstr0(b->label);
     if (la.len || lb.len)
         return bstr_equals(la, lb);
-    if (strcmp(a->name, b->name) != 0)
-        return false;
 
-    int a_attr_count = 0;
-    while (a->attribs && a->attribs[a_attr_count])
-        a_attr_count++;
-    int b_attr_count = 0;
-    while (b->attribs && b->attribs[b_attr_count])
-        b_attr_count++;
-    if (a_attr_count != b_attr_count)
-        return false;
-    for (int n = 0; n < a_attr_count; n++) {
-        if (strcmp(a->attribs[n], b->attribs[n]) != 0)
-            return false;
-    }
-    return true;
+    return m_obj_settings_equal(a, b);
 }
 
 static int obj_settings_list_num_items(m_obj_settings_t *obj_list)
@@ -2714,10 +2932,18 @@ static void obj_settings_list_del_at(m_obj_settings_t **p_obj_list, int idx)
 // Insert such that *p_obj_list[idx] is set to item.
 // If idx < 0, set idx = count + idx + 1 (i.e. -1 inserts it as last element).
 // Memory referenced by *item is not copied.
-static void obj_settings_list_insert_at(m_obj_settings_t **p_obj_list, int idx,
+static bool obj_settings_list_insert_at(struct mp_log *log,
+                                        m_obj_settings_t **p_obj_list, int idx,
                                         m_obj_settings_t *item)
 {
     int num = obj_settings_list_num_items(*p_obj_list);
+    // Limit list entries to 100. obj_settings_list is not designed to hold more
+    // items, and it quickly starts taking ages to add all items.
+    if (num > 100) {
+        mp_warn(log, "Object settings list capacity exceeded: "
+                     "a maximum of 100 elements is allowed.");
+        return false;
+    }
     if (idx < 0)
         idx = num + idx + 1;
     assert(idx >= 0 && idx <= num);
@@ -2727,6 +2953,7 @@ static void obj_settings_list_insert_at(m_obj_settings_t **p_obj_list, int idx,
             (num - idx) * sizeof(m_obj_settings_t));
     (*p_obj_list)[idx] = *item;
     (*p_obj_list)[num + 1] = (m_obj_settings_t){0};
+    return true;
 }
 
 static int obj_settings_list_find_by_label(m_obj_settings_t *obj_list,
@@ -2749,7 +2976,7 @@ static int obj_settings_find_by_content(m_obj_settings_t *obj_list,
                                         m_obj_settings_t *item)
 {
     for (int n = 0; obj_list && obj_list[n].name; n++) {
-        if (obj_setting_equals(&obj_list[n], item))
+        if (obj_setting_match(&obj_list[n], item))
             return n;
     }
     return -1;
@@ -2962,7 +3189,7 @@ print_help: ;
     } else if (list->print_unknown_entry_help) {
         list->print_unknown_entry_help(log, mp_tprintf(80, "%.*s", BSTR_P(name)));
     } else {
-        mp_warn(log, "Option %.*s: item %.*s doesn't exist.\n",
+        mp_warn(log, "Option %.*s: item '%.*s' isn't supported.\n",
                BSTR_P(opt_name), BSTR_P(name));
     }
     r = M_OPT_EXIT;
@@ -3017,7 +3244,7 @@ static int parse_obj_settings(struct mp_log *log, struct bstr opt, int op,
     int idx = bstrspn(*pstr, NAMECH);
     str = bstr_splice(*pstr, 0, idx);
     if (!str.len) {
-        mp_err(log, "Option %.*s: filter name expected.\n", BSTR_P(opt));
+        mp_err(log, "Option %.*s: item name expected.\n", BSTR_P(opt));
         return M_OPT_INVALID;
     }
     *pstr = bstr_cut(*pstr, idx);
@@ -3031,8 +3258,10 @@ static int parse_obj_settings(struct mp_log *log, struct bstr opt, int op,
             mp_warn(log, "Driver '%s' has been replaced with '%s'!\n",
                    desc.replaced_name, desc.name);
     } else {
-        if (!list->allow_unknown_entries) {
-            mp_err(log, "Option %.*s: %.*s doesn't exist.\n",
+        char name[80];
+        snprintf(name, sizeof(name), "%.*s", BSTR_P(str));
+        if (list->check_unknown_entry && !list->check_unknown_entry(name)) {
+            mp_err(log, "Option %.*s: '%.*s' isn't supported.\n",
                    BSTR_P(opt), BSTR_P(str));
             return M_OPT_INVALID;
         }
@@ -3061,11 +3290,12 @@ done: ;
         .enabled = enabled,
         .attribs = plist,
     };
-    obj_settings_list_insert_at(_ret, -1, &item);
+    if (!obj_settings_list_insert_at(log, _ret, -1, &item))
+        obj_setting_free(&item);
     return 1;
 }
 
-// Parse a single entry for -vf-del (return 0 if not applicable)
+// Parse a single entry for -vf-remove (return 0 if not applicable)
 // mark_del is bounded by the number of items in dst
 static int parse_obj_settings_del(struct mp_log *log, struct bstr opt_name,
                                   struct bstr *param, void *dst, bool *mark_del)
@@ -3080,7 +3310,8 @@ static int parse_obj_settings_del(struct mp_log *log, struct bstr opt_name,
         if (bstr_startswith0(s, ":"))
             return 0;
         if (dst) {
-            int label_index = obj_settings_list_find_by_label(VAL(dst), label);
+            int label_index = 0;
+            label_index = obj_settings_list_find_by_label(VAL(dst), label);
             if (label_index >= 0) {
                 mark_del[label_index] = true;
             } else {
@@ -3091,27 +3322,7 @@ static int parse_obj_settings_del(struct mp_log *log, struct bstr opt_name,
         *param = s;
         return 1;
     }
-
-    bstr rest;
-    long long id = bstrtoll(s, &rest, 0);
-    if (rest.len == s.len)
-        return 0;
-
-    if (dst) {
-        int num = obj_settings_list_num_items(VAL(dst));
-        if (id < 0)
-            id = num + id;
-
-        if (id >= 0 && id < num) {
-            mark_del[id] = true;
-        } else {
-            mp_warn(log, "Option %.*s: Index %lld is out of range.\n",
-                    BSTR_P(opt_name), id);
-        }
-    }
-
-    *param = rest;
-    return 1;
+    return 0;
 }
 
 static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
@@ -3121,18 +3332,21 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
     int op = OP_NONE;
     bool *mark_del = NULL;
     int num_items = obj_settings_list_num_items(dst ? VAL(dst) : 0);
-    struct m_obj_list *ol = opt->priv;
+    const struct m_obj_list *ol = opt->priv;
+    int ret = 1;
 
     assert(opt->priv);
 
     if (bstr_endswith0(name, "-add")) {
         op = OP_ADD;
+    } else if (bstr_endswith0(name, "-append")) {
+        op = OP_APPEND;
     } else if (bstr_endswith0(name, "-set")) {
         op = OP_NONE;
     } else if (bstr_endswith0(name, "-pre")) {
         op = OP_PRE;
-    } else if (bstr_endswith0(name, "-del")) {
-        op = OP_DEL;
+    } else if (bstr_endswith0(name, "-remove")) {
+        op = OP_REMOVE;
     } else if (bstr_endswith0(name, "-clr")) {
         op = OP_CLR;
     } else if (bstr_endswith0(name, "-toggle")) {
@@ -3142,22 +3356,23 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
                 "Supported operations are:\n"
                 "  %s-set\n"
                 " Overwrite the old list with the given list\n\n"
+                "  %s-append\n"
+                " Append the given item to the current list\n\n"
                 "  %s-add\n"
                 " Append the given list to the current list\n\n"
                 "  %s-pre\n"
                 " Prepend the given list to the current list\n\n"
-                "  %s-del x,y,...\n"
-                " Remove the given elements. Take the list element index (starting from 0).\n"
-                " Negative index can be used (i.e. -1 is the last element).\n"
-                " Filter names work as well.\n\n"
+                "  %s-remove\n"
+                " Remove the given item from the current list\n\n"
                 "  %s-toggle\n"
-                " Add the filter to the list, or remove it if it's already added.\n\n"
+                " Add the item to the list, or remove it if it's already added.\n\n"
                 "  %s-clr\n"
                 " Clear the current list.\n\n",
                 opt->name, opt->name, opt->name, opt->name, opt->name,
-                opt->name, opt->name);
+                opt->name, opt->name, opt->name);
 
-        return M_OPT_EXIT;
+        ret = M_OPT_EXIT;
+        goto done;
     }
 
     if (!bstrcmp0(param, "help")) {
@@ -3178,52 +3393,74 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
             mp_info(log, "Get help on individual entries via: --%s=entry=help\n",
                     opt->name);
         }
-        return M_OPT_EXIT;
+        ret = M_OPT_EXIT;
+        goto done;
     }
 
     if (op == OP_CLR) {
         if (param.len) {
             mp_err(log, "Option %.*s: -clr does not take an argument.\n",
                    BSTR_P(name));
-            return M_OPT_INVALID;
+            ret = M_OPT_INVALID;
+            goto done;
         }
         if (dst)
             free_obj_settings_list(dst);
-        return 0;
-    } else if (op == OP_DEL) {
+        ret = 0;
+        goto done;
+    } else if (op == OP_REMOVE) {
         mark_del = talloc_zero_array(NULL, bool, num_items + 1);
     }
 
-    if (op != OP_NONE && param.len == 0)
-        return M_OPT_MISSING_PARAM;
+    if (op != OP_NONE && param.len == 0) {
+        ret = M_OPT_MISSING_PARAM;
+        goto done;
+    }
 
     while (param.len > 0) {
         int r = 0;
-        if (op == OP_DEL)
+        if (op == OP_REMOVE)
             r = parse_obj_settings_del(log, name, &param, dst, mark_del);
         if (r == 0) {
             r = parse_obj_settings(log, name, op, &param, ol, dst ? &res : NULL);
         }
-        if (r < 0)
-            return r;
+        if (r < 0) {
+            free_obj_settings_list(&res);
+            ret = r;
+            goto done;
+        }
         if (param.len > 0) {
             const char sep[2] = {OPTION_LIST_SEPARATOR, 0};
-            if (!bstr_eatstart0(&param, sep))
-                return M_OPT_INVALID;
+            if (!bstr_eatstart0(&param, sep)) {
+                free_obj_settings_list(&res);
+                ret = M_OPT_INVALID;
+                goto done;
+            }
             if (param.len == 0) {
-                if (!ol->allow_trailer)
-                    return M_OPT_INVALID;
+                if (!ol->allow_trailer) {
+                    free_obj_settings_list(&res);
+                    ret = M_OPT_INVALID;
+                    goto done;
+                }
                 if (dst) {
                     m_obj_settings_t item = {
                         .name = talloc_strdup(NULL, ""),
                     };
-                    obj_settings_list_insert_at(&res, -1, &item);
+                    if (!obj_settings_list_insert_at(log, &res, -1, &item))
+                        obj_setting_free(&item);
                 }
             }
         }
     }
 
     if (op != OP_NONE && res && res[0].name && res[1].name) {
+        if (op == OP_APPEND) {
+            mp_err(log, "Option %.*s: -append takes only 1 item (no ',').\n",
+                   BSTR_P(name));
+            free_obj_settings_list(&res);
+            ret = M_OPT_INVALID;
+            goto done;
+        }
         mp_warn(log, "Passing more than 1 argument to %.*s is deprecated!\n",
                 BSTR_P(name));
     }
@@ -3235,7 +3472,8 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
             for (int n = 0; res && res[n].name; n++) {
                 int label = obj_settings_list_find_by_label0(list, res[n].label);
                 if (label < 0) {
-                    obj_settings_list_insert_at(&list, prepend_counter, &res[n]);
+                    if (!obj_settings_list_insert_at(log, &list, prepend_counter, &res[n]))
+                        obj_setting_free(&res[n]);
                     prepend_counter++;
                 } else {
                     // Prefer replacement semantics, instead of actually
@@ -3245,11 +3483,12 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
                 }
             }
             talloc_free(res);
-        } else if (op == OP_ADD) {
+        } else if (op == OP_ADD || op == OP_APPEND) {
             for (int n = 0; res && res[n].name; n++) {
                 int label = obj_settings_list_find_by_label0(list, res[n].label);
                 if (label < 0) {
-                    obj_settings_list_insert_at(&list, -1, &res[n]);
+                    if (!obj_settings_list_insert_at(log, &list, -1, &res[n]))
+                        obj_setting_free(&res[n]);
                 } else {
                     // Prefer replacement semantics, instead of actually
                     // appending.
@@ -3274,7 +3513,8 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
                 } else {
                     int found = obj_settings_find_by_content(list, &res[n]);
                     if (found < 0) {
-                        obj_settings_list_insert_at(&list, -1, &res[n]);
+                        if (!obj_settings_list_insert_at(log, &list, -1, &res[n]))
+                            obj_setting_free(&res[n]);
                     } else {
                         obj_settings_list_del_at(&list, found);
                         obj_setting_free(&res[n]);
@@ -3282,18 +3522,15 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
                 }
             }
             talloc_free(res);
-        } else if (op == OP_DEL) {
+        } else if (op == OP_REMOVE) {
             for (int n = num_items - 1; n >= 0; n--) {
                 if (mark_del[n])
                     obj_settings_list_del_at(&list, n);
             }
             for (int n = 0; res && res[n].name; n++) {
                 int found = obj_settings_find_by_content(list, &res[n]);
-                if (found < 0) {
-                    mp_warn(log, "Option %.*s: Item not found\n", BSTR_P(name));
-                } else {
+                if (found >= 0)
                     obj_settings_list_del_at(&list, found);
-                }
             }
             free_obj_settings_list(&res);
         } else {
@@ -3304,8 +3541,9 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
         VAL(dst) = list;
     }
 
+done:
     talloc_free(mark_del);
-    return 1;
+    return ret;
 }
 
 static void append_param(char **res, char *param)
@@ -3453,6 +3691,38 @@ static int get_obj_settings_list(const m_option_t *opt, void *ta_parent,
     return 1;
 }
 
+static bool obj_settings_list_equal(const m_option_t *opt, void *pa, void *pb)
+{
+    struct m_obj_settings *a = VAL(pa);
+    struct m_obj_settings *b = VAL(pb);
+
+    if (a == b || !a || !b)
+        return a == b || (!a && !b[0].name) || (!b && !a[0].name);
+
+    for (int n = 0; a[n].name || b[n].name; n++) {
+        if (!a[n].name || !b[n].name)
+            return false;
+        if (!m_obj_settings_equal(&a[n], &b[n]))
+            return false;
+    }
+
+    return true;
+}
+
+bool m_obj_settings_equal(struct m_obj_settings *a, struct m_obj_settings *b)
+{
+    if (!str_equal(NULL, &a->name, &b->name))
+        return false;
+
+    if (!str_equal(NULL, &a->label, &b->label))
+        return false;
+
+    if (a->enabled != b->enabled)
+        return false;
+
+    return str_list_equal(NULL, &a->attribs, &b->attribs);
+}
+
 const m_option_type_t m_option_type_obj_settings_list = {
     .name  = "Object settings list",
     .size  = sizeof(m_obj_settings_t *),
@@ -3462,14 +3732,16 @@ const m_option_type_t m_option_type_obj_settings_list = {
     .free  = free_obj_settings_list,
     .set   = set_obj_settings_list,
     .get   = get_obj_settings_list,
+    .equal = obj_settings_list_equal,
     .actions = (const struct m_option_action[]){
         {"add"},
+        {"append"},
         {"clr",     M_OPT_TYPE_OPTIONAL_PARAM},
-        {"del"},
         {"help",    M_OPT_TYPE_OPTIONAL_PARAM},
         {"pre"},
         {"set"},
         {"toggle"},
+        {"remove"},
         {0}
     },
 };
@@ -3531,6 +3803,16 @@ static void dup_node(void *ta_parent, struct mpv_node *node)
         }
         break;
     }
+    case MPV_FORMAT_BYTE_ARRAY: {
+        struct mpv_byte_array *old = node->u.ba;
+        struct mpv_byte_array *new = talloc_zero(ta_parent, struct mpv_byte_array);
+        node->u.ba = new;
+        if (old->size > 0) {
+            *new = *old;
+            new->data = talloc_memdup(new, old->data, old->size);
+        }
+        break;
+    }
     case MPV_FORMAT_NONE:
     case MPV_FORMAT_FLAG:
     case MPV_FORMAT_INT64:
@@ -3544,7 +3826,7 @@ static void dup_node(void *ta_parent, struct mpv_node *node)
 
 static void copy_node(const m_option_t *opt, void *dst, const void *src)
 {
-    assert(sizeof(struct mpv_node) <= sizeof(union m_option_value));
+    static_assert(sizeof(struct mpv_node) <= sizeof(union m_option_value), "");
 
     if (!(dst && src))
         return;
@@ -3593,6 +3875,11 @@ static int node_get(const m_option_t *opt, void *ta_parent,
     return 1;
 }
 
+static bool node_equal(const m_option_t *opt, void *a, void *b)
+{
+    return equal_mpv_node(&VAL(a), &VAL(b));
+}
+
 const m_option_type_t m_option_type_node = {
     .name  = "Complex",
     .size  = sizeof(struct mpv_node),
@@ -3603,6 +3890,35 @@ const m_option_type_t m_option_type_node = {
     .free  = free_node,
     .set   = node_set,
     .get   = node_get,
+    .equal = node_equal,
+};
+
+static int parse_cycle_dir(struct mp_log *log, const struct m_option *opt,
+                           struct bstr name, struct bstr param, void *dst)
+{
+    double val;
+    if (bstrcmp0(param, "up") == 0) {
+        val = +1;
+    } else if (bstrcmp0(param, "down") == 0) {
+        val = -1;
+    } else {
+        return m_option_type_double.parse(log, opt, name, param, dst);
+    }
+    *(double *)dst = val;
+    return 1;
+}
+
+static char *print_cycle_dir(const m_option_t *opt, const void *val)
+{
+    return talloc_asprintf(NULL, "%f", *(double *)val);
+}
+
+const m_option_type_t m_option_type_cycle_dir = {
+    .name = "up|down",
+    .parse = parse_cycle_dir,
+    .print = print_cycle_dir,
+    .copy = copy_opt,
+    .size = sizeof(double),
 };
 
 // Special-cased by m_config.c.

@@ -146,7 +146,8 @@ The current implementation will
 Another header part of this mechanism is ``no_clip``. This header is similar
 to ``mp4_dash``, but does not include on-demand opening/closing of segments,
 and does not support init segments. It also exists solely to support internal
-ytdl requirements.
+ytdl requirements. Using ``no_clip`` with segments is not recommended and
+probably breaks. ``mp4_dash`` already implicitly does a variant of ``no_clip``.
 
 The ``mp4_dash`` and ``no_clip`` headers are not part of the core EDL format.
 They may be changed or removed at any time, depending on mpv's internal
@@ -182,6 +183,69 @@ this will use a unified cache for all streams.
 The ``new_stream`` header is not part of the core EDL format. It may be changed
 or removed at any time, depending on mpv's internal requirements.
 
+
+example as above::
+
+    # mpv EDL v0
+    !new_stream
+    video.mkv
+    !new_stream
+    audio.mkv
+
+Note that ``!new_stream`` must be the first header. Whether the parser accepts
+(i.e. ignores) or rejects other headers before that is implementation specific.
+
+Track metadata
+==============
+
+The special ``track_meta`` header can set some specific metadata fields of the
+current ``!new_stream`` partition. The tags are applied to all tracks within
+the partition. It is not possible to set the metadata for individual tracks (the
+feature was needed only for single-track media).
+
+It provides following parameters change track metadata:
+
+``lang``
+    Set the language tag.
+
+``title``
+    Set the title tag.
+
+Example::
+
+    # mpv EDL v0
+    !track_meta,lang=bla,title=blabla
+    file.mkv
+    !new_stream
+    !track_meta,title=ducks
+    sub.srt
+
+If ``file.mkv`` has an audio and a video stream, both will use ``blabla`` as
+title. The subtitle stream will use ``ducks`` as title.
+
+The ``track_meta`` header is not part of the core EDL format. It may be changed
+or removed at any time, depending on mpv's internal requirements.
+
+
+Delayed media opening
+=====================
+
+The special ``delay_open`` header can be used to open the media URL of the
+stream only when the track is selected for the first time. This is supposed to
+be an optimization to speed up opening of a remote stream if there are many
+tracks for whatever reasons.
+
+This has various tricky restrictions, and also will defer failure to open a
+stream to "later". By design, it's supposed to be used for single-track streams.
+
+Using multiple segments requires you to specify all offsets and durations (also
+it was never tested whether it works at all). Interaction with ``mp4_dash`` may
+be strange.
+
+
+The ``delay_open`` header is not part of the core EDL format. It may be changed
+or removed at any time, depending on mpv's internal requirements.
+
 Timestamp format
 ================
 
@@ -189,7 +253,8 @@ Currently, time values are floating point values in seconds.
 
 As an extension, you can set the ``timestamps=chapters`` option. If this option
 is set, timestamps have to be integers, and refer to chapter numbers, starting
-with 0.
+with 0. The default value for this parameter is ``seconds``, which means the
+time is as described in the previous paragraph.
 
 Example::
 

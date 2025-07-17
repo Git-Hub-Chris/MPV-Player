@@ -19,12 +19,9 @@
 #include <stdbool.h>
 #include <inttypes.h>
 #include <assert.h>
-#include <dirent.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <libavutil/common.h>
 
 #include "osdep/io.h"
@@ -262,7 +259,7 @@ static void find_ordered_chapter_sources(struct tl_ctx *ctx)
                 MP_TARRAY_APPEND(tmp, filenames, num_filenames,
                                  pl->entries[n]->filename);
             }
-        } else if (!ctx->demuxer->stream->is_local_file) {
+        } else if (!ctx->demuxer->stream->is_local_fs) {
             MP_WARN(ctx, "Playback source is not a "
                     "normal disk file. Will not search for related files.\n");
         } else {
@@ -494,6 +491,11 @@ static void check_track_compatibility(struct tl_ctx *tl, struct demuxer *mainsrc
                 // match (though mpv's implementation doesn't care).
                 if (strcmp(s->codec->codec, m->codec->codec) != 0)
                     MP_WARN(tl, "Timeline segments have mismatching codec.\n");
+                if (s->codec->extradata_size != m->codec->extradata_size ||
+                    (s->codec->extradata_size &&
+                        memcmp(s->codec->extradata, m->codec->extradata,
+                               s->codec->extradata_size) != 0))
+                    MP_WARN(tl, "Timeline segments have mismatching codec info.\n");
             } else {
                 MP_WARN(tl, "Source %s lacks %s stream with TID=%d, which "
                             "is present in the ordered chapters main "

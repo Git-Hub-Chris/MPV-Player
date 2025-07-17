@@ -22,14 +22,11 @@
 #include <assert.h>
 #include <stdbool.h>
 
-#include "config.h"
-
 #include "osdep/io.h"
-#include "common/global.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
 #include "m_option.h"
-#include "m_config.h"
+#include "m_config_frontend.h"
 #include "options.h"
 #include "common/playlist.h"
 #include "parse_commandline.h"
@@ -93,25 +90,22 @@ static bool split_opt(struct parse_state *p)
         }
         p->param = bstr0(p->argv[0]);
         p->argv++;
-        MP_WARN(p, "The legacy option syntax ('-%.*s value') is deprecated "
-                "and dangerous.\nPlease use '--%.*s=value'.\n",
-                BSTR_P(p->arg), BSTR_P(p->arg));
     }
 
     return true;
 }
 
-#ifdef __MINGW32__
+#ifdef _WIN32
 static void process_non_option(struct playlist *files, const char *arg)
 {
     glob_t gg;
 
     // Glob filenames on Windows (cmd.exe doesn't do this automatically)
     if (glob(arg, 0, NULL, &gg)) {
-        playlist_add_file(files, arg);
+        playlist_append_file(files, arg);
     } else {
         for (int i = 0; i < gg.gl_pathc; i++)
-            playlist_add_file(files, gg.gl_pathv[i]);
+            playlist_append_file(files, gg.gl_pathv[i]);
 
         globfree(&gg);
     }
@@ -119,7 +113,7 @@ static void process_non_option(struct playlist *files, const char *arg)
 #else
 static void process_non_option(struct playlist *files, const char *arg)
 {
-    playlist_add_file(files, arg);
+    playlist_append_file(files, arg);
 }
 #endif
 
@@ -199,13 +193,14 @@ int m_config_parse_mp_command_line(m_config_t *config, struct playlist *files,
                 // append the playlist to the local args
                 char *param0 = bstrdup0(NULL, p.param);
                 struct playlist *pl = playlist_parse_file(param0, NULL, global);
-                talloc_free(param0);
                 if (!pl) {
                     MP_FATAL(config, "Error reading playlist '%.*s'\n",
                              BSTR_P(p.param));
+                    talloc_free(param0);
                     goto err_out;
                 }
                 playlist_transfer_entries(files, pl);
+                talloc_free(param0);
                 talloc_free(pl);
                 continue;
             }

@@ -21,7 +21,7 @@
 #include <stdbool.h>
 
 struct subfn {
-    int type; // STREAM_SUB/STREAM_AUDIO
+    int type; // STREAM_SUB/STREAM_AUDIO/STREAM_VIDEO(coverart)
     int priority;
     char *fname;
     char *lang;
@@ -33,5 +33,6 @@ struct subfn *find_external_files(struct mpv_global *global, const char *fname,
                                   struct MPOpts *opts);
 
 bool mp_might_be_subtitle_file(const char *filename);
+void mp_update_subtitle_exts(struct MPOpts *opts);
 
 #endif /* MPLAYER_FINDFILES_H */

@@ -1,12 +1,7 @@
 LUA SCRIPTING
 =============
 
-mpv can load Lua scripts. Scripts passed to the ``--script`` option, or found in
-the ``scripts`` subdirectory of the mpv configuration directory (usually
-``~/.config/mpv/scripts/``) will be loaded on program start. mpv also appends the
-``scripts`` subdirectory to the end of Lua's path so you can import scripts from
-there too. Since it's added to the end, don't name scripts you want to import
-the same as Lua libraries because they will be overshadowed by them.
+mpv can load Lua scripts. (See `Script location`_.)
 
 mpv provides the built-in module ``mp``, which contains functions to send
 commands to the mpv core and to retrieve information about playback state, user
@@ -30,6 +25,55 @@ A script which leaves fullscreen mode when the player is paused:
     mp.observe_property("pause", "bool", on_pause_change)
 
 
+Script location
+---------------
+
+Scripts can be passed to the ``--script`` option, and are automatically loaded
+from the ``scripts`` subdirectory of the mpv configuration directory (usually
+``~/.config/mpv/scripts/``).
+
+A script can be a single file. The file extension is used to select the
+scripting backend to use for it. For Lua, it is ``.lua``. If the extension is
+not recognized, an error is printed. (If an error happens, the extension is
+either mistyped, or the backend was not compiled into your mpv binary.)
+
+mpv internally loads the script's name by stripping the ``.lua`` extension and
+replacing all nonalphanumeric characters with ``_``. E.g., ``my-tools.lua``
+becomes ``my_tools``. If there are several scripts with the same name, it is
+made unique by appending a number. This is the name returned by
+``mp.get_script_name()``.
+
+Entries with ``.disable`` extension are always ignored.
+
+If a script is a directory (either if a directory is passed to ``--script``,
+or any sub-directories in the script directory, such as for example
+``~/.config/mpv/scripts/something/``), then the directory represents a single
+script. The player will try to load a file named ``main.x``, where ``x`` is
+replaced with the file extension. For example, if ``main.lua`` exists, it is
+loaded with the Lua scripting backend.
+
+You must not put any other files or directories that start with ``main.`` into
+the script's top level directory. If the script directory contains for example
+both ``main.lua`` and ``main.js``, only one of them will be loaded (and which
+one depends on mpv internals that may change any time). Likewise, if there is
+for example ``main.foo``, your script will break as soon as mpv adds a backend
+that uses the ``.foo`` file extension.
+
+mpv also appends the top level directory of the script to the start of Lua's
+package path so you can import scripts from there too. Be aware that this will
+shadow Lua libraries that use the same package path. (Single file scripts do not
+include mpv specific directories in the Lua package path. This was silently
+changed in mpv 0.32.0.)
+
+Using a script directory is the recommended way to package a script that
+consists of multiple source files, or requires other files (you can use
+``mp.get_script_directory()`` to get the location and e.g. load data files).
+
+Making a script a git repository, basically a repository which contains a
+``main.lua`` file in the root directory, makes scripts easily updateable
+(without the dangers of auto-updates). Another suggestion is to use git
+submodules to share common files or libraries.
+
 Details on the script initialization and lifecycle
 --------------------------------------------------
 
@@ -42,7 +86,8 @@ own event handlers which you have registered with ``mp.register_event``, or
 timers added with ``mp.add_timeout`` or similar. Note that since the
 script starts execution concurrently with player initialization, some properties
 may not be populated with meaningful values until the relevant subsystems have
-initialized.
+initialized. Rather than retrieving these properties at the top of scripts, you
+should use ``mp.observe_property`` or read them within event handlers.
 
 When the player quits, all scripts will be asked to terminate. This happens via
 a ``shutdown`` event, which by default will make the event loop return. If your
@@ -127,12 +172,19 @@ The ``mp`` module is preloaded, although it can be loaded manually with
 
 ``mp.command_native_async(table [,fn])``
     Like ``mp.command_native()``, but the command is ran asynchronously (as far
-    as possible), and upon completion, fn is called. fn has two arguments:
-    ``fn(success, result, error)``. ``success`` is always a Boolean and is true
-    if the command was successful, otherwise false. The second parameter is
-    the result value (can be nil) in case of success, nil otherwise (as returned
-    by ``mp.command_native()``). The third parameter is the error string in case
-    of an error, nil otherwise.
+    as possible), and upon completion, fn is called. fn has three arguments:
+    ``fn(success, result, error)``:
+
+         ``success``
+            Always a Boolean and is true if the command was successful,
+            otherwise false.
+
+        ``result``
+            The result value (can be nil) in case of success, nil otherwise (as
+            returned by ``mp.command_native()``).
+
+        ``error``
+            The error string in case of an error, nil otherwise.
 
     Returns a table with undefined contents, which can be used as argument for
     ``mp.abort_async_command``.
@@ -140,11 +192,19 @@ The ``mp`` module is preloaded, although it can be loaded manually with
     If starting the command failed for some reason, ``nil, error`` is returned,
     and ``fn`` is called indicating failure, using the same error value.
 
+    ``fn`` is always called asynchronously, even if the command failed to start.
+
 ``mp.abort_async_command(t)``
     Abort a ``mp.command_native_async`` call. The argument is the return value
     of that command (which starts asynchronous execution of the command).
     Whether this works and how long it takes depends on the command and the
     situation. The abort call itself is asynchronous. Does not return anything.
+
+``mp.del_property(name)``
+    Delete the given property. See ``mp.get_property`` and `Properties`_ for more
+    information about properties. Most properties cannot be deleted.
+
+    Returns true on success, or ``nil, error`` on error.
 
 ``mp.get_property(name [,def])``
     Return the value of the given property as string. These are the same
@@ -233,6 +293,18 @@ The ``mp`` module is preloaded, although it can be loaded manually with
 
     After calling this function, key presses will cause the function ``fn`` to
     be called (unless the user remapped the key with another binding).
+    However, if the key binding is canceled , the function will not be called,
+    unless ``complex`` flag is set to ``true``, where the function will be
+    called with the ``canceled`` entry set to ``true``.
+
+    For example, a canceled key binding can happen in the following situations:
+
+    - If key A is pressed while key B is being held down, key B is logically
+      released ("canceled" by key A), which stops the current autorepeat
+      action key B has.
+    - If key A is pressed while a mouse button is being held down, the mouse
+      button is logically released, but the mouse button's action will not be
+      called, unless ``complex`` flag is set to ``true``.
 
     The ``name`` argument should be a short symbolic string. It allows the user
     to remap the key binding via input.conf using the ``script-message``
@@ -244,33 +316,55 @@ The ``mp`` module is preloaded, although it can be loaded manually with
     or pass the ``fn`` argument in place of the name. The latter is not
     recommended and is handled for compatibility only.)
 
-    The last argument is used for optional flags. This is a table, which can
-    have the following entries:
+    The ``flags`` argument is used for optional parameters. This is a table,
+    which can have the following entries:
 
         ``repeatable``
             If set to ``true``, enables key repeat for this specific binding.
+            This option only makes sense when ``complex`` is not set to ``true``.
+
+        ``scalable``
+            If set to ``true``, enables key scaling for this specific binding.
+            This option only makes sense when ``complex`` is set to ``true``.
+            Note that this has no effect if the key binding is invoked by
+            ``script-binding`` command, where the scalability of the command
+            takes precedence.
 
         ``complex``
-            If set to ``true``, then ``fn`` is called on both key up and down
-            events (as well as key repeat, if enabled), with the first
-            argument being a table. This table has the following entries (and
-            may contain undocumented ones):
+            If set to ``true``, then ``fn`` is called on key down, repeat and up
+            events, with the first argument being a table. This table has the
+            following entries (and may contain undocumented ones):
 
-            ``event``
-                Set to one of the strings ``down``, ``repeat``, ``up`` or
-                ``press`` (the latter if key up/down can't be tracked).
+                ``event``
+                    Set to one of the strings ``down``, ``repeat``, ``up`` or
+                    ``press`` (the latter if key up/down/repeat can't be
+                    tracked), which indicates the key's logical state.
 
-            ``is_mouse``
-                Boolean Whether the event was caused by a mouse button.
+                ``is_mouse``
+                    Boolean: Whether the event was caused by a mouse button.
 
-            ``key_name``
-                The name of they key that triggered this, or ``nil`` if invoked
-                artificially. If the key name is unknown, it's an empty string.
+                ``canceled``
+                    Boolean: Whether the event was canceled.
+                    Not all types of cancellations set this flag.
 
-            ``key_text``
-                Text if triggered by a text key, otherwise ``nil``. See
-                description of ``script-binding`` command for details (this
-                field is equivalent to the 5th argument).
+                ``key_name``
+                    The name of they key that triggered this, or ``nil`` if
+                    invoked artificially. If the key name is unknown, it's an
+                    empty string.
+
+                ``key_text``
+                    Text if triggered by a text key, otherwise ``nil``. See
+                    description of ``script-binding`` command for details (this
+                    field is equivalent to the 5th argument).
+
+                ``scale``
+                    The scale of the key, such as the ones produced by ``WHEEL_*``
+                    keys. The scale is 1 if the key is nonscalable.
+
+                ``arg``
+                    User-provided string in the ``arg`` argument in the
+                    ``script-binding`` command if the key binding is invoked
+                    by that command.
 
     Internally, key bindings are dispatched via the ``script-message-to`` or
     ``script-binding`` input commands and ``mp.register_script_message``.
@@ -366,9 +460,9 @@ The ``mp`` module is preloaded, although it can be loaded manually with
     This depends on the property, and it's a valid feature request to ask for
     better update handling of a specific property.
 
-    If the ``type`` is ``none`` or ``nil``, sporadic property change events are
-    possible. This means the change function ``fn`` can be called even if the
-    property doesn't actually change.
+    If the ``type`` is ``none`` or ``nil``, the change function ``fn`` will be
+    called sporadically even if the property doesn't actually change. You should
+    therefore avoid using these types.
 
     You always get an initial change notification. This is meant to initialize
     the user's state to the current value of the property.
@@ -378,17 +472,21 @@ The ``mp`` module is preloaded, although it can be loaded manually with
     that are equal to the ``fn`` parameter. This uses normal Lua ``==``
     comparison, so be careful when dealing with closures.
 
-``mp.add_timeout(seconds, fn)``
+``mp.add_timeout(seconds, fn [, disabled])``
     Call the given function fn when the given number of seconds has elapsed.
     Note that the number of seconds can be fractional. For now, the timer's
     resolution may be as low as 50 ms, although this will be improved in the
     future.
 
+    If the ``disabled`` argument is set to ``true`` or a truthy value, the
+    timer will wait to be manually started with a call to its ``resume()``
+    method.
+
     This is a one-shot timer: it will be removed when it's fired.
 
     Returns a timer object. See ``mp.add_periodic_timer`` for details.
 
-``mp.add_periodic_timer(seconds, fn)``
+``mp.add_periodic_timer(seconds, fn [, disabled])``
     Call the given function periodically. This is like ``mp.add_timeout``, but
     the timer is re-added after the function fn is run.
 
@@ -428,7 +526,7 @@ The ``mp`` module is preloaded, although it can be loaded manually with
             the timer callback function fn is run).
 
     Note that these are methods, and you have to call them using ``:`` instead
-    of ``.`` (Refer to http://www.lua.org/manual/5.2/manual.html#3.4.9 .)
+    of ``.`` (Refer to https://www.lua.org/manual/5.2/manual.html#3.4.9 .)
 
     Example:
 
@@ -437,7 +535,7 @@ The ``mp`` module is preloaded, although it can be loaded manually with
         seconds = 0
         timer = mp.add_periodic_timer(1, function()
             print("called every second")
-            # stop it after 10 seconds
+            -- stop it after 10 seconds
             seconds = seconds + 1
             if seconds >= 10 then
                 timer:kill()
@@ -454,11 +552,16 @@ The ``mp`` module is preloaded, although it can be loaded manually with
     Return the name of the current script. The name is usually made of the
     filename of the script, with directory and file extension removed. If
     there are several scripts which would have the same name, it's made unique
-    by appending a number.
+    by appending a number. Any nonalphanumeric characters are replaced with ``_``.
 
     .. admonition:: Example
 
-        The script ``/path/to/fooscript.lua`` becomes ``fooscript``.
+        The script ``/path/to/foo-script.lua`` becomes ``foo_script``.
+
+``mp.get_script_directory()``
+    Return the directory if this is a script packaged as directory (see
+    `Script location`_ for a description). Return nothing if this is a single
+    file script.
 
 ``mp.osd_message(text [,duration])``
     Show an OSD message on the screen. ``duration`` is in seconds, and is
@@ -469,18 +572,6 @@ Advanced mp functions
 
 These also live in the ``mp`` module, but are documented separately as they
 are useful only in special situations.
-
-``mp.suspend()``
-    This function has been deprecated in mpv 0.21.0 and does nothing starting
-    with mpv 0.23.0 (no replacement).
-
-``mp.resume()``
-    This function has been deprecated in mpv 0.21.0 and does nothing starting
-    with mpv 0.23.0 (no replacement).
-
-``mp.resume_all()``
-    This function has been deprecated in mpv 0.21.0 and does nothing starting
-    with mpv 0.23.0 (no replacement).
 
 ``mp.get_wakeup_pipe()``
     Calls ``mpv_get_wakeup_pipe()`` and returns the read end of the wakeup
@@ -548,6 +639,7 @@ are useful only in special situations.
     ``update()``
         Commit the OSD overlay to the screen, or in other words, run the
         ``osd-overlay`` command with the current fields of the overlay table.
+        Returns the result of the ``osd-overlay`` command itself.
 
     ``remove()``
         Remove the overlay from the screen. A ``update()`` call will add it
@@ -566,10 +658,24 @@ are useful only in special situations.
 
 ``mp.get_osd_size()``
     Returns a tuple of ``osd_width, osd_height, osd_par``. The first two give
-    the size of the OSD in pixels (for video ouputs like ``--vo=xv``, this may
+    the size of the OSD in pixels (for video outputs like ``--vo=xv``, this may
     be "scaled" pixels). The third is the display pixel aspect ratio.
 
     May return invalid/nonsense values if OSD is not initialized yet.
+
+``exit()`` (global)
+    Make the script exit at the end of the current event loop iteration. This
+    does not terminate mpv itself or other scripts.
+
+    This can be polyfilled to support mpv versions older than 0.40 with:
+
+    ::
+
+        if not _G.exit then
+            function exit()
+                mp.keep_running = false
+            end
+        end
 
 mp.msg functions
 ----------------
@@ -626,13 +732,13 @@ with values found in the config-file and the command-line (in that order).
 
 Example implementation::
 
-    require 'mp.options'
     local options = {
         optionA = "defaultvalueA",
         optionB = -0.5,
         optionC = true,
     }
-    read_options(options, "myscript")
+
+    require "mp.options".read_options(options, "myscript")
     print(options.optionA)
 
 
@@ -711,7 +817,7 @@ strictly part of the guaranteed API.
         ``mtime``
             time of last modification
         ``ctime``
-            time of last metadata change (Linux) / time of creation (Windows)
+            time of last metadata change
         ``is_file``
             Whether ``path`` is a regular file (boolean)
         ``is_dir``
@@ -723,7 +829,7 @@ strictly part of the guaranteed API.
     The booleans ``is_file`` and ``is_dir`` are provided as a convenience;
     they can be and are derived from ``mode``.
 
-    On error (eg. path does not exist), ``nil, error`` is returned.
+    On error (e.g. path does not exist), ``nil, error`` is returned.
 
 ``utils.split_path(path)``
     Split a path into directory component and filename component, and return
@@ -732,7 +838,7 @@ strictly part of the guaranteed API.
 
 ``utils.join_path(p1, p2)``
     Return the concatenation of the 2 paths. Tries to be clever. For example,
-    if ```p2`` is an absolute path, p2 is returned without change.
+    if ``p2`` is an absolute path, ``p2`` is returned without change.
 
 ``utils.subprocess(t)``
     Runs an external process and waits until it exits. Returns process status
@@ -774,6 +880,10 @@ strictly part of the guaranteed API.
     Returns the process ID of the running mpv process. This can be used to identify
     the calling mpv when launching (detached) subprocesses.
 
+``utils.get_env_list()``
+    Returns the C environment as a list of strings. (Do not confuse this with
+    the Lua "environment", which is an unrelated concept.)
+
 ``utils.parse_json(str [, trail])``
     Parses the given string argument as JSON, and returns it as a Lua table. On
     error, returns ``nil, error``. (Currently, ``error`` is just a string
@@ -800,6 +910,131 @@ strictly part of the guaranteed API.
     Turn the given value into a string. Formats tables and their contents. This
     doesn't do anything special; it is only needed because Lua is terrible.
 
+mp.input functions
+--------------------
+
+This module lets scripts get textual input from the user using the console
+REPL.
+
+``input.get(table)``
+    Show the console to let the user enter text.
+
+    The following entries of ``table`` are read:
+
+    ``prompt``
+        The string to be displayed before the input field.
+
+    ``submit``
+        A callback invoked when the user presses Enter. The first argument is
+        the text in the console. You can close the console from within the
+        callback by calling ``input.terminate()``. If you don't, the console
+        stays open and the user can input more text.
+
+    ``opened``
+        A callback invoked when the console is shown. This can be used to
+        present a list of options with ``input.set_log()``.
+
+    ``edited``
+        A callback invoked when the text changes. The first argument is the text
+        in the console.
+
+    ``complete``
+        A callback invoked when the user presses TAB. The first argument is the
+        text before the cursor. The callback should return a table of the string
+        candidate completion values and the 1-based cursor position from which
+        the completion starts. console.lua will filter the suggestions beginning
+        with the the text between this position and the cursor, sort them
+        alphabetically, insert their longest common prefix, and show them when
+        there are multiple ones.
+
+    ``closed``
+        A callback invoked when the console is hidden, either because
+        ``input.terminate()`` was invoked from the other callbacks, or because
+        the user closed it with a key binding. The first argument is the text in
+        the console, and the second argument is the cursor position.
+
+    ``default_text``
+        A string to pre-fill the input field with.
+
+    ``cursor_position``
+        The initial cursor position, starting from 1.
+
+    ``id``
+        An identifier that determines which input history and log buffer to use
+        among the ones stored for ``input.get()`` calls. The input histories
+        and logs are stored in memory and do not persist across different mpv
+        invocations. Defaults to the calling script name with ``prompt``
+        appended.
+
+``input.terminate()``
+    Close the console.
+
+``input.log(message, style, terminal_style)``
+    Add a line to the log buffer. ``style`` can contain additional ASS tags to
+    apply to ``message``, and ``terminal_style`` can contain escape sequences
+    that are used when the console is displayed in the terminal.
+
+``input.log_error(message)``
+    Helper to add a line to the log buffer with the same color as the one the
+    console uses for errors. Useful when the user submits invalid input.
+
+``input.set_log(log)``
+    Replace the entire log buffer.
+
+    ``log`` is a table of strings, or tables with ``text``, ``style`` and
+    ``terminal_style`` keys.
+
+    Example:
+
+    ::
+
+        input.set_log({
+            "regular text",
+            {
+                text = "error text",
+                style = "{\\c&H7a77f2&}",
+                terminal_style = "\027[31m",
+            }
+        })
+
+``input.select(table)``
+    Specify a list of items that are presented to the user for selection. The
+    user can type part of the desired item and/or navigate them with
+    keybindings: ``Down`` and ``Ctrl+n`` go down, ``Up`` and ``Ctrl+p`` go up,
+    ``Page down`` and ``Ctrl+f`` scroll down one page, and ``Page up`` and
+    ``Ctrl+b`` scroll up one page.
+
+    The following entries of ``table`` are read:
+
+    ``prompt``
+        The string to be displayed before the input field.
+
+    ``items``
+        The table of the entries to choose from.
+
+    ``default_item``
+        The 1-based integer index of the preselected item.
+
+    ``submit``
+        The callback invoked when the user presses Enter. The first argument is
+        the 1-based index of the selected item. Unlike with ``input.get()``, the
+        console is automatically closed on submit without having to call
+        ``input.terminate()``.
+
+    Example:
+
+        ::
+
+            input.select({
+                items = {
+                    "First playlist entry",
+                    "Second playlist entry",
+                },
+                submit = function (id)
+                    mp.commandv("playlist-play-index", id - 1)
+                end,
+            })
+
 Events
 ------
 
@@ -819,116 +1054,7 @@ Example:
 
     mp.register_event("file-loaded", my_fn)
 
-
-
-List of events
---------------
-
-``start-file``
-    Happens right before a new file is loaded. When you receive this, the
-    player is loading the file (or possibly already done with it).
-
-``end-file``
-    Happens after a file was unloaded. Typically, the player will load the
-    next file right away, or quit if this was the last file.
-
-    The event has the ``reason`` field, which takes one of these values:
-
-    ``eof``
-        The file has ended. This can (but doesn't have to) include
-        incomplete files or broken network connections under
-        circumstances.
-
-    ``stop``
-        Playback was ended by a command.
-
-    ``quit``
-        Playback was ended by sending the quit command.
-
-    ``error``
-        An error happened. In this case, an ``error`` field is present with
-        the error string.
-
-    ``redirect``
-        Happens with playlists and similar. Details see
-        ``MPV_END_FILE_REASON_REDIRECT`` in the C API.
-
-    ``unknown``
-        Unknown. Normally doesn't happen, unless the Lua API is out of sync
-        with the C API. (Likewise, it could happen that your script gets
-        reason strings that did not exist yet at the time your script was
-        written.)
-
-``file-loaded``
-    Happens after a file was loaded and begins playback.
-
-``seek``
-    Happens on seeking. (This might include cases when the player seeks
-    internally, even without user interaction. This includes e.g. segment
-    changes when playing ordered chapters Matroska files.)
-
-``playback-restart``
-    Start of playback after seek or after file was loaded.
-
-``idle``
-    Idle mode is entered. This happens when playback ended, and the player was
-    started with ``--idle`` or ``--force-window``. This mode is implicitly ended
-    when the ``start-file`` or ``shutdown`` events happen.
-
-``tick``
-    Called after a video frame was displayed. This is a hack, and you should
-    avoid using it. Use timers instead and maybe watch pausing/unpausing events
-    to avoid wasting CPU when the player is paused.
-
-``shutdown``
-    Sent when the player quits, and the script should terminate. Normally
-    handled automatically. See `Details on the script initialization and lifecycle`_.
-
-``log-message``
-    Receives messages enabled with ``mp.enable_messages``. The message data
-    is contained in the table passed as first parameter to the event handler.
-    The table contains, in addition to the default event fields, the following
-    fields:
-
-    ``prefix``
-        The module prefix, identifies the sender of the message. This is what
-        the terminal player puts in front of the message text when using the
-        ``--v`` option, and is also what is used for ``--msg-level``.
-
-    ``level``
-        The log level as string. See ``msg.log`` for possible log level names.
-        Note that later versions of mpv might add new levels or remove
-        (undocumented) existing ones.
-
-    ``text``
-        The log message. The text will end with a newline character. Sometimes
-        it can contain multiple lines.
-
-    Keep in mind that these messages are meant to be hints for humans. You
-    should not parse them, and prefix/level/text of messages might change
-    any time.
-
-``get-property-reply``
-    Undocumented (not useful for Lua scripts).
-
-``set-property-reply``
-    Undocumented (not useful for Lua scripts).
-
-``command-reply``
-    Undocumented (not useful for Lua scripts).
-
-``client-message``
-    Undocumented (used internally).
-
-``video-reconfig``
-    Happens on video output or filter reconfig.
-
-``audio-reconfig``
-    Happens on audio output or filter reconfig.
-
-The following events also happen, but are deprecated: ``tracks-changed``,
-``track-switched``, ``pause``, ``unpause``, ``metadata-update``,
-``chapter-change``. Use ``mp.observe_property()`` instead.
+For the existing event types, see `List of events`_.
 
 Extras
 ------
@@ -942,8 +1068,22 @@ guarantee a stable interface.
     their result (normally, the Lua scripting interface is asynchronous from
     the point of view of the player core). ``priority`` is an arbitrary integer
     that allows ordering among hooks of the same kind. Using the value 50 is
-    recommended as neutral default value. ``fn`` is the function that will be
-    called during execution of the hook.
+    recommended as neutral default value.
+
+    ``fn(hook)`` is the function that will be called during execution of the
+    hook. The parameter passed to it (``hook``) is a Lua object that can control
+    further aspects about the currently invoked hook. It provides the following
+    methods:
+
+        ``defer()``
+            Returning from the hook function should not automatically continue
+            the hook. Instead, the API user wants to call ``hook:cont()`` on its
+            own at a later point in time (before or after the function has
+            returned).
+
+        ``cont()``
+            Continue the hook. Doesn't need to be called unless ``defer()`` was
+            called.
 
     See `Hooks`_ for currently existing hooks and what they do - only the hook
     list is interesting; handling hook execution is done by the Lua script

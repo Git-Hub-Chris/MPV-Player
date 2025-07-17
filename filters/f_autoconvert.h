@@ -1,6 +1,7 @@
 #pragma once
 
 #include "filter.h"
+#include "video/sws_utils.h"
 
 struct mp_image;
 struct mp_image_params;
@@ -11,6 +12,8 @@ struct mp_image_params;
 struct mp_autoconvert {
     // f->pins[0] is input, f->pins[1] is output
     struct mp_filter *f;
+
+    enum mp_sws_scaler force_scaler;
 
     // If this is set, the callback is invoked (from the process function), and
     // further data flow is blocked until mp_autoconvert_format_change_continue()
@@ -35,7 +38,7 @@ void mp_autoconvert_set_target_image_params(struct mp_autoconvert *c,
 // Each call adds to the list of allowed formats. Before the first call, all
 // formats are allowed (even non-video).
 // subfmt can be used to specify underlying surface formats for hardware formats,
-// otherwise must be 0.
+// otherwise must be 0. (Mismatches lead to conversion errors.)
 void mp_autoconvert_add_imgfmt(struct mp_autoconvert *c, int imgfmt, int subfmt);
 
 // Add all sw image formats. The effect is that hardware video image formats are
@@ -74,7 +77,7 @@ void mp_autoconvert_add_srate(struct mp_autoconvert *c, int rate);
 
 // Reset set of allowed formats back to initial state. (This does not flush
 // any frames or remove currently active filters, although to get reasonable
-// behavior, you need to readd all previously allowed formats, or reset the
+// behavior, you need to re-add all previously allowed formats, or reset the
 // filter.)
 void mp_autoconvert_clear(struct mp_autoconvert *c);
 

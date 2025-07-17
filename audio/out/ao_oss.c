@@ -25,7 +25,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <unistd.h>
 
 #include <sys/ioctl.h>
 #include <sys/soundcard.h>
@@ -36,6 +35,7 @@
 #include <sys/types.h>
 
 #include "audio/format.h"
+#include "common/common.h"
 #include "common/msg.h"
 #include "options/options.h"
 #include "osdep/endian.h"
@@ -89,7 +89,7 @@ static const int format_table[][2] = {
 
 #define MP_WARN_IOCTL_ERR(__ao) \
     MP_WARN((__ao), "%s: ioctl() fail, err = %i: %s\n", \
-        __FUNCTION__, errno, strerror(errno))
+        __FUNCTION__, errno, mp_strerror(errno))
 
 
 static void uninit(struct ao *ao);
@@ -186,11 +186,11 @@ static int init(struct ao *ao)
 
     /* Channels count. */
     if (af_fmt_is_spdif(format)) {
-        /* Probably could be fixed by setting number of channels;
-         * needs testing. */
-        if (channels.num != 2) {
-            MP_ERR(ao, "Format %s not implemented.\n", af_fmt_to_str(format));
-            goto err_out;
+        nchannels = reqchannels = channels.num;
+        if (ioctl(p->dsp_fd, SNDCTL_DSP_CHANNELS, &nchannels) == -1) {
+            MP_ERR(ao, "Failed to set audio device to %d channels.\n",
+                reqchannels);
+            goto err_out_ioctl;
         }
     } else {
         struct mp_chmap_sel sel = {0};
@@ -327,9 +327,9 @@ static bool audio_write(struct ao *ao, void **data, int samples)
 
     while ((rc = write(p->dsp_fd, data[0], size)) == -1) {
         if (errno == EINTR)
-			continue;
+            continue;
         MP_WARN(ao, "audio_write: write() fail, err = %i: %s.\n",
-            errno, strerror(errno));
+            errno, mp_strerror(errno));
         return false;
     }
     if ((size_t)rc != size) {

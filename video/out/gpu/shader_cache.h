@@ -43,6 +43,10 @@ void gl_sc_uniform_mat2(struct gl_shader_cache *sc, char *name,
                         bool transpose, float *v);
 void gl_sc_uniform_mat3(struct gl_shader_cache *sc, char *name,
                         bool transpose, float *v);
+
+// Return the correct bvecN() variant for using mix() in this GLSL version
+const char *gl_sc_bvec(struct gl_shader_cache *sc, int dims);
+
 void gl_sc_blend(struct gl_shader_cache *sc,
                  enum ra_blend blend_src_rgb,
                  enum ra_blend blend_dst_rgb,
@@ -59,4 +63,4 @@ struct mp_pass_perf gl_sc_dispatch_compute(struct gl_shader_cache *sc,
 // The application can call this on errors, to reset the current shader. This
 // is normally done implicitly by gl_sc_dispatch_*
 void gl_sc_reset(struct gl_shader_cache *sc);
-void gl_sc_set_cache_dir(struct gl_shader_cache *sc, const char *dir);
+void gl_sc_set_cache_dir(struct gl_shader_cache *sc, char *dir);

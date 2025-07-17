@@ -20,8 +20,6 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "config.h"
-
 #include <stdlib.h>
 #include <stdbool.h>
 #include <inttypes.h>
@@ -224,7 +222,7 @@ int ebml_resync_cluster(struct mp_log *log, stream_t *s)
 #define E_S(str, count) EVALARGS(E_SN, str, count, N)
 #define FN(id, name, multiple, N) { id, multiple, offsetof(struct ebml_ ## N, name), offsetof(struct ebml_ ## N, n_ ## name), &ebml_##name##_desc},
 #define F(id, name, multiple) EVALARGS(FN, id, name, multiple, N)
-#include "ebml_defs.c"
+#include "ebml_defs.inc"
 #undef EVALARGS
 #undef SN
 #undef S
@@ -429,7 +427,7 @@ static void ebml_parse_element(struct ebml_parse_ctx *ctx, void *target,
                                                       uint32_t, num_elems[i]);
                 break;
             default:
-                abort();
+                MP_ASSERT_UNREACHABLE();
             }
         }
     }
@@ -582,7 +580,7 @@ static void ebml_parse_element(struct ebml_parse_ctx *ctx, void *target,
             MP_TRACE(ctx, "ebml_id %x\n", (unsigned)*idptr);
             break;
         default:
-            abort();
+            MP_ASSERT_UNREACHABLE();
         }
         *countptr += 1;
     error:
@@ -606,8 +604,12 @@ int ebml_read_element(struct stream *s, struct ebml_parse_ctx *ctx,
         MP_MSG(ctx, msglevel, "EBML element with unknown length - unsupported\n");
         return -1;
     }
-    if (length > 1000000000) {
-        MP_MSG(ctx, msglevel, "Refusing to read element over 100 MB in size\n");
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (length > (512 << 20)) {
+#else
+    if (length > (64 << 20)) {
+#endif
+        MP_MSG(ctx, msglevel, "Element too big (%" PRIu64 " MiB) - skipping\n", length >> 20);
         return -1;
     }
     ctx->talloc_ctx = talloc_size(NULL, length);

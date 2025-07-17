@@ -24,6 +24,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "config.h"
+
+#if HAVE_POSIX || defined(__MINGW32__)
+#include <strings.h>
+#include <unistd.h>
+#endif
+
 #include "osdep/compiler.h"
 #include "mpv_talloc.h"
 
@@ -99,6 +106,12 @@ extern const char mpv_copyright[];
 char *mp_format_time(double time, bool fractions);
 char *mp_format_time_fmt(const char *fmt, double time);
 
+// Formats a double value to a string with the specified precision.
+// Trailing zeros (and the dot) can be trimmed.
+// Optionally, a plus sign and a percent sign can be added.
+char *mp_format_double(void *talloc_ctx, double val, int precision,
+                       bool plus_sign, bool percent_sign, bool trim);
+
 struct mp_rect {
     int x0, y0;
     int x1, y1;
@@ -153,9 +166,31 @@ char **mp_dup_str_array(void *tctx, char **s);
 // This macro generally behaves like an assert(), except it will make sure to
 // kill the process even with NDEBUG.
 #define MP_HANDLE_OOM(x) do {   \
-        assert(x);              \
-        if (!(x))               \
+        void *oom_p_ = (x);     \
+        assert(oom_p_);         \
+        if (!oom_p_)            \
             abort();            \
     } while (0)
+
+#ifdef _MSC_VER
+#define strncasecmp _strnicmp
+#define strcasecmp _stricmp
+
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#endif
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
+#ifndef STDERR_FILENO
+#define STDERR_FILENO 2
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0
+#endif
+
+typedef long long ssize_t;
+typedef unsigned short mode_t;
+#endif
 
 #endif /* MPLAYER_MPCOMMON_H */

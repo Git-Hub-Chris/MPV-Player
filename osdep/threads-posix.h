@@ -23,6 +23,11 @@
 
 #include "common/common.h"
 #include "config.h"
+// We make use of NON-POSIX pthreads functions and certain systems
+// require this header to build without issues. (ex: OpenBSD)
+#if HAVE_BSD_THREAD_NAME
+#include <pthread_np.h>
+#endif
 #include "osdep/compiler.h"
 #include "timer.h"
 
@@ -97,7 +102,7 @@ typedef pthread_once_t  mp_once;
 typedef pthread_t       mp_thread_id;
 typedef pthread_t       mp_thread;
 
-#define MP_STATIC_COND_INITIALIZER (mp_cond){ .cond = PTHREAD_COND_INITIALIZER, .clk_id = CLOCK_REALTIME }
+#define MP_STATIC_COND_INITIALIZER { .cond = PTHREAD_COND_INITIALIZER, .clk_id = CLOCK_REALTIME }
 #define MP_STATIC_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
 #define MP_STATIC_ONCE_INITIALIZER PTHREAD_ONCE_INIT
 
@@ -214,7 +219,6 @@ static inline int mp_cond_timedwait_until(mp_cond *cond, mp_mutex *mutex, int64_
 
 #define mp_thread_create(t, f, a) pthread_create(t, NULL, f, a)
 #define mp_thread_join(t)         pthread_join(t, NULL)
-#define mp_thread_join_id(t)      pthread_join(t, NULL)
 #define mp_thread_detach          pthread_detach
 #define mp_thread_current_id      pthread_self
 #define mp_thread_id_equal(a, b)  ((a) == (b))
@@ -230,7 +234,7 @@ static inline void mp_thread_set_name(const char *name)
     }
 #elif HAVE_BSD_THREAD_NAME
     pthread_set_name_np(pthread_self(), name);
-#elif HAVE_OSX_THREAD_NAME
+#elif HAVE_MAC_THREAD_NAME
     pthread_setname_np(name);
 #endif
 }

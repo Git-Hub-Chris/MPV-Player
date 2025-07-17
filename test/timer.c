@@ -3,7 +3,6 @@
 #include "test_utils.h"
 
 #include <time.h>
-#include <sys/time.h>
 #include <limits.h>
 
 int main(void)
@@ -13,7 +12,7 @@ int main(void)
     /* timekeeping */
     {
         int64_t now = mp_time_ns();
-        assert_true(now > 0);
+        assert_true(now >= 0);
 
         mp_sleep_ns(MP_TIME_MS_TO_NS(10));
 

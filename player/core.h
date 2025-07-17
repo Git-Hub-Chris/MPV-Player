@@ -24,6 +24,7 @@
 #include "libmpv/client.h"
 
 #include "audio/aframe.h"
+#include "clipboard/clipboard.h"
 #include "common/common.h"
 #include "filters/f_output_chain.h"
 #include "filters/filter.h"
@@ -120,6 +121,7 @@ struct track {
     char *title;
     bool default_track, forced_track, dependent_track;
     bool visual_impaired_track, hearing_impaired_track;
+    bool forced_select; // if the track was selected because it is forced
     bool image;
     bool attached_picture;
     char *lang;
@@ -131,12 +133,17 @@ struct track {
     char *external_filename;
     bool auto_loaded;
 
+    bool demuxer_ready; // if more packets should be read (subtitles only)
+
     struct demuxer *demuxer;
     // Invariant: !stream || stream->demuxer == demuxer
     struct sh_stream *stream;
 
     // Current subtitle state (or cached state if selected==false).
     struct dec_sub *d_sub;
+
+    /* Heuristic for potentially redrawing subs. */
+    bool redraw_subs;
 
     // Current decoding state (NULL if selected==false)
     struct mp_decoder_wrapper *dec;
@@ -191,6 +198,8 @@ struct ao_chain {
     double start_pts;
     bool start_pts_known;
 
+    bool delaying_audio_start;
+
     struct track *track;
     struct mp_pin *filter_src;
     struct mp_pin *dec_src;
@@ -227,6 +236,7 @@ extern const int num_ptracks[STREAM_TYPE_COUNT];
 typedef struct MPContext {
     bool initialized;
     bool is_cli;
+    mp_thread core_thread;
     struct mpv_global *global;
     struct MPOpts *opts;
     struct mp_log *log;
@@ -276,6 +286,8 @@ typedef struct MPContext {
     enum stop_play_reason stop_play;
     bool playback_initialized; // playloop can be run/is running
     int error_playing;
+
+    struct clipboard_ctx *clipboard;
 
     // Return code to use with PT_QUIT
     int quit_custom_rc;
@@ -412,6 +424,9 @@ typedef struct MPContext {
     int max_frames;
     bool playing_msg_shown;
 
+    int remaining_file_loops;
+    int remaining_ab_loops;
+
     bool paused_for_cache;
     bool demux_underrun;
     double cache_stop_time;
@@ -428,7 +443,7 @@ typedef struct MPContext {
 
     struct mp_ipc_ctx *ipc_ctx;
 
-    int64_t builtin_script_ids[5];
+    int64_t builtin_script_ids[6];
 
     mp_mutex abort_lock;
 
@@ -469,6 +484,11 @@ struct mp_abort_entry {
                                 // (only valid if client_work_type set)
 };
 
+// U+25CB WHITE CIRCLE
+// U+25CF BLACK CIRCLE
+#define WHITE_CIRCLE "\xe2\x97\x8b"
+#define BLACK_CIRCLE "\xe2\x97\x8f"
+
 // audio.c
 void reset_audio_state(struct MPContext *mpctx);
 void reinit_audio_chain(struct MPContext *mpctx);
@@ -490,6 +510,7 @@ void audio_start_ao(struct MPContext *mpctx);
 void mp_parse_cfgfiles(struct MPContext *mpctx);
 void mp_load_auto_profiles(struct MPContext *mpctx);
 bool mp_load_playback_resume(struct MPContext *mpctx, const char *file);
+char *mp_get_playback_resume_dir(struct MPContext *mpctx);
 void mp_write_watch_later_conf(struct MPContext *mpctx);
 void mp_delete_watch_later_conf(struct MPContext *mpctx, const char *file);
 struct playlist_entry *mp_check_playlist_resume(struct MPContext *mpctx,
@@ -553,6 +574,8 @@ void update_window_title(struct MPContext *mpctx, bool force);
 void error_on_track(struct MPContext *mpctx, struct track *track);
 int stream_dump(struct MPContext *mpctx, const char *source_filename);
 double get_track_seek_offset(struct MPContext *mpctx, struct track *track);
+bool str_in_list(bstr str, char **list);
+char *mp_format_track_metadata(void *ctx, struct track *t, bool add_lang);
 
 // osd.c
 void set_osd_bar(struct MPContext *mpctx, int type,
@@ -583,7 +606,6 @@ double get_time_length(struct MPContext *mpctx);
 double get_start_time(struct MPContext *mpctx, int dir);
 double get_current_time(struct MPContext *mpctx);
 double get_playback_time(struct MPContext *mpctx);
-int get_percent_pos(struct MPContext *mpctx);
 double get_current_pos_ratio(struct MPContext *mpctx, bool use_range);
 int get_current_chapter(struct MPContext *mpctx);
 char *chapter_display_name(struct MPContext *mpctx, int chapter);
@@ -621,6 +643,7 @@ void mp_load_builtin_scripts(struct MPContext *mpctx);
 int64_t mp_load_user_script(struct MPContext *mpctx, const char *fname);
 
 // sub.c
+void redraw_subs(struct MPContext *mpctx);
 void reset_subtitle_state(struct MPContext *mpctx);
 void reinit_sub(struct MPContext *mpctx, struct track *track);
 void reinit_sub_all(struct MPContext *mpctx);

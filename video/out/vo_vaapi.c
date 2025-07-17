@@ -406,18 +406,11 @@ static void va_pool_set_allocator(struct mp_image_pool *pool,
     mp_image_pool_set_lru(pool);
 }
 
-static void flush_output_surfaces(struct priv *p)
-{
-    for (int n = 0; n < MAX_OUTPUT_SURFACES; n++)
-        mp_image_unrefp(&p->output_surfaces[n]);
-    p->output_surface = 0;
-    p->visible_surface = 0;
-}
-
 // See flush_surfaces() remarks - the same applies.
 static void free_video_specific(struct priv *p)
 {
-    flush_output_surfaces(p);
+    p->output_surface = 0;
+    p->visible_surface = 0;
 
     mp_image_unrefp(&p->black_surface);
 
@@ -430,7 +423,6 @@ static void free_video_specific(struct priv *p)
 
 static bool alloc_swdec_surfaces(struct priv *p, int w, int h, int imgfmt)
 {
-    free_video_specific(p);
     for (int i = 0; i < MAX_OUTPUT_SURFACES; i++) {
         p->swdec_surfaces[i] = mp_image_pool_get(p->pool, IMGFMT_VAAPI, w, h);
         if (va_surface_alloc_imgfmt(p, p->swdec_surfaces[i], imgfmt) < 0)
@@ -519,7 +511,7 @@ static bool render_to_screen(struct priv *p, struct mp_image *mpi)
         CHECK_VA_STATUS(p, "vaAssociateSubpicture()");
     }
 
-    int flags = va_get_colorspace_flag(p->image_params.color.space) |
+    int flags = va_get_colorspace_flag(p->image_params.repr.sys) |
                 p->scaling | VA_FRAME_PICTURE;
     status = vaPutSurface(p->display,
                           surface,
@@ -563,7 +555,7 @@ static void get_vsync(struct vo *vo, struct vo_vsync_info *info)
     present_sync_get_info(x11->present, info);
 }
 
-static void draw_frame(struct vo *vo, struct vo_frame *frame)
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *p = vo->priv;
     struct mp_image *mpi = frame->current;
@@ -572,17 +564,18 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
         struct mp_image *dst = p->swdec_surfaces[p->output_surface];
         if (!dst || va_surface_upload(p, dst, mpi) < 0) {
             MP_WARN(vo, "Could not upload surface.\n");
-            talloc_free(mpi);
-            return;
+            goto done;
         }
         mp_image_copy_attributes(dst, mpi);
-        mpi = mp_image_new_ref(dst);
+        mpi = dst;
     }
 
-    talloc_free(p->output_surfaces[p->output_surface]);
     p->output_surfaces[p->output_surface] = mpi;
 
     draw_osd(vo);
+
+done:
+    return VO_TRUE;
 }
 
 static void free_subpicture(struct priv *p, struct vaapi_osd_image *img)

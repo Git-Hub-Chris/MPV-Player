@@ -1,8 +1,5 @@
 #include <windows.h>
-
-#ifndef BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE
-#define BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE (0x0001)
-#endif
+#include <shellapi.h>
 
 #include "common/common.h"
 #include "osdep/io.h"
@@ -12,12 +9,12 @@
 #ifndef HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION
 
 #define HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION  1
-enum { HeapOptimizeResources = 3 };
+#define HeapOptimizeResources ((HEAP_INFORMATION_CLASS)3)
 
-struct HEAP_OPTIMIZE_RESOURCES_INFORMATION {
+typedef struct HEAP_OPTIMIZE_RESOURCES_INFORMATION {
     DWORD Version;
     DWORD Flags;
-};
+} HEAP_OPTIMIZE_RESOURCES_INFORMATION;
 
 #endif
 
@@ -43,7 +40,7 @@ static void microsoft_nonsense(void)
     HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
 
     // Allow heap cache optimization and memory decommit
-    struct HEAP_OPTIMIZE_RESOURCES_INFORMATION heap_info = {
+    HEAP_OPTIMIZE_RESOURCES_INFORMATION heap_info = {
         .Version = HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION
     };
     HeapSetInformation(NULL, HeapOptimizeResources, &heap_info,
@@ -56,7 +53,7 @@ static void microsoft_nonsense(void)
                       BASE_SEARCH_PATH_PERMANENT);
 }
 
-int main(int argc_, char **argv_)
+int main(void)
 {
     microsoft_nonsense();
 
@@ -90,4 +87,9 @@ int main(int argc_, char **argv_)
 
     talloc_free(argv_u8);
     return ret;
+}
+
+int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, LPSTR cmdline, int cmdshow)
+{
+    return main();
 }

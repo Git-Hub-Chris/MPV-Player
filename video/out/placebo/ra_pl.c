@@ -534,7 +534,7 @@ static void renderpass_run_pl(struct ra *ra,
                 .data = val->data,
             });
         } else {
-            struct pl_desc_binding bind;
+            struct pl_desc_binding bind = {0};
             switch (inp->type) {
             case RA_VARTYPE_TEX:
             case RA_VARTYPE_IMG_W: {
@@ -674,4 +674,3 @@ static struct ra_fns ra_fns_pl = {
     .timer_start            = timer_start_pl,
     .timer_stop             = timer_stop_pl,
 };
-

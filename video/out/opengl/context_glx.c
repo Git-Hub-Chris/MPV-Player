@@ -25,7 +25,7 @@
 #define GLX_CONTEXT_FLAGS_ARB                   0x2094
 #define GLX_CONTEXT_PROFILE_MASK_ARB            0x9126
 #ifndef __APPLE__
-// These are respectively 0x00000001 and 0x00000002 on OSX
+// These are respectively 0x00000001 and 0x00000002 on macOS
 #define GLX_CONTEXT_DEBUG_BIT_ARB               0x0001
 #define GLX_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB  0x0002
 #endif
@@ -342,6 +342,7 @@ static void glx_wait_events(struct ra_ctx *ctx, int64_t until_time_ns)
 const struct ra_ctx_fns ra_ctx_glx = {
     .type           = "opengl",
     .name           = "x11",
+    .description    = "X11/GLX",
     .reconfig       = glx_reconfig,
     .control        = glx_control,
     .wakeup         = glx_wakeup,

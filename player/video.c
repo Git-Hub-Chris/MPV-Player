@@ -120,6 +120,7 @@ void reset_video_state(struct MPContext *mpctx)
     mpctx->drop_message_shown = 0;
     mpctx->display_sync_drift_dir = 0;
     mpctx->display_sync_error = 0;
+    mpctx->display_sync_active = 0;
 
     mpctx->video_status = mpctx->vo_chain ? STATUS_SYNCING : STATUS_EOF;
 }
@@ -129,9 +130,9 @@ void uninit_video_out(struct MPContext *mpctx)
     uninit_video_chain(mpctx);
     if (mpctx->video_out) {
         vo_destroy(mpctx->video_out);
+        mpctx->video_out = NULL;
         mp_notify(mpctx, MPV_EVENT_VIDEO_RECONFIG, NULL);
     }
-    mpctx->video_out = NULL;
 }
 
 static void vo_chain_uninit(struct vo_chain *vo_c)
@@ -343,10 +344,9 @@ static void adjust_sync(struct MPContext *mpctx, double v_pts, double frame_time
 {
     struct MPOpts *opts = mpctx->opts;
 
-    if (mpctx->audio_status == STATUS_EOF)
+    if (mpctx->audio_status != STATUS_PLAYING)
         return;
 
-    mpctx->delay -= frame_time;
     double a_pts = written_audio_pts(mpctx) + opts->audio_delay - mpctx->delay;
     double av_delay = a_pts - v_pts;
 
@@ -388,7 +388,9 @@ static void handle_new_frame(struct MPContext *mpctx)
         }
     }
     mpctx->time_frame += frame_time / mpctx->video_speed;
-    if (frame_time)
+    if (mpctx->ao_chain && !mpctx->ao_chain->delaying_audio_start)
+        mpctx->delay -= frame_time;
+    if (mpctx->video_status >= STATUS_PLAYING)
         adjust_sync(mpctx, pts, frame_time);
     MP_TRACE(mpctx, "frametime=%5.3f\n", frame_time);
 }
@@ -818,8 +820,9 @@ static void handle_display_sync_frame(struct MPContext *mpctx,
 
     mpctx->display_sync_active = false;
 
-    if (!VS_IS_DISP(mode))
+    if (!VS_IS_DISP(mode) || !vo_is_visible(vo))
         return;
+
     bool resample = mode == VS_DISP_RESAMPLE || mode == VS_DISP_RESAMPLE_VDROP ||
                     mode == VS_DISP_RESAMPLE_NONE;
     bool drop = mode == VS_DISP_VDROP || mode == VS_DISP_RESAMPLE ||
@@ -1041,19 +1044,6 @@ static void apply_video_crop(struct MPContext *mpctx, struct vo *vo)
     }
 }
 
-static bool video_reconfig_needed(const struct mp_image_params *p1,
-                                  const struct mp_image_params *p2)
-{
-    return p1->imgfmt != p2->imgfmt ||
-           p1->hw_subfmt != p2->hw_subfmt ||
-           p1->w != p2->w || p1->h != p2->h ||
-           p1->p_w != p2->p_w || p1->p_h != p2->p_h ||
-           p1->force_window != p2->force_window ||
-           p1->rotate != p2->rotate ||
-           p1->stereo3d != p2->stereo3d ||
-           !mp_rect_equals(&p1->crop, &p2->crop);
-}
-
 void write_video(struct MPContext *mpctx)
 {
     struct MPOpts *opts = mpctx->opts;
@@ -1176,10 +1166,12 @@ void write_video(struct MPContext *mpctx)
 
     // Filter output is different from VO input?
     struct mp_image_params *p = &mpctx->next_frames[0]->params;
-    if (!vo->params || video_reconfig_needed(p, vo->params)) {
+    if (!vo->params || !mp_image_params_static_equal(p, vo->params)) {
         // Changing config deletes the current frame; wait until it's finished.
-        if (vo_still_displaying(vo))
+        if (vo_still_displaying(vo)) {
+            vo_request_wakeup_on_done(vo);
             return;
+        }
 
         const struct vo_driver *info = mpctx->video_out->driver;
         char extra[20] = {0};
@@ -1201,6 +1193,11 @@ void write_video(struct MPContext *mpctx)
             goto error;
         }
         mp_notify(mpctx, MPV_EVENT_VIDEO_RECONFIG, NULL);
+    } else {
+        // Update parameters that don't require reconfiguring the VO.
+        mp_mutex_lock(&vo->params_mutex);
+        mp_image_params_update_dynamic(vo->params, p, vo->has_peak_detect_values);
+        mp_mutex_unlock(&vo->params_mutex);
     }
 
     mpctx->time_frame -= get_relative_time(mpctx);
@@ -1253,11 +1250,8 @@ void write_video(struct MPContext *mpctx)
     if (opts->untimed || vo->driver->untimed)
         diff = -1; // disable frame dropping and aspects of frame timing
     if (diff >= 0) {
-        // expected A/V sync correction is ignored
         diff /= mpctx->video_speed;
-        if (mpctx->time_frame < 0)
-            diff += mpctx->time_frame;
-        frame->duration = MPCLAMP(diff, 0, 10) * 1e9;
+        frame->duration = MP_TIME_S_TO_NS(MPCLAMP(diff, 0, 10));
     }
 
     mpctx->video_pts = mpctx->next_frames[0]->pts;

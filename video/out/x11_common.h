@@ -25,6 +25,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+
 #include "common/common.h"
 
 #include "config.h"
@@ -61,7 +62,7 @@ struct vo_x11_state {
     int display_is_local;
     int ws_width;
     int ws_height;
-    int dpi_scale;
+    double dpi_scale;
     struct mp_rect screenrc;
     char *window_title;
 
@@ -71,7 +72,6 @@ struct vo_x11_state {
 
     int xrandr_event;
     bool has_mesa;
-    bool has_nvidia;
 
     bool screensaver_enabled;
     bool dpms_touched;
@@ -93,6 +93,8 @@ struct vo_x11_state {
     bool pseudo_mapped; // not necessarily mapped, but known window size
     int fs;     // whether we assume the window is in fullscreen mode
 
+    bool init_fs; // whether mpv was launched with --fs
+
     bool mouse_cursor_visible; // whether we want the cursor to be visible (only
                                // takes effect when the window is focused)
     bool mouse_cursor_set; // whether the cursor is *currently* *hidden*
@@ -102,6 +104,7 @@ struct vo_x11_state {
     // Current actual window position (updated on window move/resize events).
     struct mp_rect winrc;
     double current_display_fps;
+    struct m_geometry last_geometry;
 
     int pending_vo_events;
 
@@ -120,9 +123,6 @@ struct vo_x11_state {
     bool size_changed_during_fs;
     bool pos_changed_during_fs;
 
-    /* One of the autofit/geometry options changed at runtime. */
-    bool geometry_change;
-
     XComposeStatus compose_status;
 
     /* XShm stuff */
@@ -137,10 +137,9 @@ struct vo_x11_state {
     Atom dnd_requested_action;
     Window dnd_src_window;
 
-    /* dragging the window */
-    bool win_drag_button1_down;
-
     Atom icc_profile_property;
+
+    XEvent last_button_event;
 };
 
 bool vo_x11_init(struct vo *vo);

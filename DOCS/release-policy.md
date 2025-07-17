@@ -24,10 +24,15 @@ While on master:
 
 - Update the `RELEASE_NOTES` file, replacing the previous release notes.
 
-- Update the `VERSION` file.
+- Update the `MPV_VERSION` file.
 
-- Update `DOCS/client-api-changes.rst` and `DOCS/interface-changes.rst`
-  (in particular, update the last version numbers if necessary)
+- Update `DOCS/client-api-changes.rst` (in particular, update the last version
+  number if necessary)
+
+- Run `TOOLS/gen-interface-changes.py` to refresh `DOCS/interface-changes.rst`,
+  edit manually as necessary.
+
+- Delete all `.txt` files in the `DOCS/interface-changes` directory except for `example.txt`.
 
 - Create signed commit with changes.
 
@@ -38,7 +43,7 @@ While on master:
 - Create a new GitHub release using the content of `RELEASE_NOTES` related to
   the new version.
 
-- Readd -UNKNOWN suffix to version in `VERSION` file.
+- Re-add -UNKNOWN suffix to version in `MPV_VERSION` file.
 
 If necessary (to e.g. exclude commits already on master), the release can
 be done on a branch with different commit history. The release branch **must**

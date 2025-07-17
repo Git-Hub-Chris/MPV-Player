@@ -75,7 +75,7 @@ struct priv {
     void (EGLAPIENTRY *EGLImageTargetTexture2DOES)(GLenum, GLeglImageOES);
 };
 
-const static struct { const char *symbol; int offset; } lib_functions[] = {
+static const struct { const char *symbol; int offset; } lib_functions[] = {
     { "AImageReader_newWithUsage", offsetof(struct priv_owner, AImageReader_newWithUsage) },
     { "AImageReader_getWindow", offsetof(struct priv_owner, AImageReader_getWindow) },
     { "AImageReader_setImageListener", offsetof(struct priv_owner, AImageReader_setImageListener) },
@@ -138,6 +138,10 @@ static int init(struct ra_hwdec *hw)
     if (!gl_check_extension(exts, "EGL_ANDROID_image_native_buffer"))
         return -1;
 
+    JNIEnv *env = MP_JNI_GET_ENV(hw);
+    if (!env)
+        return -1;
+
     if (!load_lib_functions(p, hw->log))
         return -1;
 
@@ -167,8 +171,6 @@ static int init(struct ra_hwdec *hw)
     }
     assert(window);
 
-    JNIEnv *env = MP_JNI_GET_ENV(hw);
-    assert(env);
     jobject surface = p->ANativeWindow_toSurface(env, window);
     p->surface = (*env)->NewGlobalRef(env, surface);
     (*env)->DeleteLocalRef(env, surface);
@@ -192,10 +194,10 @@ static int init(struct ra_hwdec *hw)
 static void uninit(struct ra_hwdec *hw)
 {
     struct priv_owner *p = hw->priv;
-    JNIEnv *env = MP_JNI_GET_ENV(hw);
-    assert(env);
 
     if (p->surface) {
+        JNIEnv *env = MP_JNI_GET_ENV(hw);
+        assert(env);
         (*env)->DeleteGlobalRef(env, p->surface);
         p->surface = NULL;
     }
@@ -390,6 +392,7 @@ const struct ra_hwdec_driver ra_hwdec_aimagereader = {
     .name = "aimagereader",
     .priv_size = sizeof(struct priv_owner),
     .imgfmts = {IMGFMT_MEDIACODEC, 0},
+    .device_type = AV_HWDEVICE_TYPE_MEDIACODEC,
     .init = init,
     .uninit = uninit,
     .mapper = &(const struct ra_hwdec_mapper_driver){

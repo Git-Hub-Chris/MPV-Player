@@ -27,6 +27,10 @@
 
 #include "libmpv.h"
 
+#if HAVE_MACOS_COCOA_CB
+#include "osdep/mac/app_bridge.h"
+#endif
+
 /*
  * mpv_render_context is managed by the host application - the host application
  * can access it any time, even if the VO is destroyed (or not created yet).
@@ -481,7 +485,7 @@ int mpv_render_context_get_info(mpv_render_context *ctx,
     return res;
 }
 
-static void draw_frame(struct vo *vo, struct vo_frame *frame)
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct vo_priv *p = vo->priv;
     struct mpv_render_context *ctx = p->ctx;
@@ -494,6 +498,7 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
     mp_mutex_unlock(&ctx->lock);
 
     update(ctx);
+    return VO_TRUE;
 }
 
 static void flip_page(struct vo *vo)
@@ -608,9 +613,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
     case VOCTRL_PAUSE:
         vo->want_redraw = true;
         return VO_TRUE;
-    case VOCTRL_SET_EQUALIZER:
-        vo->want_redraw = true;
-        return VO_TRUE;
     case VOCTRL_SET_PANSCAN:
         mp_mutex_lock(&ctx->lock);
         ctx->need_resize = true;
@@ -708,6 +710,13 @@ static void uninit(struct vo *vo)
 
 static int preinit(struct vo *vo)
 {
+#if HAVE_MACOS_COCOA_CB
+    cocoa_init_cocoa_cb();
+#else
+    if (vo->probing)
+        return -1;
+#endif
+
     struct vo_priv *p = vo->priv;
 
     struct mpv_render_context *ctx =

@@ -50,7 +50,9 @@ enum wasapi_thread_state {
     WASAPI_THREAD_FEED = 0,
     WASAPI_THREAD_RESUME,
     WASAPI_THREAD_RESET,
-    WASAPI_THREAD_SHUTDOWN
+    WASAPI_THREAD_SHUTDOWN,
+    WASAPI_THREAD_PAUSE,
+    WASAPI_THREAD_UNPAUSE,
 };
 
 typedef struct wasapi_state {
@@ -63,6 +65,7 @@ typedef struct wasapi_state {
     HANDLE hWake;            // thread wakeup event
     atomic_int thread_state; // enum wasapi_thread_state (what to do on wakeup)
     struct mp_dispatch_queue *dispatch; // for volume/mute/session display
+    HANDLE hUserWake;        // mpv-requested wakeup event
 
     // for setting the audio thread priority
     HANDLE hTask;
@@ -88,6 +91,7 @@ typedef struct wasapi_state {
 
     // ao options
     int opt_exclusive;
+    int opt_exclusive_buffer; // exclusive mode buffer duration in us
 
     // format info
     WAVEFORMATEXTENSIBLE format;

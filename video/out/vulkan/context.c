@@ -17,17 +17,13 @@
 
 #include "config.h"
 
-#if HAVE_LAVU_UUID
 #include <libavutil/uuid.h>
-#else
-#include "misc/uuid.h"
-#endif
 
 #include "options/m_config.h"
 #include "video/out/placebo/ra_pl.h"
+#include "video/out/placebo/utils.h"
 
 #include "context.h"
-#include "utils.h"
 
 struct vulkan_opts {
     char *device; // force a specific GPU
@@ -37,39 +33,32 @@ struct vulkan_opts {
     bool async_compute;
 };
 
-static int vk_validate_dev(struct mp_log *log, const struct m_option *opt,
-                           struct bstr name, const char **value)
+static inline OPT_STRING_VALIDATE_FUNC(vk_validate_dev)
 {
-    struct bstr param = bstr0(*value);
     int ret = M_OPT_INVALID;
-    VkResult res;
+    void *ta_ctx = talloc_new(NULL);
+    pl_log pllog = mppl_log_create(ta_ctx, log);
+    if (!pllog)
+        goto done;
 
     // Create a dummy instance to validate/list the devices
-    VkInstanceCreateInfo info = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pApplicationInfo = &(VkApplicationInfo) {
-            .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-            .apiVersion = VK_API_VERSION_1_1,
-        }
-    };
+    mppl_log_set_probing(pllog, true);
+    pl_vk_inst inst = pl_vk_inst_create(pllog, pl_vk_inst_params());
+    mppl_log_set_probing(pllog, false);
+    if (!inst)
+        goto done;
 
-    VkInstance inst;
-    VkPhysicalDevice *devices = NULL;
     uint32_t num = 0;
-
-    res = vkCreateInstance(&info, NULL, &inst);
+    VkResult res = vkEnumeratePhysicalDevices(inst->instance, &num, NULL);
     if (res != VK_SUCCESS)
         goto done;
 
-    res = vkEnumeratePhysicalDevices(inst, &num, NULL);
+    VkPhysicalDevice *devices = talloc_array(ta_ctx, VkPhysicalDevice, num);
+    res = vkEnumeratePhysicalDevices(inst->instance, &num, devices);
     if (res != VK_SUCCESS)
         goto done;
 
-    devices = talloc_array(NULL, VkPhysicalDevice, num);
-    res = vkEnumeratePhysicalDevices(inst, &num, devices);
-    if (res != VK_SUCCESS)
-        goto done;
-
+    struct bstr param = bstr0(*value);
     bool help = bstr_equals0(param, "help");
     if (help) {
         mp_info(log, "Available vulkan devices:\n");
@@ -111,7 +100,9 @@ static int vk_validate_dev(struct mp_log *log, const struct m_option *opt,
                BSTR_P(param));
 
 done:
-    talloc_free(devices);
+    pl_vk_inst_destroy(&inst);
+    pl_log_destroy(&pllog);
+    talloc_free(ta_ctx);
     return ret;
 }
 
@@ -128,7 +119,6 @@ const struct m_sub_options vulkan_conf = {
         {"vulkan-queue-count", OPT_INT(queue_count), M_RANGE(1, 8)},
         {"vulkan-async-transfer", OPT_BOOL(async_transfer)},
         {"vulkan-async-compute", OPT_BOOL(async_compute)},
-        {"vulkan-disable-events", OPT_REMOVED("Unused")},
         {0}
     },
     .size = sizeof(struct vulkan_opts),
@@ -138,6 +128,7 @@ const struct m_sub_options vulkan_conf = {
         .async_transfer = true,
         .async_compute = true,
     },
+    .change_flags = UPDATE_VO,
 };
 
 struct priv {
@@ -178,6 +169,85 @@ void ra_vk_ctx_uninit(struct ra_ctx *ctx)
     TA_FREEP(&ctx->swapchain);
 }
 
+pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
+                             pl_vk_inst vkinst,
+                             pl_log pllog,
+                             VkSurfaceKHR surface,
+                             bool allow_software)
+{
+    VkPhysicalDeviceFeatures2 features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+    };
+
+    /*
+     * Request the additional extensions and features required to make full use
+     * of the ffmpeg Vulkan hwcontext and video decoding capability.
+     */
+    const char *opt_extensions[] = {
+        VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
+        VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,
+#ifdef VK_EXT_SHADER_OBJECT_EXTENSION_NAME
+        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+#endif
+        VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
+        VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
+        VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
+        VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
+        "VK_KHR_video_decode_av1", /* VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME */
+    };
+
+#ifdef VK_EXT_SHADER_OBJECT_EXTENSION_NAME
+    VkPhysicalDeviceShaderObjectFeaturesEXT shader_object_feature = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .shaderObject = true,
+    };
+#endif
+
+    VkPhysicalDeviceDescriptorBufferFeaturesEXT descriptor_buffer_feature = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
+#ifdef VK_EXT_SHADER_OBJECT_EXTENSION_NAME
+        .pNext = &shader_object_feature,
+#endif
+        .descriptorBuffer = true,
+        .descriptorBufferPushDescriptors = true,
+    };
+
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_feature = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
+        .pNext = &descriptor_buffer_feature,
+        .shaderBufferFloat32Atomics = true,
+        .shaderBufferFloat32AtomicAdd = true,
+    };
+
+    features.pNext = &atomic_float_feature;
+
+    AVUUID param_uuid = { 0 };
+    bool is_uuid = opts->device &&
+                   av_uuid_parse(opts->device, param_uuid) == 0;
+
+    assert(pllog);
+    assert(vkinst);
+    struct pl_vulkan_params device_params = {
+        .instance = vkinst->instance,
+        .get_proc_addr = vkinst->get_proc_addr,
+        .surface = surface,
+        .allow_software = allow_software,
+        .async_transfer = opts->async_transfer,
+        .async_compute = opts->async_compute,
+        .queue_count = opts->queue_count,
+        .extra_queues = VK_QUEUE_VIDEO_DECODE_BIT_KHR,
+        .opt_extensions = opt_extensions,
+        .num_opt_extensions = MP_ARRAY_SIZE(opt_extensions),
+        .features = &features,
+        .device_name = is_uuid ? NULL : opts->device,
+    };
+    if (is_uuid)
+        av_uuid_copy(device_params.device_uuid, param_uuid);
+
+    return pl_vulkan_create(pllog, &device_params);
+
+}
+
 bool ra_vk_ctx_init(struct ra_ctx *ctx, struct mpvk_ctx *vk,
                     struct ra_vk_ctx_params params,
                     VkPresentModeKHR preferred_mode)
@@ -191,68 +261,8 @@ bool ra_vk_ctx_init(struct ra_ctx *ctx, struct mpvk_ctx *vk,
     p->params = params;
     p->opts = mp_get_config_group(p, ctx->global, &vulkan_conf);
 
-    VkPhysicalDeviceFeatures2 features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-    };
-
-#if HAVE_VULKAN_INTEROP
-    /*
-     * Request the additional extensions and features required to make full use
-     * of the ffmpeg Vulkan hwcontext and video decoding capability.
-     */
-    const char *opt_extensions[] = {
-        VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
-        VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,
-        VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
-        VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
-        VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
-        VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
-        // This is a literal string as it's not in the official headers yet.
-        "VK_MESA_video_decode_av1",
-    };
-
-    VkPhysicalDeviceDescriptorBufferFeaturesEXT descriptor_buffer_feature = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
-        .pNext = NULL,
-        .descriptorBuffer = true,
-        .descriptorBufferPushDescriptors = true,
-    };
-
-    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_feature = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
-        .pNext = &descriptor_buffer_feature,
-        .shaderBufferFloat32Atomics = true,
-        .shaderBufferFloat32AtomicAdd = true,
-    };
-
-    features.pNext = &atomic_float_feature;
-#endif
-
-    AVUUID param_uuid = { 0 };
-    bool is_uuid = p->opts->device &&
-                   av_uuid_parse(p->opts->device, param_uuid) == 0;
-
-    assert(vk->pllog);
-    assert(vk->vkinst);
-    struct pl_vulkan_params device_params = {
-        .instance = vk->vkinst->instance,
-        .get_proc_addr = vk->vkinst->get_proc_addr,
-        .surface = vk->surface,
-        .async_transfer = p->opts->async_transfer,
-        .async_compute = p->opts->async_compute,
-        .queue_count = p->opts->queue_count,
-#if HAVE_VULKAN_INTEROP
-        .extra_queues = VK_QUEUE_VIDEO_DECODE_BIT_KHR,
-        .opt_extensions = opt_extensions,
-        .num_opt_extensions = MP_ARRAY_SIZE(opt_extensions),
-#endif
-        .features = &features,
-        .device_name = is_uuid ? NULL : p->opts->device,
-    };
-    if (is_uuid)
-        av_uuid_copy(device_params.device_uuid, param_uuid);
-
-    vk->vulkan = pl_vulkan_create(vk->pllog, &device_params);
+    vk->vulkan = mppl_create_vulkan(p->opts, vk->vkinst, vk->pllog, vk->surface,
+                                    ctx->opts.allow_sw);
     if (!vk->vulkan)
         goto error;
 
@@ -266,9 +276,6 @@ bool ra_vk_ctx_init(struct ra_ctx *ctx, struct mpvk_ctx *vk,
         .surface = vk->surface,
         .present_mode = preferred_mode,
         .swapchain_depth = ctx->vo->opts->swapchain_depth,
-        // mpv already handles resize events, so gracefully allow suboptimal
-        // swapchains to exist in order to make resizing even smoother
-        .allow_suboptimal = true,
     };
 
     if (p->opts->swap_mode >= 0) // user override
@@ -312,7 +319,11 @@ char *ra_vk_ctx_get_device_name(struct ra_ctx *ctx)
 
 static int color_depth(struct ra_swapchain *sw)
 {
-    return 0; // TODO: implement this somehow?
+    struct priv *p = sw->priv;
+    if (p->params.color_depth)
+        return p->params.color_depth(sw->ctx);
+
+    return -1;
 }
 
 static bool start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)

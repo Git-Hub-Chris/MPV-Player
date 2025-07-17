@@ -16,6 +16,7 @@
  */
 
 #include <CoreAudio/HostTime.h>
+#include <libavutil/mathematics.h>
 
 #include "ao.h"
 #include "internal.h"
@@ -26,8 +27,17 @@
 #include "ao_coreaudio_chmap.h"
 #include "ao_coreaudio_properties.h"
 #include "ao_coreaudio_utils.h"
+#include "osdep/mac/compat.h"
+
+// The timeout for stopping the audio unit after being reset. This allows the
+// device to sleep after playback paused. The duration is chosen to match the
+// behavior of AVFoundation.
+#define IDLE_TIME 7 * NSEC_PER_SEC
 
 struct priv {
+    // This must be put in the front
+    struct coreaudio_cb_sem sem;
+
     AudioDeviceID device;
     AudioUnit audio_unit;
 
@@ -37,6 +47,12 @@ struct priv {
     AudioStreamID original_asbd_stream;
 
     bool change_physical_format;
+
+    // Block that is executed after `IDLE_TIME` to stop audio output unit.
+    dispatch_block_t idle_work;
+    dispatch_queue_t queue;
+
+    int hotplug_cb_registration_times;
 };
 
 static int64_t ca_get_hardware_latency(struct ao *ao) {
@@ -78,14 +94,8 @@ static OSStatus render_cb_lpcm(void *ctx, AudioUnitRenderActionFlags *aflags,
 
     int64_t end = mp_time_ns();
     end += p->hw_latency_ns + ca_get_latency(ts) + ca_frames_to_ns(ao, frames);
-    int samples = ao_read_data_nonblocking(ao, planes, frames, end);
-
-    if (samples == 0)
-        *aflags |= kAudioUnitRenderAction_OutputIsSilence;
-
-    for (int n = 0; n < buffer_list->mNumberBuffers; n++)
-        buffer_list->mBuffers[n].mDataByteSize = samples * ao->sstride;
-
+    // don't use the returned sample count since CoreAudio always expects full frames
+    ao_read_data(ao, planes, frames, end, NULL, true, true);
     return noErr;
 }
 
@@ -126,8 +136,11 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg)
     return CONTROL_UNKNOWN;
 }
 
-static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd);
+static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd, AudioChannelLayout *layout, size_t layout_size);
 static void init_physical_format(struct ao *ao);
+static void reinit_latency(struct ao *ao);
+static bool register_hotplug_cb(struct ao *ao);
+static void unregister_hotplug_cb(struct ao *ao);
 
 static bool reinit_device(struct ao *ao) {
     struct priv *p = ao->priv;
@@ -154,6 +167,9 @@ static int init(struct ao *ao)
     if (!reinit_device(ao))
         goto coreaudio_error;
 
+    if (!register_hotplug_cb(ao))
+        goto coreaudio_error;
+
     if (p->change_physical_format)
         init_physical_format(ao);
 
@@ -162,9 +178,20 @@ static int init(struct ao *ao)
 
     AudioStreamBasicDescription asbd;
     ca_fill_asbd(ao, &asbd);
+    size_t layout_size;
+    AudioChannelLayout *layout = ca_get_acl(ao, &layout_size);
 
-    if (!init_audiounit(ao, asbd))
+    bool r = init_audiounit(ao, asbd, layout, layout_size);
+    talloc_free(layout);
+
+    if (!r)
         goto coreaudio_error;
+
+    reinit_latency(ao);
+    ao->device_buffer = av_rescale(p->hw_latency_ns, ao->samplerate, 1000000000) * 2;
+
+    p->queue = dispatch_queue_create("io.mpv.coreaudio_stop_during_idle",
+                                     DISPATCH_QUEUE_SERIAL);
 
     return CONTROL_OK;
 
@@ -251,7 +278,7 @@ coreaudio_error:
     return;
 }
 
-static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd)
+static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd, AudioChannelLayout *layout, size_t layout_size)
 {
     OSStatus err;
     uint32_t size;
@@ -295,7 +322,12 @@ static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd)
     CHECK_CA_ERROR_L(coreaudio_error_audiounit,
                      "can't link audio unit to selected device");
 
-    p->hw_latency_ns = ca_get_hardware_latency(ao);
+    err = AudioUnitSetProperty(p->audio_unit,
+                               kAudioOutputUnitProperty_ChannelMap,
+                               kAudioUnitScope_Global, 0, layout, layout_size);
+
+    CHECK_CA_ERROR_L(coreaudio_error_audiounit,
+                     "unable to set the input channel layout on the audio unit");
 
     AURenderCallbackStruct render_cb = (AURenderCallbackStruct) {
         .inputProc       = render_cb_lpcm,
@@ -320,24 +352,96 @@ coreaudio_error:
     return false;
 }
 
-static void reset(struct ao *ao)
+static void reinit_latency(struct ao *ao)
 {
+    struct priv *p = ao->priv;
+
+    p->hw_latency_ns = ca_get_hardware_latency(ao);
+}
+
+static void stop(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+    OSStatus err = AudioOutputUnitStop(p->audio_unit);
+    CHECK_CA_WARN("can't stop audio unit");
+}
+
+static void cancel_and_release_idle_work(struct priv *p)
+{
+    if (!p->idle_work)
+        return;
+
+    dispatch_block_cancel(p->idle_work);
+    Block_release(p->idle_work);
+    p->idle_work = NULL;
+}
+
+static void stop_after_idle_time(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+
+    cancel_and_release_idle_work(p);
+
+    p->idle_work = dispatch_block_create(0, ^{
+        MP_VERBOSE(ao, "Stopping audio unit due to idle timeout\n");
+        stop(ao);
+    });
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, IDLE_TIME),
+                   p->queue, p->idle_work);
+}
+
+static void _reset(void *_ao)
+{
+    struct ao *ao = (struct ao *)_ao;
     struct priv *p = ao->priv;
     OSStatus err = AudioUnitReset(p->audio_unit, kAudioUnitScope_Global, 0);
     CHECK_CA_WARN("can't reset audio unit");
+
+    // Until the audio unit is stopped the macOS daemon coreaudiod continues to
+    // consume CPU and prevent macOS from sleeping. Immediately stopping the
+    // audio unit would be disruptive for short pause/resume cycles as
+    // restarting the audio unit takes a noticeable amount of time when a
+    // wireless audio device is being used. Instead the audio unit is stopped
+    // after a delay if it remains idle.
+    stop_after_idle_time(ao);
+}
+
+static void reset(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+    // Must dispatch to serialize reset, start and stop operations.
+    dispatch_sync_f(p->queue, ao, &_reset);
+}
+
+static void _start(void *_ao)
+{
+    struct ao *ao = (struct ao *)_ao;
+    struct priv *p = ao->priv;
+
+    if (p->idle_work)
+        dispatch_block_cancel(p->idle_work);
+
+    OSStatus err = AudioOutputUnitStart(p->audio_unit);
+    CHECK_CA_WARN("can't start audio unit");
 }
 
 static void start(struct ao *ao)
 {
     struct priv *p = ao->priv;
-    OSStatus err = AudioOutputUnitStart(p->audio_unit);
-    CHECK_CA_WARN("can't start audio unit");
+    // Must dispatch to serialize reset, start and stop operations.
+    dispatch_sync_f(p->queue, ao, &_start);
 }
-
 
 static void uninit(struct ao *ao)
 {
     struct priv *p = ao->priv;
+
+    dispatch_sync(p->queue, ^{
+        cancel_and_release_idle_work(p);
+    });
+    dispatch_release(p->queue);
+
     AudioOutputUnitStop(p->audio_unit);
     AudioUnitUninitialize(p->audio_unit);
     AudioComponentInstanceDispose(p->audio_unit);
@@ -348,6 +452,8 @@ static void uninit(struct ao *ao)
                               &p->original_asbd);
         CHECK_CA_WARN("could not restore physical stream format");
     }
+
+    unregister_hotplug_cb(ao);
 }
 
 static OSStatus hotplug_cb(AudioObjectID id, UInt32 naddr,
@@ -355,8 +461,11 @@ static OSStatus hotplug_cb(AudioObjectID id, UInt32 naddr,
                            void *ctx)
 {
     struct ao *ao = ctx;
+    struct priv *p = ao->priv;
     MP_VERBOSE(ao, "Handling potential hotplug event...\n");
     reinit_device(ao);
+    if (p->audio_unit)
+        reinit_latency(ao);
     ao_hotplug_event(ao);
     return noErr;
 }
@@ -369,14 +478,32 @@ static uint32_t hotplug_properties[] = {
 static int hotplug_init(struct ao *ao)
 {
     if (!reinit_device(ao))
-        goto coreaudio_error;
+        return -1;
+
+    if (!register_hotplug_cb(ao))
+        return -1;
+
+    return 0;
+}
+
+static void hotplug_uninit(struct ao *ao)
+{
+    unregister_hotplug_cb(ao);
+}
+
+static bool register_hotplug_cb(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+
+    if (p->hotplug_cb_registration_times++)
+        return true;
 
     OSStatus err = noErr;
     for (int i = 0; i < MP_ARRAY_SIZE(hotplug_properties); i++) {
         AudioObjectPropertyAddress addr = {
             hotplug_properties[i],
             kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMaster
+            kAudioObjectPropertyElementMain
         };
         err = AudioObjectAddPropertyListener(
             kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
@@ -388,20 +515,25 @@ static int hotplug_init(struct ao *ao)
         }
     }
 
-    return 0;
+    return true;
 
 coreaudio_error:
-    return -1;
+    return false;
 }
 
-static void hotplug_uninit(struct ao *ao)
+static void unregister_hotplug_cb(struct ao *ao)
 {
+    struct priv *p = ao->priv;
+
+    if (--p->hotplug_cb_registration_times)
+        return;
+
     OSStatus err = noErr;
     for (int i = 0; i < MP_ARRAY_SIZE(hotplug_properties); i++) {
         AudioObjectPropertyAddress addr = {
             hotplug_properties[i],
             kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMaster
+            kAudioObjectPropertyElementMain
         };
         err = AudioObjectRemovePropertyListener(
             kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
@@ -427,6 +559,12 @@ const struct ao_driver audio_out_coreaudio = {
     .hotplug_uninit = hotplug_uninit,
     .list_devs      = ca_get_device_list,
     .priv_size      = sizeof(struct priv),
+    .priv_defaults  = &(const struct priv){
+        .sem = (struct coreaudio_cb_sem){
+            .mutex = MP_STATIC_MUTEX_INITIALIZER,
+            .cond = MP_STATIC_COND_INITIALIZER,
+        }
+    },
     .options = (const struct m_option[]){
         {"change-physical-format", OPT_BOOL(change_physical_format)},
         {0}

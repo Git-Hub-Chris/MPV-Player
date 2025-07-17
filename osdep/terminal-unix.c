@@ -54,6 +54,12 @@ static struct termios tio_orig;
 
 static int tty_in = -1, tty_out = -1;
 
+enum entry_type {
+    ENTRY_TYPE_KEY = 0,
+    ENTRY_TYPE_MOUSE_BUTTON,
+    ENTRY_TYPE_MOUSE_MOVE,
+};
+
 struct key_entry {
     const char *seq;
     int mpkey;
@@ -61,6 +67,10 @@ struct key_entry {
     // existing sequence is replaced by the following string. Matching
     // continues normally, and mpkey is or-ed into the final result.
     const char *replace;
+    // Extend the match length by a certain length, so the contents
+    // after the match can be processed with custom logic.
+    int skip;
+    enum entry_type type;
 };
 
 static const struct key_entry keys[] = {
@@ -99,7 +109,7 @@ static const struct key_entry keys[] = {
     {"\033[B", MP_KEY_DOWN},
     {"\033[C", MP_KEY_RIGHT},
     {"\033[D", MP_KEY_LEFT},
-    {"\033[E", MP_KEY_KP5},
+    {"\033[E", MP_KEY_KPBEGIN},
     {"\033[F", MP_KEY_END},
     {"\033[H", MP_KEY_HOME},
 
@@ -160,6 +170,18 @@ static const struct key_entry keys[] = {
     {"\033[29~", MP_KEY_MENU},
     {"\033[Z", MP_KEY_TAB | MP_KEY_MODIFIER_SHIFT},
 
+    // Mouse button inputs. 2 bytes of position information requires special processing.
+    {"\033[M ", MP_MBTN_LEFT | MP_KEY_STATE_DOWN, .skip = 2, .type = ENTRY_TYPE_MOUSE_BUTTON},
+    {"\033[M!", MP_MBTN_MID | MP_KEY_STATE_DOWN, .skip = 2, .type = ENTRY_TYPE_MOUSE_BUTTON},
+    {"\033[M\"", MP_MBTN_RIGHT | MP_KEY_STATE_DOWN, .skip = 2, .type = ENTRY_TYPE_MOUSE_BUTTON},
+    {"\033[M#", MP_INPUT_RELEASE_ALL, .skip = 2, .type = ENTRY_TYPE_MOUSE_BUTTON},
+    {"\033[M`", MP_WHEEL_UP, .skip = 2, .type = ENTRY_TYPE_MOUSE_BUTTON},
+    {"\033[Ma", MP_WHEEL_DOWN, .skip = 2, .type = ENTRY_TYPE_MOUSE_BUTTON},
+    // Mouse move inputs. No key events should be generated for them.
+    {"\033[M@", MP_MBTN_LEFT | MP_KEY_STATE_DOWN, .skip = 2, .type = ENTRY_TYPE_MOUSE_MOVE},
+    {"\033[MA", MP_MBTN_MID | MP_KEY_STATE_DOWN, .skip = 2, .type = ENTRY_TYPE_MOUSE_MOVE},
+    {"\033[MB", MP_MBTN_RIGHT | MP_KEY_STATE_DOWN, .skip = 2, .type = ENTRY_TYPE_MOUSE_MOVE},
+    {"\033[MC", MP_INPUT_RELEASE_ALL, .skip = 2, .type = ENTRY_TYPE_MOUSE_MOVE},
     {0}
 };
 
@@ -218,6 +240,13 @@ static void process_input(struct input_ctx *input_ctx, bool timeout)
             int mods = 0;
             if (buf.b[0] == '\033') {
                 if (buf.len > 1 && buf.b[1] == '[') {
+                    // Throw away unrecognized mouse CSI sequences.
+                    // Cannot be handled by the loop below since the bytes
+                    // afterwards can be out of that range.
+                    if (buf.len > 2 && buf.b[2] == 'M') {
+                        skip_buf(&buf, buf.len);
+                        continue;
+                    }
                     // unknown CSI sequence. wait till it completes
                     for (int i = 2; i < buf.len; i++) {
                         if (buf.b[i] >= 0x40 && buf.b[i] <= 0x7E)  {
@@ -250,7 +279,7 @@ static void process_input(struct input_ctx *input_ctx, bool timeout)
             continue;
         }
 
-        int seq_len = strlen(match->seq);
+        int seq_len = strlen(match->seq) + match->skip;
         if (seq_len > buf.len)
             goto read_more; /* partial match */
 
@@ -264,7 +293,23 @@ static void process_input(struct input_ctx *input_ctx, bool timeout)
             continue;
         }
 
-        mp_input_put_key(input_ctx, buf.mods | match->mpkey);
+        // Parse the initially skipped mouse position information.
+        // The positions are 1-based character cell positions plus 32.
+        // Treat mouse position as the pixel values at the center of the cell.
+        if ((match->type == ENTRY_TYPE_MOUSE_BUTTON ||
+             match->type == ENTRY_TYPE_MOUSE_MOVE) && seq_len >= 6)
+        {
+            int num_rows        = 80;
+            int num_cols        = 25;
+            int total_px_width  = 0;
+            int total_px_height = 0;
+            terminal_get_size2(&num_rows, &num_cols, &total_px_width, &total_px_height);
+            mp_input_set_mouse_pos(input_ctx,
+                (buf.b[4] - 32.5) * (total_px_width / num_cols),
+                (buf.b[5] - 32.5) * (total_px_height / num_rows));
+        }
+        if (match->type != ENTRY_TYPE_MOUSE_MOVE)
+            mp_input_put_key(input_ctx, buf.mods | match->mpkey);
         skip_buf(&buf, seq_len);
     }
 
@@ -296,12 +341,12 @@ static void do_activate_getch2(void)
     enable_kx(true);
 
     struct termios tio_new;
-    tcgetattr(tty_in,&tio_new);
+    tcgetattr(tty_in, &tio_new);
 
     tio_new.c_lflag &= ~(ICANON|ECHO); /* Clear ICANON and ECHO. */
     tio_new.c_cc[VMIN] = 1;
     tio_new.c_cc[VTIME] = 0;
-    tcsetattr(tty_in,TCSANOW,&tio_new);
+    tcsetattr(tty_in, TCSANOW, &tio_new);
 
     getch2_active = 1;
 }
@@ -324,7 +369,7 @@ static int setsigaction(int signo, void (*handler) (int),
     struct sigaction sa;
     sa.sa_handler = handler;
 
-    if(do_mask)
+    if (do_mask)
         sigfillset(&sa.sa_mask);
     else
         sigemptyset(&sa.sa_mask);
@@ -354,24 +399,11 @@ static int death_pipe[2] = {-1, -1};
 enum { PIPE_STOP, PIPE_CONT };
 static int stop_cont_pipe[2] = {-1, -1};
 
-static void stop_sighandler(int signum)
+static void stop_cont_sighandler(int signum)
 {
     int saved_errno = errno;
-    (void)write(stop_cont_pipe[1], &(char){PIPE_STOP}, 1);
-    errno = saved_errno;
-
-    // note: for this signal, we use SA_RESETHAND but do NOT mask signals
-    // so this will invoke the default handler
-    raise(SIGTSTP);
-}
-
-static void continue_sighandler(int signum)
-{
-    int saved_errno = errno;
-    // SA_RESETHAND has reset SIGTSTP, so we need to restore it here
-    setsigaction(SIGTSTP, stop_sighandler, SA_RESETHAND, false);
-
-    (void)write(stop_cont_pipe[1], &(char){PIPE_CONT}, 1);
+    char sig = signum == SIGCONT ? PIPE_CONT : PIPE_STOP;
+    (void)write(stop_cont_pipe[1], &sig, 1);
     errno = saved_errno;
 }
 
@@ -435,10 +467,20 @@ static MP_THREAD_VOID terminal_thread(void *ptr)
         if (fds[1].revents & POLLIN) {
             int8_t c = -1;
             (void)read(stop_cont_pipe[0], &c, 1);
-            if (c == PIPE_STOP)
+            if (c == PIPE_STOP) {
                 do_deactivate_getch2();
-            else if (c == PIPE_CONT)
+                if (isatty(STDERR_FILENO)) {
+                    (void)write(STDERR_FILENO, TERM_ESC_RESTORE_CURSOR,
+                                sizeof(TERM_ESC_RESTORE_CURSOR) - 1);
+                }
+                // trying to reset SIGTSTP handler to default and raise it will
+                // result in a race and there's no other way to invoke the
+                // default handler. so just invoke SIGSTOP since it's
+                // effectively the same thing.
+                raise(SIGSTOP);
+            } else if (c == PIPE_CONT) {
                 getch2_poll();
+            }
         }
         if (fds[2].revents) {
             int retval = read(tty_in, &buf.b[buf.len], BUF_LEN - buf.len);
@@ -470,10 +512,6 @@ void terminal_setup_getch(struct input_ctx *ictx)
 
     if (mp_make_wakeup_pipe(death_pipe) < 0)
         return;
-    if (mp_make_wakeup_pipe(stop_cont_pipe) < 0) {
-        close_sig_pipes();
-        return;
-    }
 
     // Disable reading from the terminal even if stdout is not a tty, to make
     //   mpv ... | less
@@ -490,8 +528,8 @@ void terminal_setup_getch(struct input_ctx *ictx)
     }
 
     setsigaction(SIGINT,  quit_request_sighandler, SA_RESETHAND, false);
-    setsigaction(SIGQUIT, quit_request_sighandler, SA_RESETHAND, false);
-    setsigaction(SIGTERM, quit_request_sighandler, SA_RESETHAND, false);
+    setsigaction(SIGQUIT, quit_request_sighandler, 0, true);
+    setsigaction(SIGTERM, quit_request_sighandler, 0, true);
 }
 
 void terminal_uninit(void)
@@ -550,10 +588,21 @@ void terminal_get_size2(int *rows, int *cols, int *px_width, int *px_height)
     *px_height = ws.ws_ypixel;
 }
 
+void terminal_set_mouse_input(bool enable)
+{
+    printf(enable ? TERM_ESC_ENABLE_MOUSE : TERM_ESC_DISABLE_MOUSE);
+    fflush(stdout);
+}
+
 void terminal_init(void)
 {
     assert(!getch2_enabled);
     getch2_enabled = 1;
+
+    if (mp_make_wakeup_pipe(stop_cont_pipe) < 0) {
+        getch2_enabled = 0;
+        return;
+    }
 
     tty_in = tty_out = open("/dev/tty", O_RDWR | O_CLOEXEC);
     if (tty_in < 0) {
@@ -564,8 +613,8 @@ void terminal_init(void)
     tcgetattr(tty_in, &tio_orig);
 
     // handlers to fix terminal settings
-    setsigaction(SIGCONT, continue_sighandler, 0, true);
-    setsigaction(SIGTSTP, stop_sighandler, SA_RESETHAND, false);
+    setsigaction(SIGCONT, stop_cont_sighandler, 0, true);
+    setsigaction(SIGTSTP, stop_cont_sighandler, 0, true);
     setsigaction(SIGTTIN, SIG_IGN, 0, true);
     setsigaction(SIGTTOU, SIG_IGN, 0, true);
 

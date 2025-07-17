@@ -278,36 +278,32 @@ static void update_framebuffer_from_bo(struct ra_ctx *ctx, struct gbm_bo *bo)
     fb->height = gbm_bo_get_height(bo);
     uint64_t modifier = gbm_bo_get_modifier(bo);
 
-    int ret;
-    if (p->num_gbm_modifiers == 0 || modifier == DRM_FORMAT_MOD_INVALID) {
-        uint32_t stride = gbm_bo_get_stride(bo);
-        uint32_t handle = gbm_bo_get_handle(bo).u32;
-        ret = drmModeAddFB2(fb->fd, fb->width, fb->height,
-                            p->gbm_format,
-                            (uint32_t[4]){handle, 0, 0, 0},
-                            (uint32_t[4]){stride, 0, 0, 0},
-                            (uint32_t[4]){0, 0, 0, 0},
-                            &fb->id, 0);
-    } else {
+    uint32_t handles[4] = {0};
+    uint32_t strides[4] = {0};
+    uint32_t offsets[4] = {0};
+    uint64_t modifiers[4] = {0};
+    uint32_t flags = 0;
+
+    const int num_planes = gbm_bo_get_plane_count(bo);
+    for (int i = 0; i < num_planes; ++i) {
+        handles[i] = gbm_bo_get_handle_for_plane(bo, i).u32;
+        strides[i] = gbm_bo_get_stride_for_plane(bo, i);
+        offsets[i] = gbm_bo_get_offset(bo, i);
+        modifiers[i] = modifier;
+    }
+
+    if (modifier && modifier != DRM_FORMAT_MOD_INVALID) {
         MP_VERBOSE(ctx, "GBM surface using modifier 0x%"PRIX64"\n", modifier);
+        flags = DRM_MODE_FB_MODIFIERS;
+    }
 
-        uint32_t handles[4] = {0};
-        uint32_t strides[4] = {0};
-        uint32_t offsets[4] = {0};
-        uint64_t modifiers[4] = {0};
-
-        const int num_planes = gbm_bo_get_plane_count(bo);
-        for (int i = 0; i < num_planes; ++i) {
-            handles[i] = gbm_bo_get_handle_for_plane(bo, i).u32;
-            strides[i] = gbm_bo_get_stride_for_plane(bo, i);
-            offsets[i] = gbm_bo_get_offset(bo, i);
-            modifiers[i] = modifier;
-        }
-
-        ret = drmModeAddFB2WithModifiers(fb->fd, fb->width, fb->height,
+    int ret = drmModeAddFB2WithModifiers(fb->fd, fb->width, fb->height,
                                          p->gbm_format,
                                          handles, strides, offsets, modifiers,
-                                         &fb->id, DRM_MODE_FB_MODIFIERS);
+                                         &fb->id, flags);
+    if (ret) {
+        ret = drmModeAddFB2(fb->fd, fb->width, fb->height, p->gbm_format,
+                            handles, strides, offsets, &fb->id, 0);
     }
     if (ret) {
         MP_ERR(ctx->vo, "Failed to create framebuffer: %s\n", mp_strerror(errno));
@@ -323,12 +319,15 @@ static void queue_flip(struct ra_ctx *ctx, struct gbm_frame *frame)
     update_framebuffer_from_bo(ctx, frame->bo);
 
     struct drm_atomic_context *atomic_ctx = drm->atomic_context;
+    int flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
     drm_object_set_property(atomic_ctx->request, atomic_ctx->draw_plane, "FB_ID", drm->fb->id);
     drm_object_set_property(atomic_ctx->request, atomic_ctx->draw_plane, "CRTC_ID", atomic_ctx->crtc->id);
     drm_object_set_property(atomic_ctx->request, atomic_ctx->draw_plane, "ZPOS", 1);
 
-    int ret = drmModeAtomicCommit(drm->fd, atomic_ctx->request,
-                                  DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, drm);
+    if (vo_drm_set_hdr_metadata(ctx->vo, false))
+        flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+
+    int ret = drmModeAtomicCommit(drm->fd, atomic_ctx->request, flags, drm);
 
     if (ret)
         MP_WARN(ctx->vo, "Failed to commit atomic request: %s\n", mp_strerror(ret));
@@ -461,17 +460,6 @@ static const struct ra_swapchain_fns drm_egl_swapchain = {
 static void drm_egl_uninit(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
-    struct vo_drm_state *drm = ctx->vo->drm;
-    if (drm) {
-        struct drm_atomic_context *atomic_ctx = drm->atomic_context;
-
-        if (drmModeAtomicCommit(drm->fd, atomic_ctx->request, 0, NULL))
-            MP_ERR(ctx->vo, "Failed to commit atomic request: %s\n",
-                    mp_strerror(errno));
-
-        drmModeAtomicFree(atomic_ctx->request);
-    }
-
     ra_gl_ctx_uninit(ctx);
     vo_drm_uninit(ctx->vo);
 
@@ -491,7 +479,8 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
         if (p->gbm.surface)
             gbm_surface_destroy(p->gbm.surface);
         eglTerminate(p->egl.display);
-        gbm_device_destroy(p->gbm.device);
+        if (p->gbm.device)
+            gbm_device_destroy(p->gbm.device);
 
         if (p->drm_params.render_fd != -1)
             close(p->drm_params.render_fd);
@@ -616,6 +605,10 @@ static bool drm_egl_init(struct ra_ctx *ctx)
         xrgb_format = GBM_FORMAT_XBGR8888;
         break;
     default:
+        if (drm->opts->drm_format != DRM_OPTS_FORMAT_XRGB8888) {
+            MP_VERBOSE(ctx->vo, "Requested format not supported by context, "
+                       "falling back to xrgb8888\n");
+        }
         argb_format = GBM_FORMAT_ARGB8888;
         xrgb_format = GBM_FORMAT_XRGB8888;
         break;
@@ -715,6 +708,11 @@ static bool drm_egl_reconfig(struct ra_ctx *ctx)
     return true;
 }
 
+static bool drm_egl_pass_colorspace(struct ra_ctx *ctx)
+{
+    return ctx->vo->drm->supported_colorspace;
+}
+
 static int drm_egl_control(struct ra_ctx *ctx, int *events, int request,
                            void *arg)
 {
@@ -733,12 +731,14 @@ static void drm_egl_wakeup(struct ra_ctx *ctx)
 }
 
 const struct ra_ctx_fns ra_ctx_drm_egl = {
-    .type           = "opengl",
-    .name           = "drm",
-    .reconfig       = drm_egl_reconfig,
-    .control        = drm_egl_control,
-    .init           = drm_egl_init,
-    .uninit         = drm_egl_uninit,
-    .wait_events    = drm_egl_wait_events,
-    .wakeup         = drm_egl_wakeup,
+    .type            = "opengl",
+    .name            = "drm",
+    .description     = "DRM/EGL",
+    .reconfig        = drm_egl_reconfig,
+    .pass_colorspace = drm_egl_pass_colorspace,
+    .control         = drm_egl_control,
+    .init            = drm_egl_init,
+    .uninit          = drm_egl_uninit,
+    .wait_events     = drm_egl_wait_events,
+    .wakeup          = drm_egl_wakeup,
 };

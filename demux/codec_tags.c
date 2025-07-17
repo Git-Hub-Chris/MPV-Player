@@ -48,8 +48,8 @@ static const char *lookup_tag(int type, uint32_t tag)
 /*
  * As seen in the following page:
  *
- * https://web.archive.org/web/20220406060153/
- * http://dream.cs.bath.ac.uk/researchdev/wave-ex/bformat.html
+ * <https://web.archive.org/web/20220406060153/
+ * http://dream.cs.bath.ac.uk/researchdev/wave-ex/bformat.html>
  *
  * Note that the GUID struct in the above citation has its
  * integers encoded in little-endian format, which means that
@@ -179,81 +179,6 @@ void mp_set_pcm_codec(struct mp_codec_params *c, bool sign, bool is_float,
         mp_snprintf_cat(codec, sizeof(codec), is_be ? "be" : "le");
     c->codec = talloc_strdup(c, codec);
 }
-
-// map file extension/type to an image codec name
-static const char *const type_to_codec[][2] = {
-    { "bmp",            "bmp" },
-    { "dpx",            "dpx" },
-    { "j2c",            "jpeg2000" },
-    { "j2k",            "jpeg2000" },
-    { "jp2",            "jpeg2000" },
-    { "jpc",            "jpeg2000" },
-    { "jpeg",           "mjpeg" },
-    { "jpg",            "mjpeg" },
-    { "jps",            "mjpeg" },
-    { "jls",            "ljpeg" },
-    { "thm",            "mjpeg" },
-    { "db",             "mjpeg" },
-    { "pcd",            "photocd" },
-    { "pfm",            "pfm" },
-    { "phm",            "phm" },
-    { "hdr",            "hdr" },
-    { "pcx",            "pcx" },
-    { "png",            "png" },
-    { "pns",            "png" },
-    { "ptx",            "ptx" },
-    { "tga",            "targa" },
-    { "tif",            "tiff" },
-    { "tiff",           "tiff" },
-    { "sgi",            "sgi" },
-    { "sun",            "sunrast" },
-    { "ras",            "sunrast" },
-    { "rs",             "sunrast" },
-    { "ra",             "sunrast" },
-    { "im1",            "sunrast" },
-    { "im8",            "sunrast" },
-    { "im24",           "sunrast" },
-    { "im32",           "sunrast" },
-    { "sunras",         "sunrast" },
-    { "xbm",            "xbm" },
-    { "pam",            "pam" },
-    { "pbm",            "pbm" },
-    { "pgm",            "pgm" },
-    { "pgmyuv",         "pgmyuv" },
-    { "ppm",            "ppm" },
-    { "pnm",            "ppm" },
-    { "gif",            "gif" },
-    { "pix",            "brender_pix" },
-    { "exr",            "exr" },
-    { "pic",            "pictor" },
-    { "qoi",            "qoi" },
-    { "xface",          "xface" },
-    { "xwd",            "xwd" },
-    { "svg",            "svg" },
-    {0}
-};
-
-bool mp_codec_is_image(const char *codec)
-{
-    if (codec) {
-        for (int n = 0; type_to_codec[n][0]; n++) {
-            if (strcasecmp(type_to_codec[n][1], codec) == 0)
-                return true;
-        }
-    }
-    return false;
-}
-
-const char *mp_map_type_to_image_codec(const char *type)
-{
-    if (type) {
-        for (int n = 0; type_to_codec[n][0]; n++) {
-            if (strcasecmp(type_to_codec[n][0], type) == 0)
-                return type_to_codec[n][1];
-        }
-    }
-    return NULL;
-};
 
 static const char *const mimetype_to_codec[][2] = {
     {"image/apng",      "apng"},

@@ -19,8 +19,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -69,7 +67,7 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
     if (filename[0] == '@') {
         struct stream *s = stream_create(filename + 1,
                             d->stream_origin | STREAM_READ, d->cancel, d->global);
-        if (s) {
+        if (s && !s->is_directory) {
             while (1) {
                 char buf[512];
                 int len = stream_read_peek(s, buf, sizeof(buf));
@@ -85,7 +83,7 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
                         break;
                     }
                     char *entry = bstrto0(mf, fname);
-                    if (!mp_path_exists(entry)) {
+                    if (!mp_path_exists(entry) && !mp_is_url(fname)) {
                         mp_verbose(log, "file not found: '%s'\n", entry);
                     } else {
                         MP_TARRAY_APPEND(mf, mf->names, mf->nr_of_files, entry);
@@ -95,9 +93,9 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
             }
             free_stream(s);
 
-            mp_info(log, "number of files: %d\n", mf->nr_of_files);
             goto exit_mf;
         }
+        free_stream(s);
         mp_info(log, "%s is not indirect filelist\n", filename + 1);
     }
 
@@ -110,22 +108,25 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
             bstr_split_tok(bfilename, ",", &bfname, &bfilename);
             char *fname2 = bstrdup0(mf, bfname);
 
-            if (!mp_path_exists(fname2))
+            if (!mp_path_exists(fname2) && !mp_is_url(bfname))
                 mp_verbose(log, "file not found: '%s'\n", fname2);
             else {
                 mf_add(mf, fname2);
             }
             talloc_free(fname2);
         }
-        mp_info(log, "number of files: %d\n", mf->nr_of_files);
 
         goto exit_mf;
     }
 
-    size_t fname_avail = strlen(filename) + 32;
+    bstr bfilename = bstr0(filename);
+    if (mp_is_url(bfilename))
+        goto exit_mf;
+
+    size_t fname_avail = bfilename.len + 32;
     char *fname = talloc_size(mf, fname_avail);
 
-#if HAVE_GLOB
+#if HAVE_GLOB && !defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
     if (!strchr(filename, '%')) {
         // append * if none present
         snprintf(fname, fname_avail, "%s%c", filename,
@@ -143,7 +144,6 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
                 continue;
             mf_add(mf, gg.gl_pathv[i]);
         }
-        mp_info(log, "number of files: %d\n", mf->nr_of_files);
         globfree(&gg);
         goto exit_mf;
     }
@@ -189,7 +189,9 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
 
     // nspec==0 (zero specifiers) is rejected because fname wouldn't advance.
     if (bad_spec || nspec != 1) {
-        mp_err(log, "unsupported expr format: '%s'\n", filename);
+        mp_err(log,
+               "unsupported expr format: '%s' - exactly one format specifier of the form %%[.][NUM]d is expected\n",
+               filename);
         goto exit_mf;
     }
 
@@ -208,9 +210,8 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
         }
     }
 
-    mp_info(log, "number of files: %d\n", mf->nr_of_files);
-
 exit_mf:
+    mp_info(log, "number of files: %d\n", mf->nr_of_files);
     return mf;
 }
 
@@ -284,6 +285,65 @@ static bool demux_mf_read_packet(struct demuxer *demuxer,
     return true;
 }
 
+// map file extension/type to a codec name
+
+static const struct {
+    const char *type;
+    const char *codec;
+} type2format[] = {
+    { "bmp",            "bmp" },
+    { "dpx",            "dpx" },
+    { "j2c",            "jpeg2000" },
+    { "j2k",            "jpeg2000" },
+    { "jp2",            "jpeg2000" },
+    { "jpc",            "jpeg2000" },
+    { "jpeg",           "mjpeg" },
+    { "jpg",            "mjpeg" },
+    { "jps",            "mjpeg" },
+    { "jls",            "ljpeg" },
+    { "thm",            "mjpeg" },
+    { "db",             "mjpeg" },
+    { "pcd",            "photocd" },
+    { "pfm",            "pfm" },
+    { "phm",            "phm" },
+    { "hdr",            "hdr" },
+    { "pcx",            "pcx" },
+    { "png",            "png" },
+    { "pns",            "png" },
+    { "ptx",            "ptx" },
+    { "tga",            "targa" },
+    { "tif",            "tiff" },
+    { "tiff",           "tiff" },
+    { "sgi",            "sgi" },
+    { "sun",            "sunrast" },
+    { "ras",            "sunrast" },
+    { "rs",             "sunrast" },
+    { "ra",             "sunrast" },
+    { "im1",            "sunrast" },
+    { "im8",            "sunrast" },
+    { "im24",           "sunrast" },
+    { "im32",           "sunrast" },
+    { "sunras",         "sunrast" },
+    { "xbm",            "xbm" },
+    { "pam",            "pam" },
+    { "pbm",            "pbm" },
+    { "pgm",            "pgm" },
+    { "pgmyuv",         "pgmyuv" },
+    { "ppm",            "ppm" },
+    { "pnm",            "ppm" },
+    { "gif",            "gif" }, // usually handled by demux_lavf
+    { "pix",            "brender_pix" },
+    { "exr",            "exr" },
+    { "pic",            "pictor" },
+    { "qoi",            "qoi" },
+    { "xface",          "xface" },
+    { "xwd",            "xwd" },
+    { "svg",            "svg" },
+    { "webp",           "webp" },
+    { "jxl",            "jpegxl" },
+    {0}
+};
+
 static const char *probe_format(mf_t *mf, char *type, enum demux_check check)
 {
     if (check > DEMUX_CHECK_REQUEST)
@@ -294,9 +354,10 @@ static const char *probe_format(mf_t *mf, char *type, enum demux_check check)
         if (p)
             type = p + 1;
     }
-    const char *codec = mp_map_type_to_image_codec(type);
-    if (codec)
-        return codec;
+    for (int i = 0; type2format[i].type; i++) {
+        if (type && strcasecmp(type, type2format[i].type) == 0)
+            return type2format[i].codec;
+    }
     if (check == DEMUX_CHECK_REQUEST) {
         if (!org_type) {
             MP_ERR(mf, "file type was not set! (try --mf-type=ext)\n");

@@ -96,6 +96,7 @@ static bool create_dc(struct ra_ctx *ctx)
 
     pfd.iPixelType = PFD_TYPE_RGBA;
     pfd.cColorBits = 24;
+    pfd.cAlphaBits = 8;
     pfd.iLayerType = PFD_MAIN_PLANE;
     int pf = ChoosePixelFormat(hdc, &pfd);
 
@@ -291,7 +292,10 @@ static bool wgl_init(struct ra_ctx *ctx)
     p->opts = p->opts_cache->opts;
 
     if (!vo_w32_init(ctx->vo))
-        goto fail;
+        return false;
+
+    if (ctx->opts.want_alpha)
+        vo_w32_set_transparency(ctx->vo, ctx->opts.want_alpha);
 
     vo_w32_run_on_thread(ctx->vo, create_ctx, ctx);
     if (!p->context)
@@ -368,11 +372,18 @@ static int wgl_control(struct ra_ctx *ctx, int *events, int request, void *arg)
     return ret;
 }
 
+static void wgl_update_render_opts(struct ra_ctx *ctx)
+{
+    vo_w32_set_transparency(ctx->vo, ctx->opts.want_alpha);
+}
+
 const struct ra_ctx_fns ra_ctx_wgl = {
-    .type           = "opengl",
-    .name           = "win",
-    .init           = wgl_init,
-    .reconfig       = wgl_reconfig,
-    .control        = wgl_control,
-    .uninit         = wgl_uninit,
+    .type               = "opengl",
+    .name               = "win",
+    .description        = "Win32/WGL",
+    .init               = wgl_init,
+    .reconfig           = wgl_reconfig,
+    .control            = wgl_control,
+    .update_render_opts = wgl_update_render_opts,
+    .uninit             = wgl_uninit,
 };

@@ -27,7 +27,6 @@
  */
 
 #include <string.h>
-#include <strings.h>
 #include <assert.h>
 
 #include <libbluray/bluray.h>
@@ -43,6 +42,7 @@
 #include "common/common.h"
 #include "common/msg.h"
 #include "options/m_config.h"
+#include "options/options.h"
 #include "options/path.h"
 #include "stream.h"
 #include "osdep/timer.h"
@@ -264,6 +264,26 @@ static int bluray_stream_control(stream_t *s, int cmd, void *arg)
             return STREAM_UNSUPPORTED;
         b->current_angle = angle;
         bd_seamless_angle_change(b->bd, angle);
+        return STREAM_OK;
+    }
+    case STREAM_CTRL_GET_TITLE_LENGTH: {
+        int title = *(double *)arg;
+        if (!b->bd || title < 0 || title >= b->num_titles)
+            return STREAM_UNSUPPORTED;
+        const BLURAY_TITLE_INFO *ti = bd_get_title_info(b->bd, title, 0);
+        if (!ti)
+            return STREAM_UNSUPPORTED;
+        *(double *)arg = BD_TIME_TO_MP(ti->duration);
+        return STREAM_OK;
+    }
+    case STREAM_CTRL_GET_TITLE_PLAYLIST: {
+        int title = *(double *)arg;
+        if (!b->bd || title < 0 || title >= b->num_titles)
+            return STREAM_UNSUPPORTED;
+        const BLURAY_TITLE_INFO *ti = bd_get_title_info(b->bd, title, 0);
+        if (!ti)
+            return STREAM_UNSUPPORTED;
+        *(double *)arg = ti->playlist;
         return STREAM_OK;
     }
     case STREAM_CTRL_GET_LANG: {
@@ -494,7 +514,13 @@ static int bluray_stream_open(stream_t *s)
 
     b->cfg_title = BLURAY_DEFAULT_TITLE;
 
-    if (bstr_equals0(title, "longest") || bstr_equals0(title, "first")) {
+    struct MPOpts *opts = mp_get_config_group(s, s->global, &mp_opt_root);
+    int edition_id = opts->edition_id;
+    talloc_free(opts);
+
+    if (edition_id >= 0) {
+        b->cfg_title = edition_id;
+    } else if (bstr_equals0(title, "longest") || bstr_equals0(title, "first")) {
         b->cfg_title = BLURAY_DEFAULT_TITLE;
     } else if (bstr_equals0(title, "menu")) {
         b->cfg_title = BLURAY_MENU_TITLE;
@@ -552,16 +578,18 @@ static bool check_bdmv(const char *path)
     if (!temp)
         return false;
 
-    char data[50] = {0};
+    char data[50];
+    bool ret = false;
 
-    fread(data, 50, 1, temp);
+    if (fread(data, 50, 1, temp) == 1) {
+        bstr bdata = {data, 50};
+        ret = bstr_startswith0(bdata, "MOBJ0100") || // AVCHD
+              bstr_startswith0(bdata, "MOBJ0200") || // Blu-ray
+              bstr_startswith0(bdata, "MOBJ0300");   // UHD BD
+    }
+
     fclose(temp);
-
-    bstr bdata = {data, 50};
-
-    return bstr_startswith0(bdata, "MOBJ0100") || // AVCHD
-           bstr_startswith0(bdata, "MOBJ0200") || // Blu-ray
-           bstr_startswith0(bdata, "MOBJ0300");   // UHD BD
+    return ret;
 }
 
 // Destructively remove the current trailing path component.

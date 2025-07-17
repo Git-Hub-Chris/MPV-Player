@@ -36,7 +36,7 @@ static void uninit(struct ra_hwdec *hw)
     av_buffer_unref(&p->hwctx.av_device_ref);
 }
 
-const static vt_interop_init interop_inits[] = {
+static const vt_interop_init interop_inits[] = {
 #if HAVE_VIDEOTOOLBOX_GL || HAVE_IOS_GL
     vt_gl_init,
 #endif
@@ -129,6 +129,7 @@ const struct ra_hwdec_driver ra_hwdec_videotoolbox = {
     .name = "videotoolbox",
     .priv_size = sizeof(struct priv_owner),
     .imgfmts = {IMGFMT_VIDEOTOOLBOX, 0},
+    .device_type = AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
     .init = init,
     .uninit = uninit,
     .mapper = &(const struct ra_hwdec_mapper_driver){

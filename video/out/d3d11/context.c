@@ -27,10 +27,6 @@
 #include "context.h"
 #include "ra_d3d11.h"
 
-static int d3d11_validate_adapter(struct mp_log *log,
-                                  const struct m_option *opt,
-                                  struct bstr name, const char **value);
-
 struct d3d11_opts {
     int feature_level;
     int warp;
@@ -48,7 +44,9 @@ const struct m_sub_options d3d11_conf = {
         {"d3d11-warp", OPT_CHOICE(warp,
             {"auto", -1},
             {"no", 0},
-            {"yes", 1})},
+            {"yes", 1}),
+             .flags = UPDATE_VO,
+        },
         {"d3d11-feature-level", OPT_CHOICE(feature_level,
             {"12_1", D3D_FEATURE_LEVEL_12_1},
             {"12_0", D3D_FEATURE_LEVEL_12_0},
@@ -58,23 +56,31 @@ const struct m_sub_options d3d11_conf = {
             {"10_0", D3D_FEATURE_LEVEL_10_0},
             {"9_3", D3D_FEATURE_LEVEL_9_3},
             {"9_2", D3D_FEATURE_LEVEL_9_2},
-            {"9_1", D3D_FEATURE_LEVEL_9_1})},
-        {"d3d11-flip", OPT_BOOL(flip)},
+            {"9_1", D3D_FEATURE_LEVEL_9_1}),
+            .flags = UPDATE_VO,
+        },
+        {"d3d11-flip", OPT_BOOL(flip), .flags = UPDATE_VO},
         {"d3d11-sync-interval", OPT_INT(sync_interval), M_RANGE(0, 4)},
-        {"d3d11-adapter", OPT_STRING_VALIDATE(adapter_name,
-                                              d3d11_validate_adapter)},
+        {"d3d11-adapter",
+            OPT_STRING_VALIDATE(adapter_name, mp_dxgi_validate_adapter),
+            .flags = UPDATE_VO,
+        },
         {"d3d11-output-format", OPT_CHOICE(output_format,
             {"auto",     DXGI_FORMAT_UNKNOWN},
             {"rgba8",    DXGI_FORMAT_R8G8B8A8_UNORM},
             {"bgra8",    DXGI_FORMAT_B8G8R8A8_UNORM},
             {"rgb10_a2", DXGI_FORMAT_R10G10B10A2_UNORM},
-            {"rgba16f",  DXGI_FORMAT_R16G16B16A16_FLOAT})},
+            {"rgba16f",  DXGI_FORMAT_R16G16B16A16_FLOAT}),
+            .flags = UPDATE_VO,
+        },
         {"d3d11-output-csp", OPT_CHOICE(color_space,
             {"auto", -1},
             {"srgb",    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709},
             {"linear",  DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709},
             {"pq",      DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020},
-            {"bt.2020", DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020})},
+            {"bt.2020", DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020}),
+            .flags = UPDATE_VO,
+        },
         {"d3d11-exclusive-fs", OPT_BOOL(exclusive_fs)},
         {0}
     },
@@ -100,45 +106,14 @@ struct priv {
     struct ra_tex *backbuffer;
     ID3D11Device *device;
     IDXGISwapChain *swapchain;
-    struct mp_colorspace swapchain_csp;
+    struct pl_color_space swapchain_csp;
 
     int64_t perf_freq;
-    unsigned sync_refresh_count;
-    int64_t sync_qpc_time;
+    unsigned last_sync_refresh_count;
+    int64_t last_sync_qpc_time;
     int64_t vsync_duration_qpc;
     int64_t last_submit_qpc;
 };
-
-static int d3d11_validate_adapter(struct mp_log *log,
-                                  const struct m_option *opt,
-                                  struct bstr name, const char **value)
-{
-    struct bstr param = bstr0(*value);
-    bool help = bstr_equals0(param, "help");
-    bool adapter_matched = false;
-    struct bstr listing = { 0 };
-
-    if (bstr_equals0(param, "")) {
-        return 0;
-    }
-
-    adapter_matched = mp_d3d11_list_or_verify_adapters(log,
-                                                       help ? bstr0(NULL) : param,
-                                                       help ? &listing : NULL);
-
-    if (help) {
-        mp_info(log, "Available D3D11 adapters:\n%.*s",
-                BSTR_P(listing));
-        talloc_free(listing.start);
-        return M_OPT_EXIT;
-    }
-
-    if (!adapter_matched) {
-        mp_err(log, "No adapter matching '%.*s'!\n", BSTR_P(param));
-    }
-
-    return adapter_matched ? 0 : M_OPT_INVALID;
-}
 
 static struct ra_tex *get_backbuffer(struct ra_ctx *ctx)
 {
@@ -189,21 +164,73 @@ static bool d3d11_reconfig(struct ra_ctx *ctx)
 static int d3d11_color_depth(struct ra_swapchain *sw)
 {
     struct priv *p = sw->priv;
+
+    DXGI_OUTPUT_DESC1 desc1;
+    if (!mp_get_dxgi_output_desc(p->swapchain, &desc1))
+        desc1.BitsPerColor = 0;
+
     DXGI_SWAP_CHAIN_DESC desc;
 
     HRESULT hr = IDXGISwapChain_GetDesc(p->swapchain, &desc);
     if (FAILED(hr)) {
         MP_ERR(sw->ctx, "Failed to query swap chain description: %s!\n",
                mp_HRESULT_to_str(hr));
-        return 0;
+        return desc1.BitsPerColor;
     }
 
     const struct ra_format *ra_fmt =
         ra_d3d11_get_ra_format(sw->ctx->ra, desc.BufferDesc.Format);
-    if (!ra_fmt)
-        return 0;
+    if (!ra_fmt || !ra_fmt->component_depth[0])
+        return desc1.BitsPerColor;
 
-    return ra_fmt->component_depth[0];
+    if (!desc1.BitsPerColor)
+        return ra_fmt->component_depth[0];
+
+    return MPMIN(ra_fmt->component_depth[0], desc1.BitsPerColor);
+}
+
+static struct pl_color_space d3d11_target_color_space(struct ra_swapchain *sw)
+{
+    struct priv *p = sw->priv;
+
+    struct pl_color_space ret = {0};
+    DXGI_OUTPUT_DESC1 desc1;
+    if (!mp_get_dxgi_output_desc(p->swapchain, &desc1))
+        return ret;
+
+    ret.hdr.max_luma = desc1.MaxLuminance;
+    ret.hdr.min_luma = desc1.MinLuminance;
+    ret.hdr.prim.blue.x = desc1.BluePrimary[0];
+    ret.hdr.prim.blue.y = desc1.BluePrimary[1];
+    ret.hdr.prim.green.x = desc1.GreenPrimary[0];
+    ret.hdr.prim.green.y = desc1.GreenPrimary[1];
+    ret.hdr.prim.red.x = desc1.RedPrimary[0];
+    ret.hdr.prim.red.y = desc1.RedPrimary[1];
+
+    switch (desc1.ColorSpace) {
+        case DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709:
+            ret.primaries = PL_COLOR_PRIM_BT_709;
+            ret.transfer = PL_COLOR_TRC_SRGB;
+            break;
+        case DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709:
+            ret.primaries = PL_COLOR_PRIM_BT_709;
+            ret.transfer = PL_COLOR_TRC_LINEAR;
+            break;
+        case DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020:
+            ret.primaries = PL_COLOR_PRIM_BT_2020;
+            ret.transfer = PL_COLOR_TRC_PQ;
+            break;
+        case DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020:
+            ret.primaries = PL_COLOR_PRIM_BT_2020;
+            ret.transfer = PL_COLOR_TRC_SRGB;
+            break;
+        default:
+            ret.primaries = PL_COLOR_PRIM_UNKNOWN;
+            ret.transfer = PL_COLOR_TRC_UNKNOWN;
+            break;
+    }
+
+    return ret;
 }
 
 static bool d3d11_start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
@@ -303,33 +330,28 @@ static void d3d11_get_vsync(struct ra_swapchain *sw, struct vo_vsync_info *info)
     DXGI_FRAME_STATISTICS stats;
     hr = IDXGISwapChain_GetFrameStatistics(p->swapchain, &stats);
     if (hr == DXGI_ERROR_FRAME_STATISTICS_DISJOINT) {
-        p->sync_refresh_count = 0;
-        p->sync_qpc_time = 0;
+        p->last_sync_refresh_count = 0;
+        p->last_sync_qpc_time = 0;
     }
     if (FAILED(hr))
         return;
 
-    info->last_queue_display_time = 0;
-    info->vsync_duration = 0;
     // Detecting skipped vsyncs is possible but not supported yet
     info->skipped_vsyncs = -1;
 
-    // Get the number of physical vsyncs that have passed since the start of the
-    // playback or disjoint event.
+    // Get the number of physical vsyncs that have passed since the last call.
     // Check for 0 here, since sometimes GetFrameStatistics returns S_OK but
     // with 0s in some (all?) members of DXGI_FRAME_STATISTICS.
     unsigned src_passed = 0;
-    if (stats.SyncRefreshCount && p->sync_refresh_count)
-        src_passed = stats.SyncRefreshCount - p->sync_refresh_count;
-    if (p->sync_refresh_count == 0)
-        p->sync_refresh_count = stats.SyncRefreshCount;
+    if (stats.SyncRefreshCount && p->last_sync_refresh_count)
+        src_passed = stats.SyncRefreshCount - p->last_sync_refresh_count;
+    p->last_sync_refresh_count = stats.SyncRefreshCount;
 
     // Get the elapsed time passed between the above vsyncs
     unsigned sqt_passed = 0;
-    if (stats.SyncQPCTime.QuadPart && p->sync_qpc_time)
-        sqt_passed = stats.SyncQPCTime.QuadPart - p->sync_qpc_time;
-    if (p->sync_qpc_time == 0)
-        p->sync_qpc_time = stats.SyncQPCTime.QuadPart;
+    if (stats.SyncQPCTime.QuadPart && p->last_sync_qpc_time)
+        sqt_passed = stats.SyncQPCTime.QuadPart - p->last_sync_qpc_time;
+    p->last_sync_qpc_time = stats.SyncQPCTime.QuadPart;
 
     // If any vsyncs have passed, estimate the physical frame rate
     if (src_passed && sqt_passed)
@@ -470,6 +492,7 @@ static void d3d11_uninit(struct ra_ctx *ctx)
 
 static const struct ra_swapchain_fns d3d11_swapchain = {
     .color_depth  = d3d11_color_depth,
+    .target_csp   = d3d11_target_color_space,
     .start_frame  = d3d11_start_frame,
     .submit_frame = d3d11_submit_frame,
     .swap_buffers = d3d11_swap_buffers,
@@ -514,6 +537,9 @@ static bool d3d11_init(struct ra_ctx *ctx)
     if (!vo_w32_init(ctx->vo))
         goto error;
 
+    if (ctx->opts.want_alpha)
+        vo_w32_set_transparency(ctx->vo, ctx->opts.want_alpha);
+
     UINT usage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT;
     if (ID3D11Device_GetFeatureLevel(p->device) >= D3D_FEATURE_LEVEL_11_0 &&
         p->opts->output_format != DXGI_FORMAT_B8G8R8A8_UNORM)
@@ -544,6 +570,11 @@ error:
     return false;
 }
 
+static void d3d11_update_render_opts(struct ra_ctx *ctx)
+{
+    vo_w32_set_transparency(ctx->vo, ctx->opts.want_alpha);
+}
+
 IDXGISwapChain *ra_d3d11_ctx_get_swapchain(struct ra_ctx *ra)
 {
     if (ra->swapchain->fns != &d3d11_swapchain)
@@ -556,11 +587,23 @@ IDXGISwapChain *ra_d3d11_ctx_get_swapchain(struct ra_ctx *ra)
     return p->swapchain;
 }
 
+bool ra_d3d11_ctx_prefer_8bit_output_format(struct ra_ctx *ra)
+{
+    if (ra->swapchain->fns != &d3d11_swapchain)
+        return false;
+
+    struct priv *p = ra->priv;
+
+    return p->opts->output_format == DXGI_FORMAT_R8G8B8A8_UNORM;
+}
+
 const struct ra_ctx_fns ra_ctx_d3d11 = {
-    .type     = "d3d11",
-    .name     = "d3d11",
-    .reconfig = d3d11_reconfig,
-    .control  = d3d11_control,
-    .init     = d3d11_init,
-    .uninit   = d3d11_uninit,
+    .type               = "d3d11",
+    .name               = "d3d11",
+    .description        = "Direct3D 11",
+    .reconfig           = d3d11_reconfig,
+    .control            = d3d11_control,
+    .update_render_opts = d3d11_update_render_opts,
+    .init               = d3d11_init,
+    .uninit             = d3d11_uninit,
 };

@@ -604,8 +604,12 @@ int ebml_read_element(struct stream *s, struct ebml_parse_ctx *ctx,
         MP_MSG(ctx, msglevel, "EBML element with unknown length - unsupported\n");
         return -1;
     }
-    if (length > 1000000000) {
-        MP_MSG(ctx, msglevel, "Refusing to read element over 100 MB in size\n");
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (length > (512 << 20)) {
+#else
+    if (length > (64 << 20)) {
+#endif
+        MP_MSG(ctx, msglevel, "Element too big (%" PRIu64 " MiB) - skipping\n", length >> 20);
         return -1;
     }
     ctx->talloc_ctx = talloc_size(NULL, length);

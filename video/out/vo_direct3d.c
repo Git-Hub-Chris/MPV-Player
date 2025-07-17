@@ -102,6 +102,7 @@ typedef struct d3d_priv {
     struct mp_osd_res osd_res;
     int image_format;           /**< mplayer image format */
     struct mp_image_params params;
+    struct mp_image_params dst_params;
 
     D3DFORMAT movie_src_fmt;        /**< Movie colorspace format (depends on
                                     the movie's codec) */
@@ -472,7 +473,7 @@ static bool init_d3d(d3d_priv *priv)
         return false;
     }
 
-    /* Store relevant information reguarding caps of device */
+    /* Store relevant information regarding caps of device */
     texture_caps                  = disp_caps.TextureCaps;
     dev_caps                      = disp_caps.DevCaps;
     priv->device_caps_power2_only =  (texture_caps & D3DPTEXTURECAPS_POW2) &&
@@ -896,6 +897,18 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
     if (!resize_d3d(priv))
         return VO_ERROR;
 
+    priv->dst_params = *params;
+    for (const struct fmt_entry *cur = &fmt_table[0]; cur->mplayer_fmt; ++cur) {
+        if (cur->fourcc == priv->desktop_fmt) {
+            priv->dst_params.imgfmt = cur->mplayer_fmt;
+            break;
+        }
+    }
+    mp_image_params_guess_csp(&priv->dst_params);
+    mp_mutex_lock(&vo->params_mutex);
+    vo->target_params = &priv->dst_params;
+    mp_mutex_unlock(&vo->params_mutex);
+
     return 0; /* Success */
 }
 
@@ -990,18 +1003,18 @@ static bool get_video_buffer(d3d_priv *priv, struct mp_image *out)
     return true;
 }
 
-static void draw_frame(struct vo *vo, struct vo_frame *frame)
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     d3d_priv *priv = vo->priv;
     if (!priv->d3d_device)
-        return;
+        goto done;
 
     struct mp_image buffer;
     if (!get_video_buffer(priv, &buffer))
-        return;
+        goto done;
 
     if (!frame->current)
-        return;
+        goto done;
 
     mp_image_copy(&buffer, frame->current);
 
@@ -1011,6 +1024,9 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
     priv->osd_pts = frame->current->pts;
 
     d3d_draw_frame(priv);
+
+done:
+    return VO_TRUE;
 }
 
 static mp_image_t *get_window_screenshot(d3d_priv *priv)

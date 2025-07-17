@@ -23,10 +23,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 
-#ifndef __MINGW32__
+
 #include <poll.h>
 #endif
 
@@ -35,6 +34,7 @@
 #include "common/common.h"
 #include "common/msg.h"
 #include "misc/thread_tools.h"
+#include "misc/ring.h"
 #include "stream.h"
 #include "options/m_option.h"
 #include "options/path.h"
@@ -50,8 +50,36 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winioctl.h>
 #include <winternl.h>
 #include <io.h>
+
+#ifdef _MSC_VER
+// Those are defined only in Windows DDK
+typedef struct _FILE_FS_DEVICE_INFORMATION {
+    DEVICE_TYPE DeviceType;
+    ULONG Characteristics;
+} FILE_FS_DEVICE_INFORMATION, *PFILE_FS_DEVICE_INFORMATION;
+
+typedef enum _FSINFOCLASS {
+    FileFsVolumeInformation          = 1,
+    FileFsLabelInformation,         // 2
+    FileFsSizeInformation,          // 3
+    FileFsDeviceInformation,        // 4
+    FileFsAttributeInformation,     // 5
+    FileFsControlInformation,       // 6
+    FileFsFullSizeInformation,      // 7
+    FileFsObjectIdInformation,      // 8
+    FileFsDriverPathInformation,    // 9
+    FileFsVolumeFlagsInformation,   // 10
+    FileFsSectorSizeInformation,    // 11
+    FileFsDataCopyInformation,      // 12
+    FileFsMetadataSizeInformation,  // 13
+    FileFsFullSizeInformationEx,    // 14
+    FileFsGuidInformation,          // 15
+    FileFsMaximumInformation
+} FS_INFORMATION_CLASS, *PFS_INFORMATION_CLASS;
+#endif
 
 #ifndef FILE_REMOTE_DEVICE
 #define FILE_REMOTE_DEVICE (0x10)
@@ -66,30 +94,40 @@ struct priv {
     bool appending;
     int64_t orig_size;
     struct mp_cancel *cancel;
+    struct mp_ring *ring;
+    pthread_t thread;
+    pthread_mutex_t lock;
+    pthread_cond_t wakeup;
+    bool read_ok, in_io, eof, terminate;
+    int64_t size;
 };
 
 // Total timeout = RETRY_TIMEOUT * MAX_RETRIES
 #define RETRY_TIMEOUT 0.2
 #define MAX_RETRIES 10
 
+static void stop_io(stream_t *s)
+{
+    struct priv *p = s->priv;
+
+    pthread_mutex_lock(&p->lock);
+    p->read_ok = false;
+    while (p->in_io)
+        pthread_cond_wait(&p->wakeup, &p->lock);
+    pthread_mutex_unlock(&p->lock);
+}
+
 static int64_t get_size(stream_t *s)
 {
     struct priv *p = s->priv;
-    struct stat st;
-    if (fstat(p->fd, &st) == 0) {
-        if (st.st_size <= 0 && !s->seekable)
-            st.st_size = -1;
-        if (st.st_size >= 0)
-            return st.st_size;
-    }
-    return -1;
+
 }
 
 static int fill_buffer(stream_t *s, void *buffer, int max_len)
 {
     struct priv *p = s->priv;
 
-#ifndef __MINGW32__
+
     if (p->use_poll) {
         int c = mp_cancel_get_fd(p->cancel);
         struct pollfd fds[2] = {
@@ -103,7 +141,9 @@ static int fill_buffer(stream_t *s, void *buffer, int max_len)
 #endif
 
     for (int retries = 0; retries < MAX_RETRIES; retries++) {
+        MP_STATS(s, "start read");
         int r = read(p->fd, buffer, max_len);
+        MP_STATS(s, "end read");
         if (r > 0)
             return r;
 
@@ -125,21 +165,61 @@ static int fill_buffer(stream_t *s, void *buffer, int max_len)
     return 0;
 }
 
+static void *read_thread(void *arg)
+{
+    stream_t *s = arg;
+    struct priv *p = s->priv;
+
+    pthread_mutex_lock(&p->lock);
+    while (!p->terminate) {
+        int a = mp_ring_available(p->ring);
+        if (p->read_ok && a >= 64 * 1024) {
+            p->in_io = true;
+            pthread_mutex_unlock(&p->lock);
+            uint8_t buf[64 * 1024];
+            int r = real_fill_buffer(s, buf, sizeof(buf));
+            r = MPMAX(r, 0);
+            pthread_mutex_lock(&p->lock);
+            p->in_io = false;
+            mp_ring_write(p->ring, buf, r);
+            p->eof = !r;
+            pthread_cond_broadcast(&p->wakeup);
+        } else {
+            pthread_cond_wait(&p->wakeup, &p->lock);
+        }
+    }
+    pthread_mutex_unlock(&p->lock);
+
+    return NULL;
+}
+
 static int write_buffer(stream_t *s, void *buffer, int len)
 {
     struct priv *p = s->priv;
+    stop_io(s);
     return write(p->fd, buffer, len);
 }
 
 static int seek(stream_t *s, int64_t newpos)
 {
     struct priv *p = s->priv;
+    stop_io(s);
+    pthread_mutex_lock(&p->lock);
+    mp_ring_reset(p->ring);
+    p->eof = false;
+    pthread_mutex_unlock(&p->lock);
     return lseek(p->fd, newpos, SEEK_SET) != (off_t)-1;
 }
 
 static void s_close(stream_t *s)
 {
     struct priv *p = s->priv;
+    stop_io(s);
+    pthread_mutex_lock(&p->lock);
+    p->terminate = true;
+    pthread_cond_broadcast(&p->wakeup);
+    pthread_mutex_unlock(&p->lock);
+    pthread_join(p->thread, NULL);
     if (p->close)
         close(p->fd);
 }
@@ -253,7 +333,7 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
         .fd = -1,
     };
     stream->priv = p;
-    stream->is_local_file = true;
+    stream->is_local_fs = true;
 
     bool strict_fs = args->flags & STREAM_LOCAL_FS_ONLY;
     bool write = stream->mode == STREAM_WRITE;
@@ -270,15 +350,27 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
 
     bool is_fdclose = strncmp(url, "fdclose://", 10) == 0;
     if (strncmp(url, "fd://", 5) == 0 || is_fdclose) {
+        stream->is_local_fs = false;
         char *begin = strstr(stream->url, "://") + 3, *end = NULL;
         p->fd = strtol(begin, &end, 0);
-        if (!end || end == begin || end[0]) {
-            MP_ERR(stream, "Invalid FD: %s\n", stream->url);
+        if (!end || end == begin || end[0] || p->fd < 0) {
+            MP_ERR(stream, "Invalid FD number: %s\n", stream->url);
             return STREAM_ERROR;
         }
+#ifdef F_SETFD
+        if (fcntl(p->fd, F_GETFD) == -1) {
+            MP_ERR(stream, "Invalid FD: %d\n", p->fd);
+            return STREAM_ERROR;
+        }
+#endif
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+        if (p->fd == STDIN_FILENO || p->fd == STDOUT_FILENO || p->fd == STDERR_FILENO)
+            return STREAM_ERROR;
+#endif
         if (is_fdclose)
             p->close = true;
     } else if (!strict_fs && !strcmp(filename, "-")) {
+        stream->is_local_fs = false;
         if (!write) {
             MP_INFO(stream, "Reading from stdin...\n");
             p->fd = 0;
@@ -306,24 +398,26 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
     }
 
     struct stat st;
+    bool is_sock_or_fifo = false;
     if (fstat(p->fd, &st) == 0) {
         if (S_ISDIR(st.st_mode)) {
             stream->is_directory = true;
-            if (!(args->flags & STREAM_LESS_NOISE))
-                MP_INFO(stream, "This is a directory - adding to playlist.\n");
         } else if (S_ISREG(st.st_mode)) {
             p->regular_file = true;
-#ifndef __MINGW32__
+#ifndef _WIN32
             // O_NONBLOCK has weird semantics on file locks; remove it.
             int val = fcntl(p->fd, F_GETFL) & ~(unsigned)O_NONBLOCK;
             fcntl(p->fd, F_SETFL, val);
 #endif
         } else {
+#ifndef __MINGW32__
+            is_sock_or_fifo = S_ISSOCK(st.st_mode) || S_ISFIFO(st.st_mode);
+#endif
             p->use_poll = true;
         }
     }
 
-#ifdef __MINGW32__
+#ifdef _WIN32
     setmode(p->fd, O_BINARY);
 #endif
 
@@ -340,7 +434,7 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
     stream->get_size = get_size;
     stream->close = s_close;
 
-    if (check_stream_network(p->fd)) {
+    if (is_sock_or_fifo || check_stream_network(p->fd)) {
         stream->streaming = true;
 #if HAVE_COCOA
         if (fcntl(p->fd, F_RDAHEAD, 0) < 0) {
@@ -355,6 +449,13 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
     p->cancel = mp_cancel_new(p);
     if (stream->cancel)
         mp_cancel_set_parent(p->cancel, stream->cancel);
+
+    pthread_mutex_init(&p->lock, NULL);
+    pthread_cond_init(&p->wakeup, NULL);
+    p->ring = mp_ring_new(stream, 1 * 64 * 1024);
+    int r = pthread_create(&p->thread, NULL, read_thread, stream);
+    if (r)
+        return -1;
 
     return STREAM_OK;
 }

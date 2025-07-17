@@ -15,8 +15,10 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#import <QuartzCore/QuartzCore.h>
+
 #include "video/out/gpu/context.h"
-#include "osdep/macOS_swift.h"
+#include "osdep/mac/swift.h"
 
 #include "common.h"
 #include "context.h"
@@ -42,11 +44,27 @@ static void mac_vk_swap_buffers(struct ra_ctx *ctx)
     [p->vo_mac swapBuffer];
 }
 
+static void mac_vk_get_vsync(struct ra_ctx *ctx, struct vo_vsync_info *info)
+{
+    struct priv *p = ctx->priv;
+    [p->vo_mac fillVsyncWithInfo:info];
+}
+
+static int mac_vk_color_depth(struct ra_ctx *ctx)
+{
+    return 0;
+}
+
 static bool mac_vk_init(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
     struct mpvk_ctx *vk = &p->vk;
     int msgl = ctx->opts.probing ? MSGL_V : MSGL_ERR;
+
+    if (!NSApp) {
+        MP_ERR(ctx, "Failed to initialize macvk context, no NSApplication initialized.\n");
+        goto error;
+    }
 
     if (!mpvk_init(vk, ctx, VK_EXT_METAL_SURFACE_EXTENSION_NAME))
         goto error;
@@ -56,7 +74,7 @@ static bool mac_vk_init(struct ra_ctx *ctx)
         goto error;
 
     VkMetalSurfaceCreateInfoEXT mac_info = {
-        .sType = VK_STRUCTURE_TYPE_MACOS_SURFACE_CREATE_INFO_MVK,
+        .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
         .pNext = NULL,
         .flags = 0,
         .pLayer = p->vo_mac.layer,
@@ -64,6 +82,8 @@ static bool mac_vk_init(struct ra_ctx *ctx)
 
     struct ra_vk_ctx_params params = {
         .swap_buffers = mac_vk_swap_buffers,
+        .get_vsync = mac_vk_get_vsync,
+        .color_depth = mac_vk_color_depth,
     };
 
     VkInstance inst = vk->vkinst->instance;
@@ -85,7 +105,14 @@ error:
 
 static bool resize(struct ra_ctx *ctx)
 {
-    return ra_vk_ctx_resize(ctx, ctx->vo->dwidth, ctx->vo->dheight);
+    struct priv *p = ctx->priv;
+
+    if (!p->vo_mac.window) {
+        return false;
+    }
+    CGSize size = p->vo_mac.window.framePixel.size;
+
+    return ra_vk_ctx_resize(ctx, (int)size.width, (int)size.height);
 }
 
 static bool mac_vk_reconfig(struct ra_ctx *ctx)
@@ -112,6 +139,7 @@ static int mac_vk_control(struct ra_ctx *ctx, int *events, int request, void *ar
 const struct ra_ctx_fns ra_ctx_vulkan_mac = {
     .type           = "vulkan",
     .name           = "macvk",
+    .description    = "mac/Vulkan (via Metal)",
     .reconfig       = mac_vk_reconfig,
     .control        = mac_vk_control,
     .init           = mac_vk_init,

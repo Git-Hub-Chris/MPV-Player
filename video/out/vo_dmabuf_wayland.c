@@ -24,7 +24,6 @@
 #include <va/va_drmcommon.h>
 #endif
 
-#include "common/global.h"
 #include "gpu/hwdec.h"
 #include "gpu/video.h"
 #include "mpv_talloc.h"
@@ -43,10 +42,7 @@
 // Generated from wayland-protocols
 #include "linux-dmabuf-unstable-v1.h"
 #include "viewporter.h"
-
-#if HAVE_WAYLAND_PROTOCOLS_1_27
 #include "single-pixel-buffer-v1.h"
-#endif
 
 // We need at least enough buffers to avoid a
 // flickering artifact in certain formats.
@@ -104,6 +100,8 @@ struct priv {
     bool destroy_buffers;
     bool force_window;
     enum hwdec_type hwdec_type;
+
+    struct mp_image_params target_params;
     uint32_t drm_format;
     uint64_t drm_modifier;
 };
@@ -137,10 +135,10 @@ static const struct wl_buffer_listener osd_buffer_listener = {
 };
 
 #if HAVE_VAAPI
-static void close_file_descriptors(VADRMPRIMESurfaceDescriptor desc)
+static void close_file_descriptors(const VADRMPRIMESurfaceDescriptor *desc)
 {
-    for (int i = 0; i < desc.num_objects; i++)
-        close(desc.objects[i].fd);
+    for (int i = 0; i < desc->num_objects; i++)
+        close(desc->objects[i].fd);
 }
 #endif
 
@@ -175,7 +173,7 @@ static bool vaapi_drm_format(struct vo *vo, struct mp_image *src)
     p->drm_modifier = desc.objects[0].drm_format_modifier;
     format = true;
 done:
-    close_file_descriptors(desc);
+    close_file_descriptors(&desc);
 #endif
     return format;
 }
@@ -203,7 +201,7 @@ static void vaapi_dmabuf_importer(struct buffer *buf, struct mp_image *src,
     }
     buf->drm_format = desc.layers[layer_no].drm_format;
     if (!ra_compatible_format(p->ctx->ra, buf->drm_format, desc.objects[0].drm_format_modifier)) {
-        MP_VERBOSE(vo, "%s(%016lx) is not supported.\n",
+        MP_VERBOSE(vo, "%s(%016" PRIx64 ") is not supported.\n",
                    mp_tag_str(buf->drm_format), desc.objects[0].drm_format_modifier);
         buf->drm_format = 0;
         goto done;
@@ -216,7 +214,7 @@ static void vaapi_dmabuf_importer(struct buffer *buf, struct mp_image *src,
     }
 
 done:
-    close_file_descriptors(desc);
+    close_file_descriptors(&desc);
 #endif
 }
 
@@ -455,7 +453,7 @@ static void create_shm_pool(struct vo *vo)
     struct vo_wayland_state *wl = vo->wl;
     struct priv *p = vo->priv;
 
-    int stride = MP_ALIGN_UP(vo->dwidth * 4, 16);
+    int stride = MP_ALIGN_UP(vo->dwidth * 4, MP_IMAGE_BYTE_ALIGN);
     size_t size = vo->dheight * stride;
     int fd = vo_wayland_allocate_memfd(vo, size);
     if (fd < 0)
@@ -493,10 +491,10 @@ static void set_viewport_source(struct vo *vo, struct mp_rect src)
     if (p->force_window)
         return;
 
-    if (wl->video_viewport && !mp_rect_equals(&p->src, &src)) {
-        wp_viewport_set_source(wl->video_viewport, src.x0 << 8,
-                               src.y0 << 8, mp_rect_w(src) << 8,
-                               mp_rect_h(src) << 8);
+    if (!mp_rect_equals(&p->src, &src)) {
+        wp_viewport_set_source(wl->video_viewport, wl_fixed_from_int(src.x0),
+                               wl_fixed_from_int(src.y0), wl_fixed_from_int(mp_rect_w(src)),
+                               wl_fixed_from_int(mp_rect_h(src)));
         p->src = src;
     }
 }
@@ -508,7 +506,7 @@ static void resize(struct vo *vo)
 
     struct mp_rect src;
     struct mp_rect dst;
-    struct mp_vo_opts *vo_opts = wl->vo_opts;
+    struct mp_vo_opts *opts = wl->opts;
 
     const int width = mp_rect_w(wl->geometry);
     const int height = mp_rect_h(wl->geometry);
@@ -526,19 +524,28 @@ static void resize(struct vo *vo)
     vo->opts->pan_x = 0;
     vo->opts->pan_y = 0;
     vo_get_src_dst_rects(vo, &src, &dst, &p->screen_osd_res);
-    int window_w = p->screen_osd_res.ml + p->screen_osd_res.mr + mp_rect_w(dst);
-    int window_h = p->screen_osd_res.mt + p->screen_osd_res.mb + mp_rect_h(dst);
-    wp_viewport_set_destination(wl->viewport, window_w, window_h);
+    int window_w = MPMAX(0, p->screen_osd_res.ml + p->screen_osd_res.mr) + mp_rect_w(dst);
+    int window_h = MPMAX(0, p->screen_osd_res.mt + p->screen_osd_res.mb) + mp_rect_h(dst);
+    wp_viewport_set_destination(wl->viewport, lround(window_w / wl->scaling_factor),
+                                lround(window_h / wl->scaling_factor));
 
     //now we restore pan for video viewport calculation
-    vo->opts->pan_x = vo_opts->pan_x;
-    vo->opts->pan_y = vo_opts->pan_y;
+    vo->opts->pan_x = opts->pan_x;
+    vo->opts->pan_y = opts->pan_y;
     vo_get_src_dst_rects(vo, &src, &dst, &p->screen_osd_res);
-    wp_viewport_set_destination(wl->video_viewport, mp_rect_w(dst), mp_rect_h(dst));
-    wl_subsurface_set_position(wl->video_subsurface, dst.x0, dst.y0);
-    wp_viewport_set_destination(wl->osd_viewport, vo->dwidth, vo->dheight);
-    wl_subsurface_set_position(wl->osd_subsurface, 0 - dst.x0, 0 - dst.y0);
+    wp_viewport_set_destination(wl->video_viewport, lround(mp_rect_w(dst) / wl->scaling_factor),
+                                                    lround(mp_rect_h(dst) / wl->scaling_factor));
+    wl_subsurface_set_position(wl->video_subsurface, lround(dst.x0 / wl->scaling_factor), lround(dst.y0 / wl->scaling_factor));
+    wp_viewport_set_destination(wl->osd_viewport, lround(vo->dwidth / wl->scaling_factor),
+                                                  lround(vo->dheight / wl->scaling_factor));
+    wl_subsurface_set_position(wl->osd_subsurface, lround((0 - dst.x0) / wl->scaling_factor), lround((0 - dst.y0) / wl->scaling_factor));
     set_viewport_source(vo, src);
+
+    mp_mutex_lock(&vo->params_mutex);
+    vo->target_params->w = mp_rect_w(dst);
+    vo->target_params->h = mp_rect_h(dst);
+    vo->target_params->rotate = (vo->params->rotate % 90) * 90;
+    mp_mutex_unlock(&vo->params_mutex);
 }
 
 static bool draw_osd(struct vo *vo, struct mp_image *cur, double pts)
@@ -585,7 +592,7 @@ done:
     return draw;
 }
 
-static void draw_frame(struct vo *vo, struct vo_frame *frame)
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *p = vo->priv;
     struct vo_wayland_state *wl = vo->wl;
@@ -596,7 +603,7 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
     if (!vo_wayland_check_visible(vo)) {
         if (frame->current)
             talloc_free(frame);
-        return;
+        return VO_FALSE;
     }
 
     if (p->destroy_buffers)
@@ -613,6 +620,7 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
         buf = buffer_get(vo, frame);
 
         if (buf && buf->frame) {
+            vo_wayland_handle_color(wl);
             struct mp_image *image = buf->frame->current;
             wl_surface_attach(wl->video_surface, buf->buffer, 0, 0);
             wl_surface_damage_buffer(wl->video_surface, 0, 0, image->w,
@@ -633,6 +641,8 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
             p->osd_surface_is_mapped = false;
         }
     }
+
+    return VO_TRUE;
 }
 
 static void flip_page(struct vo *vo)
@@ -643,7 +653,7 @@ static void flip_page(struct vo *vo)
     wl_surface_commit(wl->osd_surface);
     wl_surface_commit(wl->surface);
 
-    if (!wl->opts->disable_vsync)
+    if (!wl->opts->wl_disable_vsync)
         vo_wayland_wait_frame(wl);
 
     if (wl->use_present)
@@ -682,7 +692,7 @@ static int reconfig(struct vo *vo, struct mp_image *img)
     }
 
     if (!ra_compatible_format(p->ctx->ra, p->drm_format, p->drm_modifier)) {
-        MP_ERR(vo, "Format '%s' with modifier '(%016lx)' is not supported by"
+        MP_ERR(vo, "Format '%s' with modifier '(%016" PRIx64 ")' is not supported by"
                " the compositor.\n", mp_tag_str(p->drm_format), p->drm_modifier);
         return VO_ERROR;
     }
@@ -692,10 +702,18 @@ done:
     if (!vo_wayland_reconfig(vo))
         return VO_ERROR;
 
-    // mpv rotates clockwise but the wayland spec has counter-clockwise rotations
-    // swap 1 and 3 to match mpv's direction
-    int transform = (360 - img->params.rotate) % 360 / 90;
-    wl_surface_set_buffer_transform(vo->wl->video_surface, transform);
+    mp_mutex_lock(&vo->params_mutex);
+    p->target_params = img->params;
+    // Restore fallback layer parameters if available.
+    mp_image_params_restore_dovi_mapping(&p->target_params);
+    // Strip metadata that is not understood anyway.
+    struct pl_hdr_metadata *hdr = &p->target_params.color.hdr;
+    hdr->scene_max[0] = hdr->scene_max[1] = hdr->scene_max[2] = 0;
+    hdr->scene_avg = hdr->max_pq_y = hdr->avg_pq_y = 0;
+    vo->target_params = &p->target_params;
+    mp_mutex_unlock(&vo->params_mutex);
+
+    wl_surface_set_buffer_transform(vo->wl->video_surface, img->params.rotate / 90);
 
     // Immediately destroy all buffers if params change.
     destroy_buffers(vo);
@@ -759,7 +777,7 @@ static int preinit(struct vo *vo)
     wl_list_init(&p->buffer_list);
     wl_list_init(&p->osd_buffer_list);
     if (!p->ctx)
-       goto err;
+        goto err;
 
     assert(p->ctx->ra);
 
@@ -781,21 +799,13 @@ static int preinit(struct vo *vo)
         goto err;
     }
 
-    if (!vo->wl->viewport) {
-        MP_FATAL(vo->wl, "Compositor doesn't support the %s protocol!\n",
-                 wp_viewporter_interface.name);
-        goto err;
-    }
-
     if (vo->wl->single_pixel_manager) {
-#if HAVE_WAYLAND_PROTOCOLS_1_27
         p->solid_buffer = wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer(
             vo->wl->single_pixel_manager, 0, 0, 0, UINT32_MAX); /* R, G, B, A */
-#endif
     } else {
         int width = 1;
         int height = 1;
-        int stride = MP_ALIGN_UP(width * 4, 16);
+        int stride = MP_ALIGN_UP(width * 4, MP_IMAGE_BYTE_ALIGN);
         int fd = vo_wayland_allocate_memfd(vo, stride);
         if (fd < 0)
             goto err;
